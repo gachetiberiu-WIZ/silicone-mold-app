@@ -1,0 +1,18 @@
+# Normalize line endings across OSes. LF in the repo; Windows checkouts convert for editors via core.autocrlf.
+* text=auto eol=lf
+
+# Explicitly binary — never normalize
+*.stl binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.wasm binary
+*.zip binary
+*.gz binary
+*.tar binary
+
+# Keep shell scripts LF even on Windows
+*.sh text eol=lf

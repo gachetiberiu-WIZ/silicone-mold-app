@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PNPM_VERSION: "10.33.0"
+  NODE_VERSION: "22"
+
+jobs:
+  lint-and-typecheck:
+    name: lint + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+
+  geometry-unit:
+    name: geometry unit tests (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: geometry-failures
+          path: |
+            test-results/
+            coverage/
+          retention-days: 7
+
+  visual-regression:
+    name: visual regression (ubuntu, SwiftShader)
+    runs-on: ubuntu-latest
+    # Advisory for the first 2 weeks after first green run, then flip to required.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:visual
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: visual-regression-report
+          path: playwright-report/
+          retention-days: 3
+
+  e2e-and-smoke:
+    name: e2e + visual smoke (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-traces
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 7
+
+  build-installer:
+    name: build windows installer
+    runs-on: windows-latest
+    needs: [lint-and-typecheck, geometry-unit, e2e-and-smoke]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+        env:
+          # Signing env is set via repo secrets; left unset means unsigned dev build.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: release/*.exe
+          retention-days: 30

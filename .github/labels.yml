@@ -1,0 +1,62 @@
+# Label definitions for the repo. Apply with an action like EndBug/label-sync
+# or create manually via the GitHub UI. Milestones map 1:1 to the phases below.
+
+# Phase labels
+- name: phase-0
+  color: "0366d6"
+  description: "Research & architecture (complete)"
+- name: phase-1
+  color: "0e8a16"
+  description: "Project skeleton"
+- name: phase-2
+  color: "5319e7"
+  description: "Agent roster operations"
+- name: phase-3
+  color: "d93f0b"
+  description: "v1 core features"
+
+# Agent labels
+- name: "agent:frontend"
+  color: "fbca04"
+  description: "Assigned to frontend-dev"
+- name: "agent:geometry"
+  color: "fbca04"
+  description: "Assigned to geometry-dev"
+- name: "agent:app-shell"
+  color: "fbca04"
+  description: "Assigned to app-shell-dev"
+- name: "agent:qa"
+  color: "fbca04"
+  description: "Assigned to qa-engineer"
+- name: "agent:test"
+  color: "fbca04"
+  description: "Assigned to test-engineer"
+- name: "agent:docs"
+  color: "fbca04"
+  description: "Assigned to docs-writer"
+- name: "agent:research"
+  color: "fbca04"
+  description: "Assigned to research-analyst"
+- name: "agent:architect-review"
+  color: "fbca04"
+  description: "Assigned to architect-reviewer"
+
+# Type labels
+- name: bug
+  color: "d73a4a"
+  description: "Something isn't working"
+- name: enhancement
+  color: "a2eeef"
+  description: "New feature or request"
+- name: tech-debt
+  color: "c5def5"
+  description: "Refactoring, cleanup, paying down prior shortcuts"
+- name: blocked
+  color: "b60205"
+  description: "Cannot proceed — dependency, decision, or external input needed"
+- name: needs-human
+  color: "e99695"
+  description: "Escalated from agent to user"
+- name: good-first-issue
+  color: "7057ff"
+  description: "Small, well-scoped task suitable for onboarding"
