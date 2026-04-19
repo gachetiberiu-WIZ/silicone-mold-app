@@ -354,3 +354,74 @@ All three are natural continuations that unlock the first truly user-visible v1 
 - `[ui] Display volume readout + units toggle (mm/inches)` (frontend-dev: thin topbar, i18n keys, unit formatter)
 
 After these three land, user can import a master STL and see it rendered with its volume — the first demonstrable v1 slice.
+
+---
+
+## 2026-04-19 (PM) — Phase 3a wave 2 + CSP resolution
+
+First real user flow lives on `main`: **open app → click Open STL → pick file → master renders + camera frames to AABB + volume displays in topbar with mm/inches toggle**.
+
+### Issues opened
+
+- **#15** `[app-shell] Enable Open STL IPC: dialog + ArrayBuffer buffer roundtrip` (`agent:app-shell`)
+- **#16** `[viewer] Render loaded STL as master + frame-to-bbox camera` (`agent:frontend`)
+- **#17** `[ui] Topbar with volume readout + mm/inches toggle (i18n)` (`agent:frontend`)
+- **#21** `[shell] Widen CSP + switch renderer to manifold-3d kernel` (`agent:app-shell`) — evolved from `'wasm-unsafe-eval'` → `'unsafe-eval'` after discovery
+
+### Agent events
+
+| Agent | Task | PR | Outcome |
+|---|---|---|---|
+| `app-shell-dev` | IPC (#15) | #18 | qa-approved, merged `8560d78`. Discriminated-union typed contract, 500 MB bound. |
+| `frontend-dev` | topbar (#17) | #19 | qa-approved, merged `bff792a`. Kept Open button disabled for #16. |
+| `frontend-dev` | render (#16, retry after rate-limit) | #20 | qa-approved, merged `abcb381`. Agent flagged CSP/WASM with `needs-human`; used STLLoader + signed-tet fallback to preserve locked CSP; the kernel swap was deferred to #21. |
+| `app-shell-dev` | CSP widen (#21) | #22 draft | `'wasm-unsafe-eval'` proved insufficient at registration time (`new Function` in Embind); agent escalated with `needs-human` + `blocked`. |
+| `app-shell-dev` (retry) | finalise #22 with `'unsafe-eval'` | #22 | Permission prompt denied agent's edit of `.claude/skills/*.md`; lead took over, completed the 2-line CSP + skill-doc update in the main tree, merged `3673e9f`. |
+| `qa-engineer` ×4 | review #18/#19/#20 (+skipped #22 on lead completion) | — | All approvals as `COMMENTED` (same-identity restriction). No fires. |
+
+### PRs merged
+
+| PR | SHA | What |
+|---|---|---|
+| #18 | `8560d78` | Open STL IPC — dialog + ArrayBuffer + 500 MB bound |
+| #19 | `bff792a` | Topbar + volume readout + mm/inches toggle + i18n setup |
+| #20 | `abcb381` | Open button wired; master renders; camera frames; volume displayed |
+| #22 | `3673e9f` | CSP → `'unsafe-eval'`; renderer swapped to `src/geometry/loadStl` + `meshVolume` |
+
+### Critical finding: CSP vs Emscripten/Embind
+
+Two-step discovery:
+
+1. **Initial (AM):** `'wasm-unsafe-eval'` chosen to permit `WebAssembly.instantiate`. User approved; memory file written.
+2. **Discovered during #21:** `manifold-3d` 3.4.1's Emscripten/Embind glue calls `new Function(args, body)` to build C++ dispatch tables. `'wasm-unsafe-eval'` does NOT permit `new Function` — only `'unsafe-eval'` does.
+3. **User re-approved (PM):** widening to `'unsafe-eval'` after being presented with the finding and four alternatives (widen CSP, move manifold to main+IPC, Web Worker with its own CSP, roll back to fallback).
+
+Final locked renderer CSP:
+
+```
+default-src 'self'; script-src 'self' 'unsafe-eval'; img-src 'self' data:; style-src 'self' 'unsafe-inline'
+```
+
+Mitigations keeping this acceptable: signed bundle, no remote scripts, `contextIsolation: true`, `sandbox: true`, `nodeIntegration: false`, no user-code deserialisation surface. Industry-standard for Electron + Emscripten WASM (VS Code, Slack, Discord ship this). Documented in `.claude/skills/desktop-app-shell/SKILL.md` + memory `decision_csp_wasm.md`.
+
+### Learnings captured
+
+- **Sub-agents cannot edit `.claude/skills/**`** — permission prompts block it. Lead does skill-file edits in the main tree; future skill changes should be lead-authored docs PRs, not sub-agent scope.
+- **Stale worktrees accumulate** — 13+ dead worktrees blocked an agent spawn. Lead prunes `.claude/worktrees/` between waves (tracked as an ongoing cleanup duty).
+- **Locked-decision memos decay** — `decision_csp_wasm.md` was rewritten twice in one day as discovery narrowed the real requirement. Memos that depend on untested assumptions about third-party libraries should flag their provisional status.
+
+### Phase 3a status
+
+Core foundation complete. User has a working v1-slice: import STL → see it + volume. Remaining Phase 3a work is polish; Phase 3b–3j covers parameter UI, mold generation, export, packaging.
+
+### Proposed Phase 3b — parameter UI
+
+Next natural wave is **parameter input** (the controls the mold generator will need):
+
+- `[ui] Parameter form: wall thickness, base thickness, side count, sprue/vent diameters` (`agent:frontend`)
+- `[ui] Registration key style selector (asymmetric hemi / cone / keyhole)` (`agent:frontend`)
+- `[ui] Parameter validation + UI feedback` (`agent:frontend`)
+
+These are parallelisable. Defer mold-generation (Phase 3c) until parameters are in place.
+
+Awaiting user go-ahead.
