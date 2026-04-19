@@ -243,10 +243,19 @@ test('lay-flat: pick top face → mesh re-seats on Y=0 + vertex buffer unchanged
       return arr;
     });
     expect(afterBuffer.length).toBe(beforeBuffer.length);
+    // Compare BYTE-IDENTICALLY using a single `expect` — a per-index loop
+    // of `.toBe` over 51k entries adds ~2 ms of matcher overhead per call
+    // in Playwright's context, blowing past the 30 s test budget. Locating
+    // the first mismatching index (if any) keeps the failure message
+    // actionable without flooding the matcher with 50k calls.
+    let firstMismatch = -1;
     for (let i = 0; i < beforeBuffer.length; i++) {
-      // Exact equality — NO FP tolerance. The buffer must not be touched.
-      expect(afterBuffer[i]).toBe(beforeBuffer[i]);
+      if (afterBuffer[i] !== beforeBuffer[i]) {
+        firstMismatch = i;
+        break;
+      }
     }
+    expect(firstMismatch, 'vertex buffer was mutated at index').toBe(-1);
 
     // The group quaternion moved off identity (a rotation actually happened).
     const isRotated = await page.evaluate(() => {
