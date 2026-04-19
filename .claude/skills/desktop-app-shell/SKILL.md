@@ -74,8 +74,11 @@ Playwright tests replace `globalThis.__testDialogStub` via `electronApp.evaluate
 ## Security requirements
 
 - Never disable `contextIsolation` or enable `nodeIntegration` on any window, including diagnostic / debug windows.
-- CSP in the renderer's `index.html`: `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; img-src 'self' data:; style-src 'self' 'unsafe-inline'`.
-- `'wasm-unsafe-eval'` permits WebAssembly compilation/instantiation (`WebAssembly.compile` / `WebAssembly.instantiate`); it is **distinct from** `'unsafe-eval'`, which additionally allows `eval()`, `new Function()`, and `setTimeout(string, ...)`. Only `'wasm-unsafe-eval'` is allowed in this repo — it is required for the locked `manifold-3d` WASM kernel (ADR-002). `'unsafe-eval'` must NEVER be added. If a future library claims to need `'unsafe-eval'`, replace the library; do not widen the CSP.
+- CSP in the renderer's `index.html`: `default-src 'self'; script-src 'self' 'unsafe-eval'; img-src 'self' data:; style-src 'self' 'unsafe-inline'`.
+- Renderer `script-src` includes `'unsafe-eval'`. The narrower `'wasm-unsafe-eval'` was attempted first (history on PR #22) and proved insufficient: Emscripten/Embind in `manifold-3d` 3.4.1 calls `new Function(args, body)` at registration time to build C++ method dispatch tables, and `'wasm-unsafe-eval'` does **not** permit `new Function` — only `'unsafe-eval'` does. The locked geometry kernel (ADR-002) must run in the renderer (avoiding expensive IPC for interactive booleans and parting-plane previews), so `'unsafe-eval'` is required.
+- Accepting `'unsafe-eval'` is acceptable in this Electron context because: (1) signed build, no remote scripts loaded at runtime; (2) `contextIsolation: true`, `sandbox: true`, `nodeIntegration: false` remain enforced, so renderer has no Node access regardless of eval permissions; (3) no user-supplied code deserialisation surface — STL parsing uses typed-array reads, not string-to-code; (4) this is the standard pattern in Electron apps shipping Emscripten WASM (VS Code, Slack, Discord, etc.). User authorised this decision 2026-04-19 after the narrower path was proven insufficient.
+- Do NOT add `'wasm-unsafe-eval'` alongside `'unsafe-eval'` — the latter subsumes the former; the pair is redundant CSP noise.
+- Do NOT relax any other CSP directive (`default-src`, `img-src`, `style-src`) without an explicit user decision.
 - STL file handling: bound tri count at parse time (reject > 10 M tri by default, 500 MB file size hard limit). Never trust normals — always re-derive.
 - No remote code loading. All scripts bundled.
 - Auto-updater: `requireCodeSigningCert: true`. Unsigned updates are rejected.
