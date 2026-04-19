@@ -30,7 +30,7 @@
 // quaternion back to identity and re-apply recentering. The caller is
 // responsible for re-framing the camera afterwards (see viewport.ts).
 
-import { Box3, Quaternion, Vector3, type Mesh, type Object3D } from 'three';
+import { Box3, Matrix3, Quaternion, Vector3, type Mesh, type Object3D } from 'three';
 
 /**
  * Compute the quaternion that rotates `worldNormal` to align with the
@@ -74,10 +74,18 @@ export function quaternionToAlignFaceDown(worldNormal: Vector3): Quaternion {
  *     then compute the world-space bbox. This gives us the bbox of the
  *     rotation-only transform — any previous translation would otherwise
  *     contaminate the result.
- *   - `Box3.setFromObject(mesh)` walks the child's geometry and transforms
- *     its local bounding sphere / AABB into world space. That's exactly
- *     what we need after a quaternion mutation: the vertex buffer is
- *     untouched, but the world-space footprint has changed.
+ *   - We walk the mesh's vertex buffer and transform each vertex by the
+ *     mesh's `matrixWorld` to compute a **tight** world-space AABB.
+ *     `Box3.setFromObject(mesh)` (without `precise=true`) would instead
+ *     copy the geometry's local AABB and transform its 8 corners — which
+ *     for an arbitrary rotation over-estimates the bbox, leaving
+ *     `min.y` lower than the true minimum of the rotated vertex set. On
+ *     the mini-figurine fixture (~70 mm tall, organic), that conservative
+ *     path puts the mesh floating ~16 mm above the bed after lay-flat
+ *     instead of resting on Y=0 — the blocker on PR #34's first round.
+ *     We intentionally avoid `Box3.setFromObject(mesh, true)` (the
+ *     `precise` flag) because the per-vertex walk here is simpler and
+ *     gives the same result without relying on that opt-in flag.
  *   - Returns the offset applied (post-rotation, pre-translation) as a
  *     fresh `Vector3` so callers can derive the world-space bbox without
  *     a second scan.
@@ -89,8 +97,10 @@ export function recenterGroup(group: Object3D, mesh: Mesh): Vector3 {
   group.position.set(0, 0, 0);
   group.updateMatrixWorld(true);
 
-  // World-space bbox under the current rotation.
-  const worldBbox = new Box3().setFromObject(mesh);
+  // Tight world-space bbox under the current rotation — vertex walk,
+  // not the conservative corner-transform path `Box3.setFromObject`
+  // uses by default.
+  const worldBbox = computeWorldBoxTight(mesh);
   const center = new Vector3();
   worldBbox.getCenter(center);
 
@@ -99,6 +109,42 @@ export function recenterGroup(group: Object3D, mesh: Mesh): Vector3 {
   group.updateMatrixWorld(true);
 
   return offset;
+}
+
+/**
+ * Compute the tight world-space AABB of a mesh by walking its position
+ * buffer and transforming each vertex through `mesh.matrixWorld`.
+ *
+ * This is what `Box3.setFromObject(mesh, true)` (the `precise` flag)
+ * does internally, but we implement it here so we don't rely on callers
+ * remembering to set that flag — `recenterGroup` needs a tight bbox
+ * or the mesh ends up floating after lay-flat (see comment in
+ * `recenterGroup`).
+ *
+ * Returns an empty `Box3` if the mesh has no geometry / no position
+ * attribute — callers should be tolerant of that shape (none of the
+ * current call sites hit it).
+ */
+export function computeWorldBoxTight(mesh: Mesh): Box3 {
+  const box = new Box3();
+  const geometry = mesh.geometry;
+  if (!geometry) return box;
+  const positionAttribute = geometry.getAttribute('position');
+  if (!positionAttribute) return box;
+
+  // Ensure the world matrix reflects any pending transform changes. We
+  // update the ancestor chain (not just the mesh) because the mesh's
+  // matrixWorld is the product of group.matrixWorld × mesh.matrixLocal.
+  mesh.updateWorldMatrix(true, false);
+
+  const v = new Vector3();
+  const count = positionAttribute.count;
+  for (let i = 0; i < count; i++) {
+    v.fromBufferAttribute(positionAttribute, i);
+    v.applyMatrix4(mesh.matrixWorld);
+    box.expandByPoint(v);
+  }
+  return box;
 }
 
 /**
@@ -123,13 +169,20 @@ export function resetOrientation(group: Object3D, mesh: Mesh): Vector3 {
  * normal matrix (inverse-transpose of the world matrix's 3x3 upper
  * block) to the local normal.
  *
- * For a pure-rotation + translation transform (which is what the Master
- * group carries) the normal matrix equals the rotation part directly,
- * so this is cheap. We still go through the full normal-matrix path
- * because the scene-graph API makes no contract that the group's
- * transform will stay rotation-only — e.g. a future mirror feature
- * would introduce a reflection and the normal matrix would need to
- * invert the sign.
+ * We use `Matrix3.getNormalMatrix(matrix4)`, which gives the true
+ * inverse-transpose. The naive alternative — `Vector3.transformDirection`
+ * — only re-applies the world matrix's 3x3 block and re-normalises. That
+ * is mathematically correct for rotations (orthonormal matrices are
+ * self-inverse-transpose modulo sign) and for uniform scale, but gives
+ * the wrong answer under non-uniform scale: a local normal `(1, 1, 0)/√2`
+ * on a mesh scaled `(2, 1, 0.5)` should transform to `(1, 2, 0)/√5`
+ * via the normal matrix, but `transformDirection` yields `(2, 1, 0)/√5`.
+ *
+ * The Master group today only carries rotation + translation, so both
+ * paths produce the same result in production. We still use the full
+ * normal-matrix path so v2 additions (mirror, non-uniform display scale)
+ * don't silently regress. The non-uniform-scale regression test in
+ * `layFlat.test.ts` pins this invariant.
  */
 export function localNormalToWorld(mesh: Mesh, localNormal: Vector3): Vector3 {
   // Ensure the mesh's world matrix is current before reading it. Callers
@@ -137,11 +190,10 @@ export function localNormalToWorld(mesh: Mesh, localNormal: Vector3): Vector3 {
   // this or they get a stale normal matrix.
   mesh.updateMatrixWorld(true);
 
-  const worldNormal = localNormal.clone();
-  // Extract the 3x3 rotation/scale/shear part of the world matrix and
-  // apply its inverse-transpose to the normal. Three.js provides
-  // `Vector3.transformDirection(matrix4)` which does exactly that and
-  // re-normalises — what we want here.
-  worldNormal.transformDirection(mesh.matrixWorld);
+  // `getNormalMatrix` computes the inverse-transpose of the 3x3 upper-left
+  // block of the supplied 4x4. Mutating `normalMatrix` here is cheap — it
+  // sits on the stack frame for this call only.
+  const normalMatrix = new Matrix3().getNormalMatrix(mesh.matrixWorld);
+  const worldNormal = localNormal.clone().applyMatrix3(normalMatrix);
   return worldNormal.normalize();
 }

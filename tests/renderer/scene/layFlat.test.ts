@@ -22,6 +22,8 @@
 
 import {
   BoxGeometry,
+  BufferAttribute,
+  BufferGeometry,
   Box3,
   Group,
   Mesh,
@@ -32,6 +34,7 @@ import {
 import { describe, expect, test } from 'vitest';
 
 import {
+  computeWorldBoxTight,
   localNormalToWorld,
   quaternionToAlignFaceDown,
   recenterGroup,
@@ -291,5 +294,177 @@ describe('issue #32 AC — `quaternionToAlignFaceDown` edge cases', () => {
     // |q - identity| in quaternion space under tolerance.
     expect(q.w).toEqualWithTolerance(1, { abs: 1e-6 });
     expect(Math.hypot(q.x, q.y, q.z)).toBeLessThan(1e-6);
+  });
+});
+
+describe('localNormalToWorld — non-uniform scale regression', () => {
+  // QA follow-up from PR #34 round 1: pin the invariant that a local
+  // normal transformed under a non-uniform-scale parent returns the TRUE
+  // world normal (inverse-transpose), not the forward-transform. The
+  // Master group in production today only carries rotation + translation,
+  // but a future mirror / display-scale feature would regress silently
+  // without this test.
+
+  test('applies the inverse-transpose (normal matrix) under non-uniform parent scale', () => {
+    // Build a mesh with a diagonal face normal (1, 1, 0)/√2 — picked
+    // because the correct and incorrect results differ clearly under
+    // `scale.set(2, 1, 0.5)`.
+    const group = new Group();
+    group.scale.set(2, 1, 0.5);
+    const geom = new BoxGeometry(1, 1, 1);
+    const mesh = new Mesh(geom, new MeshBasicMaterial());
+    group.add(mesh);
+    group.updateMatrixWorld(true);
+
+    const localNormal = new Vector3(1, 1, 0).normalize();
+    const worldN = localNormalToWorld(mesh, localNormal);
+
+    // Under scale (sx, sy, sz), the inverse-transpose is diag(1/sx, 1/sy, 1/sz),
+    // so local (1,1,0)/√2 → (1/2, 1, 0) → normalised (1, 2, 0)/√5.
+    // The naive `transformDirection` path would give (2, 1, 0)/√5 instead.
+    const invSqrt5 = 1 / Math.sqrt(5);
+    expect({ x: worldN.x, y: worldN.y, z: worldN.z }).toEqualWithTolerance(
+      { x: 1 * invSqrt5, y: 2 * invSqrt5, z: 0 },
+      { abs: 1e-6 },
+    );
+    // Unit length.
+    expect(Math.hypot(worldN.x, worldN.y, worldN.z)).toEqualWithTolerance(
+      1,
+      { abs: 1e-6 },
+    );
+  });
+
+  test('still correct under pure rotation (regression — rotation-only must not change)', () => {
+    // Safety net: the fix (switch to full normal matrix) must not
+    // regress the rotation-only path. Same 90°-Z rotation as the
+    // existing `localNormalToWorld` test, but asserted alongside the
+    // non-uniform-scale case so both branches are covered in one spot.
+    const group = new Group();
+    group.quaternion.setFromAxisAngle(new Vector3(0, 0, 1), Math.PI / 2);
+    const geom = new BoxGeometry(1, 1, 1);
+    const mesh = new Mesh(geom, new MeshBasicMaterial());
+    group.add(mesh);
+    group.updateMatrixWorld(true);
+
+    const worldN = localNormalToWorld(mesh, new Vector3(1, 0, 0));
+    expect({ x: worldN.x, y: worldN.y, z: worldN.z }).toEqualWithTolerance(
+      { x: 0, y: 1, z: 0 },
+      { abs: 1e-6 },
+    );
+  });
+});
+
+describe('computeWorldBoxTight', () => {
+  // This helper is the fix for PR #34's windows-e2e blocker: the old
+  // `recenterGroup` used `Box3.setFromObject(mesh)` which — without the
+  // `precise=true` flag — transforms the geometry's local AABB's 8 corners
+  // and unions them. For a non-axis-aligned rotation that over-estimates
+  // the world bbox, leaving the mesh floating above Y=0 after recenter.
+  // `computeWorldBoxTight` walks vertices directly, giving the tight bbox.
+
+  test('matches the conservative box for axis-aligned rotations (180° around X)', () => {
+    // A 180° X-axis rotation maps (x, y, z) → (x, -y, -z). The tight bbox
+    // and the conservative corner-transform bbox are identical in this
+    // case (the AABB corners are themselves the extrema), so both paths
+    // must agree.
+    const { group, mesh } = buildGroupWithBox();
+    group.quaternion.setFromAxisAngle(new Vector3(1, 0, 0), Math.PI);
+    group.updateMatrixWorld(true);
+
+    const tight = computeWorldBoxTight(mesh);
+    const conservative = new Box3().setFromObject(mesh);
+
+    expect(tight.min.x).toEqualWithTolerance(conservative.min.x, { abs: 1e-6 });
+    expect(tight.min.y).toEqualWithTolerance(conservative.min.y, { abs: 1e-6 });
+    expect(tight.min.z).toEqualWithTolerance(conservative.min.z, { abs: 1e-6 });
+    expect(tight.max.x).toEqualWithTolerance(conservative.max.x, { abs: 1e-6 });
+    expect(tight.max.y).toEqualWithTolerance(conservative.max.y, { abs: 1e-6 });
+    expect(tight.max.z).toEqualWithTolerance(conservative.max.z, { abs: 1e-6 });
+  });
+
+  test('is TIGHTER than Box3.setFromObject for an off-diagonal mesh under arbitrary rotation', () => {
+    // Reproduces the PR #34 blocker mechanism: a mesh whose vertex set
+    // does NOT coincide with its AABB corners (a tetrahedron is the
+    // minimal example), rotated by an off-axis angle. The conservative
+    // bbox over-estimates; the tight bbox is strictly smaller.
+    const group = new Group();
+    const geom = new BufferGeometry();
+    // Tetrahedron with vertices inside the unit cube but not at corners.
+    // AABB corners = ±0.5, but no vertex sits AT (±0.5, ±0.5, ±0.5).
+    const verts = new Float32Array([
+      // Triangle 1
+      0.5, 0.0, 0.0,
+      0.0, 0.5, 0.0,
+      0.0, 0.0, 0.5,
+      // Triangle 2
+      0.5, 0.0, 0.0,
+      0.0, 0.0, 0.5,
+      0.0, -0.5, 0.0,
+      // Triangle 3
+      0.0, 0.5, 0.0,
+      -0.5, 0.0, 0.0,
+      0.0, 0.0, 0.5,
+      // Triangle 4
+      -0.5, 0.0, 0.0,
+      0.0, -0.5, 0.0,
+      0.0, 0.0, 0.5,
+    ]);
+    geom.setAttribute('position', new BufferAttribute(verts, 3));
+    geom.computeBoundingBox();
+    const mesh = new Mesh(geom, new MeshBasicMaterial());
+    group.add(mesh);
+    // 45° rotation around Y — off-axis, so the conservative 8-corner
+    // transform over-estimates the rotated-vertex bbox.
+    group.quaternion.setFromAxisAngle(new Vector3(0, 1, 0), Math.PI / 4);
+    group.updateMatrixWorld(true);
+
+    const tight = computeWorldBoxTight(mesh);
+    const conservative = new Box3().setFromObject(mesh);
+
+    // Tight must be contained within conservative, and STRICTLY smaller
+    // in at least one extent (the X or Z axis for a Y-rotation).
+    expect(tight.min.x).toBeGreaterThanOrEqual(conservative.min.x - 1e-9);
+    expect(tight.max.x).toBeLessThanOrEqual(conservative.max.x + 1e-9);
+    expect(tight.min.z).toBeGreaterThanOrEqual(conservative.min.z - 1e-9);
+    expect(tight.max.z).toBeLessThanOrEqual(conservative.max.z + 1e-9);
+    const tightXSize = tight.max.x - tight.min.x;
+    const conservativeXSize = conservative.max.x - conservative.min.x;
+    expect(tightXSize).toBeLessThan(conservativeXSize);
+  });
+
+  test('returns empty Box3 on a mesh with no position attribute', () => {
+    const mesh = new Mesh(new BufferGeometry(), new MeshBasicMaterial());
+    const box = computeWorldBoxTight(mesh);
+    expect(box.isEmpty()).toBe(true);
+  });
+});
+
+describe('issue #32 AC #12 — recenterGroup on arbitrary rotation (tight bbox)', () => {
+  // Direct regression for the windows-e2e blocker: after recenterGroup
+  // on a group with an arbitrary rotation, the TRUE (vertex-walk) world
+  // min.y of the mesh must be ≈ 0 within 1e-4 mm — same tolerance the
+  // E2E spec uses on the real mini-figurine.
+
+  test('arbitrary rotation → vertex-walk world min.y is 0 within 1e-4 mm', () => {
+    const { group, mesh } = buildGroupWithBox();
+    // Compose two rotations that do NOT align with the AABB — this is
+    // the regime where the old `Box3.setFromObject` path left the mesh
+    // floating above zero.
+    const q1 = new Quaternion().setFromAxisAngle(
+      new Vector3(1, 0, 0),
+      Math.PI / 3,
+    );
+    const q2 = new Quaternion().setFromAxisAngle(
+      new Vector3(0, 1, 1).normalize(),
+      Math.PI / 5,
+    );
+    group.quaternion.copy(q1).premultiply(q2);
+
+    recenterGroup(group, mesh);
+
+    // Walk the vertex buffer exactly like the E2E spec does and verify
+    // the minimum world-space Y is 0.
+    const tight = computeWorldBoxTight(mesh);
+    expect(tight.min.y).toEqualWithTolerance(0, { abs: 1e-4 });
   });
 });

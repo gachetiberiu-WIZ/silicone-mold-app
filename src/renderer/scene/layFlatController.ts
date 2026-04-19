@@ -32,7 +32,6 @@
 // the scene graph stays quiet when the mode is off.
 
 import {
-  Box3,
   BufferAttribute,
   BufferGeometry,
   DoubleSide,
@@ -48,7 +47,12 @@ import {
 import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
 import { frameToBox3 } from './camera';
-import { quaternionToAlignFaceDown, recenterGroup, resetOrientation } from './layFlat';
+import {
+  computeWorldBoxTight,
+  quaternionToAlignFaceDown,
+  recenterGroup,
+  resetOrientation,
+} from './layFlat';
 import { pickFaceUnderPointer, type PickResult } from './picking';
 
 /** Accent blue matching the app's CSS `--accent` variable (`#4a9eff`). */
@@ -319,8 +323,11 @@ export function createLayFlatController(
     recenterGroup(group, mesh);
 
     // Re-frame the camera to the NEW world-space AABB (issue AC: "after
-    // commit, re-frame to the new world AABB").
-    const worldBbox = new Box3().setFromObject(mesh);
+    // commit, re-frame to the new world AABB"). Use the vertex-walk bbox
+    // — `Box3.setFromObject` without `precise=true` transforms the local
+    // AABB's 8 corners, which for an arbitrary rotation over-estimates
+    // the world bbox and would leave the camera framed to the wrong size.
+    const worldBbox = computeWorldBoxTight(mesh);
     frameToBox3(camera, controls, worldBbox);
 
     // Belt-and-braces: re-normalise the quaternion post-compose to keep it
@@ -340,7 +347,9 @@ export function createLayFlatController(
     if (!group) return;
 
     resetOrientation(group, mesh);
-    const worldBbox = new Box3().setFromObject(mesh);
+    // Tight vertex-walk bbox — see `commit()` for why we don't use
+    // `Box3.setFromObject`.
+    const worldBbox = computeWorldBoxTight(mesh);
     frameToBox3(camera, controls, worldBbox);
 
     // Reset does not force picking mode on or off — the user might want to
