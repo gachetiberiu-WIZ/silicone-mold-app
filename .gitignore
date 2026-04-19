@@ -55,3 +55,6 @@ desktop.ini
 *.p12
 *.key
 signing/
+
+# Claude Agent tool worktrees (isolated sub-agent workspaces)
+.claude/worktrees/

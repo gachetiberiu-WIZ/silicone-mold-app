@@ -1,0 +1,16 @@
+{
+  "name": "mini-figurine",
+  "triCount": 5798,
+  "volume_mm3": 127451.6,
+  "surfaceArea_mm2": 34572.5,
+  "boundingBoxMin": [267.621, 1094.332, -0.0003],
+  "boundingBoxMax": [351.891, 1163.565, 109.724],
+  "dimensions_mm": [84.270, 69.233, 109.724],
+  "isManifoldExpected": "to-be-measured",
+  "centered": false,
+  "notes": "Not origin-centered; loaders must apply a centering transform before use. Produced by Rhinoceros (binary STL header starts 'Rhino').",
+  "source": "Original work by Tiberiu Gache (gache.tiberiu@gmail.com), contributed 2026-04-19.",
+  "license": "CC-BY-SA-4.0",
+  "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+  "attribution": "\"mini-figurine.stl\" by Tiberiu Gache, licensed under CC BY-SA 4.0."
+}
