@@ -16,7 +16,7 @@
 //      spec. Does NOT enable test-hook exposure.
 
 import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import type { PerspectiveCamera, Scene, WebGLRenderer } from 'three';
+import type { Mesh, PerspectiveCamera, Scene, WebGLRenderer } from 'three';
 
 import { createCamera, computeAspect, frameToBox3 } from './camera';
 import { createControls } from './controls';
@@ -26,6 +26,7 @@ import {
   OVERLAY_SIZE_PX,
   type AxesGizmoOverlay,
 } from './gizmos';
+import { createLayFlatController, type LayFlatController } from './layFlatController';
 import { createRenderer, resizeRendererToContainer } from './renderer';
 import { createScene } from './index';
 import { setMaster as sceneSetMaster, type MasterResult } from './master';
@@ -54,6 +55,22 @@ export interface MountedViewport {
    * readout).
    */
   setMaster: (buffer: ArrayBuffer) => Promise<MasterResult>;
+  /**
+   * Enter "Place on face" (lay-flat) mode. Pointer move highlights the
+   * face under the cursor; click commits a rotation so that face lies
+   * flat on the print bed. No-op if no master is loaded. Escape key exits.
+   */
+  enableFacePicking: () => void;
+  /** Exit "Place on face" mode. Safe to call when already inactive. */
+  disableFacePicking: () => void;
+  /** Whether face-picking mode is currently active. */
+  isFacePickingActive: () => boolean;
+  /**
+   * Reset the master's orientation to identity and re-run the auto-center
+   * pass. The camera is re-framed to the restored AABB. No-op when no
+   * master is loaded.
+   */
+  resetOrientation: () => void;
   /** Stop RAF, detach listeners, dispose GPU resources, remove the canvas. */
   dispose: () => void;
 }
@@ -78,6 +95,19 @@ export function mount(container: HTMLElement): MountedViewport {
 
   // Initial size sync after everything is wired.
   syncSize(renderer, camera, container);
+
+  // Lay-flat (Place-on-face) controller. Widgets attach to the scene's
+  // 'widgets' group (created by createScene). The controller is idle
+  // until `enableFacePicking()` is called. It holds a getter reference
+  // to the current master so swap-master (below) keeps it working.
+  let layFlatMasterMesh: Mesh | null = null;
+  const layFlat: LayFlatController = createLayFlatController({
+    scene,
+    camera,
+    controls,
+    canvas,
+    getMasterMesh: () => layFlatMasterMesh,
+  });
 
   // Resize: a ResizeObserver on the container catches every layout change
   // (window resize, devtools dock, split-pane drag). Falls back to
@@ -152,7 +182,12 @@ export function mount(container: HTMLElement): MountedViewport {
   });
 
   const setMaster = async (buffer: ArrayBuffer): Promise<MasterResult> => {
+    // Exit any active lay-flat session before swapping the master — the old
+    // mesh (and its BVH) is about to be disposed, and stale cursor listeners
+    // would point at freed GPU resources.
+    if (layFlat.isActive()) layFlat.disable();
     const result = await sceneSetMaster(scene, buffer);
+    layFlatMasterMesh = result.mesh;
     frameToBox3(camera, controls, result.bbox);
     // Signal test hooks, then install a fresh promise so a second load
     // is independently awaitable.
@@ -204,6 +239,7 @@ export function mount(container: HTMLElement): MountedViewport {
     } else {
       window.removeEventListener('resize', onWindowResize);
     }
+    layFlat.dispose();
     controls.dispose();
     renderer.dispose();
     if (canvas.parentElement === container) {
@@ -218,6 +254,10 @@ export function mount(container: HTMLElement): MountedViewport {
     controls,
     axes,
     setMaster,
+    enableFacePicking: () => layFlat.enable(),
+    disableFacePicking: () => layFlat.disable(),
+    isFacePickingActive: () => layFlat.isActive(),
+    resetOrientation: () => layFlat.reset(),
     dispose,
   };
 
