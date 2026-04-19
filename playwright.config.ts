@@ -21,8 +21,28 @@ import { defineConfig, devices, type PlaywrightTestConfig } from '@playwright/te
 
 const CI = !!process.env.CI;
 
+/**
+ * Static-serve the built renderer so visual specs can navigate to it over
+ * http:// (Chromium blocks `<script type="module">` fetches from `file://`
+ * due to CORS). `vite preview` serves `dist/renderer` read-only — the
+ * package-level `test:visual` script runs `build:renderer:test` first.
+ *
+ * The webServer is global but cheap (≈ tens of ms to start). Electron e2e
+ * tests ignore it; they launch their own app.
+ */
+const VISUAL_PREVIEW_PORT = 5174;
+const VISUAL_PREVIEW_URL = `http://localhost:${VISUAL_PREVIEW_PORT}`;
+
 const config: PlaywrightTestConfig = {
   testDir: './tests',
+  webServer: {
+    command: `pnpm exec vite preview --port ${VISUAL_PREVIEW_PORT} --strictPort --mode test`,
+    url: VISUAL_PREVIEW_URL,
+    reuseExistingServer: !CI,
+    timeout: 30_000,
+    stdout: 'ignore',
+    stderr: 'pipe',
+  },
   // Keep the two test suites separated by path so project filtering is clean.
   fullyParallel: false,
   forbidOnly: CI,
@@ -62,10 +82,16 @@ const config: PlaywrightTestConfig = {
         viewport: { width: 1280, height: 800 },
         deviceScaleFactor: 1,
         hasTouch: false,
-        // Deterministic WebGL via SwiftShader — ADR-003 §B.
+        // Deterministic WebGL via SwiftShader (ADR-003 §B). Chromium
+        // ≥ 124 routes WebGL through ANGLE, so `--use-angle=swiftshader`
+        // is the correct selector; `--use-gl=swiftshader` is a legacy
+        // alias that fails with "Shader Error 0" on the line-based
+        // materials this scene renders (GridHelper, AxesHelper). Both
+        // flags are left unsafe-enabled for older/newer channel coverage.
         launchOptions: {
           args: [
-            '--use-gl=swiftshader',
+            '--use-angle=swiftshader',
+            '--use-gl=angle',
             '--enable-unsafe-swiftshader',
             '--disable-gpu-vsync',
             '--disable-renderer-backgrounding',

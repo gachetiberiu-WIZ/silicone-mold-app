@@ -1,0 +1,68 @@
+// src/renderer/scene/index.ts
+//
+// Builds the main Three.js scene graph per `.claude/skills/three-js-viewer/
+// SKILL.md`:
+//
+//   Scene
+//   ├── Origin (Group, tag: 'origin')
+//   │   └── GridHelper (tag: 'grid-major' + 'grid-minor' child)
+//   ├── Master (Group, tag: 'master')   ← populated by later PRs
+//   ├── Mold   (Group, tag: 'mold', visible=false)   ← populated later
+//   └── Widgets (Group, tag: 'widgets')   ← populated later
+//
+// Lights: one HemisphereLight + one DirectionalLight from +Y+X, per the
+// skill's "no ambient-only scenes" rule.
+
+import {
+  DirectionalLight,
+  Group,
+  HemisphereLight,
+  Scene,
+} from 'three';
+import { SCENE_BACKGROUND } from './renderer';
+import { createGrid } from './gizmos';
+
+export function createScene(): Scene {
+  const scene = new Scene();
+
+  // Background tracks the renderer clear colour. Set here too so test
+  // environments that clear via the scene background (rare, but possible
+  // for render-to-texture paths) still see the right colour.
+  (scene as unknown as { background: number }).background = SCENE_BACKGROUND;
+
+  // Lights — hemisphere + directional. Hemisphere provides sky/ground tint
+  // so surfaces read as lit even without shadow mapping; directional adds
+  // a primary highlight direction for form definition.
+  const hemi = new HemisphereLight(
+    /* skyColor  */ 0xb0c4de,
+    /* groundColor */ 0x202830,
+    /* intensity */ 0.85,
+  );
+  hemi.position.set(0, 1, 0);
+  scene.add(hemi);
+
+  const dir = new DirectionalLight(0xffffff, 0.6);
+  dir.position.set(50, 80, 30);
+  scene.add(dir);
+
+  // Scene graph scaffolding — future PRs populate Master / Mold / Widgets.
+  const origin = new Group();
+  origin.userData['tag'] = 'origin';
+  origin.add(createGrid());
+  scene.add(origin);
+
+  const master = new Group();
+  master.userData['tag'] = 'master';
+  scene.add(master);
+
+  const mold = new Group();
+  mold.userData['tag'] = 'mold';
+  mold.visible = false;
+  scene.add(mold);
+
+  const widgets = new Group();
+  widgets.userData['tag'] = 'widgets';
+  scene.add(widgets);
+
+  return scene;
+}
