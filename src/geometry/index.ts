@@ -17,3 +17,7 @@ export {
 } from './adapters';
 export { loadStl, type LoadedStl } from './loadStl';
 export { meshVolume } from './volume';
+export {
+  generateSiliconeShell,
+  type SiliconeShellResult,
+} from './generateMold';
