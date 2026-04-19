@@ -1,24 +1,46 @@
-import { defineConfig } from 'vitest/config';
-import { resolve } from 'node:path';
+// vitest.config.ts
+//
+// Unit-test configuration. Scopes Vitest to `tests/**/*.test.ts` and wires in
+// the global setup file that registers `toEqualWithTolerance`.
+//
+// Coverage provider is v8. Per ADR-003 §E the 70% line threshold on the
+// geometry module is flagged but *not* enforced until any `src/geometry/`
+// code actually lands — enforcing now would hard-fail CI on an empty target.
+// The `include` glob pins the scope so we'll enforce the moment files land.
 
-/**
- * Vitest config. Picked up by `pnpm test`.
- *
- * - Uses the project root as test root so `tests/unit/**` is discovered.
- * - `passWithNoTests: true` so the app-shell skeleton passes before any
- *   geometry/UI unit tests exist. Flip to false once we have real coverage.
- */
+import { defineConfig } from 'vitest/config';
+import { fileURLToPath } from 'node:url';
+
+const r = (p: string) => fileURLToPath(new URL(p, import.meta.url));
+
 export default defineConfig({
   resolve: {
     alias: {
-      '@': resolve(__dirname, 'src'),
-      '@shared': resolve(__dirname, 'shared'),
+      '@': r('./src'),
+      '@fixtures': r('./tests/fixtures'),
     },
   },
   test: {
-    include: ['tests/unit/**/*.{test,spec}.ts', 'src/**/*.{test,spec}.ts'],
-    exclude: ['tests/e2e/**', 'node_modules/**', 'dist/**', 'release/**'],
-    passWithNoTests: true,
+    include: ['tests/**/*.test.ts'],
+    // Playwright specs live under tests/visual/**/*.spec.ts; keep them out of Vitest.
+    exclude: [
+      '**/node_modules/**',
+      '**/dist/**',
+      'tests/visual/**',
+      'tests/e2e/**',
+    ],
+    setupFiles: ['./tests/setup.ts'],
     environment: 'node',
+    globals: false,
+    reporters: process.env.CI ? ['default', 'github-actions'] : ['default'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html', 'lcov'],
+      include: ['src/geometry/**'],
+      // Flagged but NOT enforced yet — no geometry code shipped.
+      // Once src/geometry/** lands, flip these to `thresholds: { lines: 70, ... }`.
+      // See ADR-003 §E and issue #1 acceptance criteria.
+      reportOnFailure: true,
+    },
   },
 });

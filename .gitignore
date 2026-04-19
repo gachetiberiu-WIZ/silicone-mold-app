@@ -22,6 +22,11 @@ playwright-report/
 playwright/.cache/
 __screenshots__/actual/
 __screenshots__/diff/
+# Only Linux-CI goldens are authoritative (see ADR-003). Devs' local runs
+# drop screenshots under their own platform dir — these are for local
+# fast-feedback only, not ground truth.
+tests/__screenshots__/win32-ci/
+tests/__screenshots__/darwin-ci/
 
 # Logs
 logs/
