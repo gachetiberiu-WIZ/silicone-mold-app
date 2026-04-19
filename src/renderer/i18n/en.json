@@ -29,5 +29,11 @@
     "draft": "Draft angle",
     "reset": "Reset to defaults",
     "invalid": "Out of range ({{min}}–{{max}})"
+  },
+  "layFlat": {
+    "toggle": "Place on face",
+    "toggleHint": "Click a face on the mesh to lay it flat on the print bed (Esc to cancel)",
+    "reset": "Reset orientation",
+    "resetHint": "Restore the mesh to its original STL orientation"
   }
 }

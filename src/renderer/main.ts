@@ -11,6 +11,7 @@
  * tsconfig include).
  */
 
+import { LAY_FLAT_ACTIVE_EVENT } from './scene/layFlatController';
 import { mount, type MountedViewport } from './scene/viewport';
 import { initI18n } from './i18n';
 import {
@@ -22,11 +23,16 @@ import {
   type ParameterPanelApi,
 } from './ui/parameters/panel';
 import { mountTopbar, type TopbarApi } from './ui/topbar';
+import {
+  mountPlaceOnFaceToggle,
+  type PlaceOnFaceToggleApi,
+} from './ui/placeOnFaceToggle';
 
 let topbar: TopbarApi | null = null;
 let viewport: MountedViewport | null = null;
 let parametersStore: ParametersStore | null = null;
 let parameterPanel: ParameterPanelApi | null = null;
+let placeOnFace: PlaceOnFaceToggleApi | null = null;
 
 async function hydrateVersion(): Promise<void> {
   // The topbar owns the `[data-testid="app-version"]` element now; keep
@@ -50,6 +56,34 @@ function mountUi(): void {
   }
   topbar = mountTopbar(header);
 
+  // Mount the "Place on face" + "Reset orientation" buttons inside the
+  // topbar center slot (next to Open STL). The topbar builds that slot
+  // as a flex row, so appending here flows naturally.
+  const center = header.querySelector<HTMLElement>('.topbar__center');
+  if (center) {
+    placeOnFace = mountPlaceOnFaceToggle(center, {
+      onToggle(active) {
+        if (!viewport) return;
+        if (active) viewport.enableFacePicking();
+        else viewport.disableFacePicking();
+      },
+      onReset() {
+        if (!viewport) return;
+        viewport.resetOrientation();
+      },
+    });
+
+    // Mirror viewport-side state transitions (auto-exit-on-commit,
+    // Escape-key exit) back into the toggle button so its pressed state
+    // never drifts from the controller's truth.
+    document.addEventListener(LAY_FLAT_ACTIVE_EVENT, (ev) => {
+      const detail = (ev as CustomEvent<boolean>).detail;
+      if (typeof detail === 'boolean' && placeOnFace) {
+        placeOnFace.setActive(detail);
+      }
+    });
+  }
+
   // Expose on the test-hook surface so visual specs can drive the UI
   // deterministically (set a known volume, flip units) without clicking.
   if (process.env.NODE_ENV === 'test') {
@@ -58,6 +92,7 @@ function mountUi(): void {
     };
     const hooks = w.__testHooks ?? {};
     hooks['topbar'] = topbar;
+    if (placeOnFace) hooks['placeOnFace'] = placeOnFace;
     w.__testHooks = hooks;
   }
 }
@@ -153,6 +188,13 @@ async function handleOpenStl(button: HTMLButtonElement): Promise<void> {
     const result = await viewport.setMaster(response.buffer);
     if (topbar) {
       topbar.setVolume(result.volume_mm3);
+    }
+    // Enable the lay-flat controls now that a master is in the scene.
+    // `setMaster` resets the master group to identity rotation, so the
+    // toggle must read "not active" regardless of its previous state.
+    if (placeOnFace) {
+      placeOnFace.setEnabled(true);
+      placeOnFace.setActive(false);
     }
   } catch (err) {
     console.error('[open-stl] unexpected error during load:', err);
