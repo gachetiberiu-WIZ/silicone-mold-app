@@ -290,3 +290,67 @@ All blockers clear:
 - ⏳ GitHub MCP still not exposed — not critical (gh CLI covers all ops)
 
 **Awaiting user go-ahead** to open Phase 3a issues and spawn the first geometry-dev + frontend-dev agents.
+
+---
+
+## 2026-04-19 — Phase 3a first wave (foundations)
+
+Three parallel tasks, three disjoint scopes, full qa loop on each. Lead exercised granted merge autonomy (admin-bypass squash-merge after qa approval + required CI green).
+
+### Issues opened
+
+- **#8** `[test] Procedural fixture generator: unit-cube, sphere-icos-3, torus-32x16` (labels: `phase-3`, `agent:test`)
+- **#9** `[geometry] meshVolume() + loadStl() smoke against unit-cube` (labels: `phase-3`, `agent:geometry`)
+- **#10** `[ui] Three.js viewer skeleton: scene, camera, axes, grid, orbit` (labels: `phase-3`, `agent:frontend`)
+
+### Agent events
+
+| Agent | Task | Duration | Outcome |
+|---|---|---|---|
+| `test-engineer` | procedural fixtures (#8) | ~9 min | PR #12. 56 tests passing, byte-stable regen verified. Sidecar accuracy within tolerances. Scope clean. |
+| `geometry-dev` | load+volume smoke (#9) | ~7 min | PR #11. Coverage 91% on `src/geometry/**`. Flagged `isManifold()` API gap — replaced with `status() === 'NoError' && !isEmpty()` (qa verified against upstream `.d.ts`). mini-figurine repair delta 0.72% surfaced via `console.warn` per skill contract. |
+| `frontend-dev` | viewer skeleton (#10) | ~16 min | PR #13. Three gray-area touches (package.json / vite / playwright) all justified by qa: script chain for test-mode build, `NODE_ENV` replace in test, `webServer` + ANGLE-routed SwiftShader for visual tests. Tree-shake verified: no `__testHooks` in prod bundle. |
+| `qa-engineer` #3 | review PR #11 | ~4 min | Approved on merit; isManifold replacement verified. |
+| `qa-engineer` #4 | review PR #12 | ~4 min | Approved on merit; byte-stable regen confirmed. |
+| `qa-engineer` #5 | review PR #13 | ~5 min | Approved on merit; all three gray-area scope touches justified. |
+
+No fires. Five sub-agent spawns, five clean outputs on first try (one spawn required a retry after a transient worktree-creation glitch).
+
+### PRs merged
+
+| PR | Author | Merged | SHA | Notes |
+|---|---|---|---|---|
+| #11 | `geometry-dev` | 2026-04-19 | `b1d7e08` | 3/3 required CI checks green. First real geometry code: `src/geometry/{initManifold,adapters,loadStl,volume,index}.ts`. |
+| #12 | `test-engineer` | 2026-04-19 | `946a720` | 3/3 required CI checks green. `tests/fixtures/meshes/{generate.ts, regen.mjs, regen.test.ts}` + 3 fixtures + sidecars. |
+| #13 | `frontend-dev` | 2026-04-19 | `89b6011` | 3/3 required CI checks green. `src/renderer/scene/{index,camera,controls,gizmos,renderer,viewport}.ts`. Tree-shake guard working. |
+
+### Code landed
+
+- `src/geometry/` — load STL, Manifold↔BufferGeometry adapters, `meshVolume()`, init helper. 91% line coverage.
+- `src/renderer/scene/` — `mount(container)` returning `{ scene, camera, renderer, controls, dispose }`. Y-up, 1 unit = 1 mm, fixed camera params. Ready for mesh to be added.
+- `tests/fixtures/meshes/` — three procedural fixtures + sidecars. `pnpm test:fixtures-regen` is byte-stable.
+- `tests/geometry/` — unit tests for adapters, loadStl, volume. All green.
+- `tests/visual/` — empty-scene + scene-empty-axes (overlapping; consolidation is a Phase 3a-follow-up).
+
+### Phase 3a what's NOT done yet
+
+- **STL → viewport wiring.** The Open STL button in the renderer is still disabled. The pipeline exists (`window.api.openStl` → `loadStl(buffer)` → `scene.add(mesh)`) but isn't wired. This is the obvious next issue.
+- **Volume panel.** `meshVolume()` returns mm³; nothing displays it yet.
+- **Frame-to-mesh.** Camera currently frames a unit cube; needs to frame the loaded mesh's AABB on open.
+- **Visual goldens committed.** CI still produces them on first run; we haven't pulled them from artifact + committed yet.
+
+### Follow-ups carried forward
+
+1. **Consolidate `empty-scene.spec.ts` + `scene-empty-axes.spec.ts`** — overlapping intent noted by qa. Small cleanup issue.
+2. **Flip `visual-regression` off `continue-on-error: true`** in ~2 weeks after first green golden run. Calendar reminder: 2026-05-03.
+3. **Commit `tests/__screenshots__/linux-ci/*.png` goldens** from CI artifact once one test run is stable (likely after #14-series PRs land).
+
+### Phase 3a next wave — proposed issues
+
+All three are natural continuations that unlock the first truly user-visible v1 flow:
+
+- `[ui] Wire Open STL button → IPC → renderer` (frontend-dev + app-shell-dev: file picker, binary ArrayBuffer round-trip, pass to scene)
+- `[geometry+ui] Render loaded mesh in viewport + frame-to-bbox camera` (geometry-dev + frontend-dev: mesh material, add/remove from scene, camera frame)
+- `[ui] Display volume readout + units toggle (mm/inches)` (frontend-dev: thin topbar, i18n keys, unit formatter)
+
+After these three land, user can import a master STL and see it rendered with its volume — the first demonstrable v1 slice.
