@@ -11,10 +11,34 @@ export interface OpenStlRequest {
   multi?: boolean;
 }
 
-export interface OpenStlResponse {
-  canceled: boolean;
-  paths: string[];
-}
+/**
+ * Typed error codes surfaced from `file:open-stl`.
+ *
+ * Kept small and string-literal so the renderer can exhaustively switch on it
+ * to pick a localised message. When adding a new variant, update every
+ * consumer — the TS compiler will flag missing cases.
+ */
+export type OpenStlError = 'file-too-large' | 'read-failed';
+
+/**
+ * Discriminated-union return type for `file:open-stl`.
+ *
+ * Narrowing rules (critical — the renderer relies on these):
+ * - `result.canceled === true` → user closed the native dialog, no other
+ *   fields are present.
+ * - `result.canceled === false && 'error' in result` → the main process
+ *   selected a file but failed to honour the request (e.g. oversized).
+ * - `result.canceled === false && !('error' in result)` → success; `name`
+ *   (basename) and `buffer` (ArrayBuffer of file bytes) are guaranteed.
+ *
+ * The `buffer: ArrayBuffer` shape transfers across the Electron IPC boundary
+ * via structured clone — the receiver sees a fresh ArrayBuffer, not a
+ * SharedArrayBuffer or a Node Buffer.
+ */
+export type OpenStlResponse =
+  | { canceled: true }
+  | { canceled: false; name: string; buffer: ArrayBuffer }
+  | { canceled: false; error: OpenStlError };
 
 export interface SaveStlRequest {
   /**
@@ -64,3 +88,13 @@ export interface ApiBridge {
     request: SaveStlRequest,
   ) => Promise<IpcContracts['file:save-stl']['result']>;
 }
+
+/**
+ * Hard upper bound on STL file size accepted by `file:open-stl`, in bytes.
+ *
+ * Aligned with the security guidance in CLAUDE.md and the desktop-app-shell
+ * skill: "Reject files > 500 MB without explicit user override." Main-process
+ * code `stat`s the file before reading it to avoid allocating a half-gig
+ * buffer just to refuse it.
+ */
+export const OPEN_STL_MAX_BYTES = 500 * 1024 * 1024;
