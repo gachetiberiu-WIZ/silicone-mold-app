@@ -37,9 +37,16 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'html', 'lcov'],
       include: ['src/geometry/**'],
-      // Flagged but NOT enforced yet — no geometry code shipped.
-      // Once src/geometry/** lands, flip these to `thresholds: { lines: 70, ... }`.
-      // See ADR-003 §E and issue #1 acceptance criteria.
+      // Enforced from issue #9 onward per ADR-003 §E and the issue's AC.
+      // The test-only `__resetManifoldForTests` escape hatch is excluded so
+      // it doesn't suppress the real threshold.
+      exclude: ['src/geometry/**/*.d.ts'],
+      thresholds: {
+        lines: 70,
+        functions: 70,
+        statements: 70,
+        branches: 70,
+      },
       reportOnFailure: true,
     },
   },
