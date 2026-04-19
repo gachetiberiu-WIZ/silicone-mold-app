@@ -19,9 +19,25 @@
 //   - The display mesh's `BufferGeometry` is derived from the repaired
 //     manifold via `manifoldToBufferGeometry`, so the rendered mesh is
 //     guaranteed to match what downstream booleans / offsets will consume.
-//   We deliberately do NOT hold onto the `Manifold` here; we `.delete()` it
-//   before returning to release WASM memory. Future PRs that need the live
-//   manifold (booleans, offsets, slicing) will rework the lifecycle then.
+//
+// Manifold lifetime (Phase 3c, issue #37 — silicone-shell generator):
+//   `setMaster` now KEEPS the Manifold alive past return. It is cached on the
+//   Master group's `userData[MASTER_MANIFOLD_KEY]` and lives until the next
+//   `setMaster` call (which disposes the previous Manifold before replacing
+//   it) or until `disposeMaster(scene)` is invoked during viewport teardown.
+//
+//   Rationale: the silicone-shell generator (`generateSiliconeShell` in
+//   `src/geometry/generateMold.ts`) needs the master Manifold as input, and
+//   the generate button is a user-driven action with no strict upper bound
+//   on delay after load — re-parsing the STL on every Generate click would
+//   needlessly burn 50–500 ms on anything above a trivial mesh. Caching on
+//   the Master group keeps ownership colocated with the scene node the
+//   Manifold describes, so eviction is trivially hooked into the existing
+//   "previous master → swap" lifecycle in this module.
+//
+//   WASM-memory invariant: at most ONE master Manifold is live at a time.
+//   `setMaster` disposes the previous one before installing the new one;
+//   `disposeMaster` is idempotent and safe to call on an empty group.
 //
 // Swap semantics:
 //   - At most one master is live at a time. `setMaster` disposes the previous
@@ -30,6 +46,7 @@
 //     there, so children like lights are unaffected and tags stay stable.
 
 import { Box3, Mesh, MeshStandardMaterial, Vector3, type Scene } from 'three';
+import type { Manifold } from 'manifold-3d';
 
 import { loadStl } from '@/geometry/loadStl';
 import { manifoldToBufferGeometry } from '@/geometry/adapters';
@@ -44,6 +61,15 @@ const MASTER_GROUP_TAG = 'master';
 
 /** Per-mesh tag on the actual STL mesh node. Matches the viewer skill. */
 const MASTER_MESH_TAG = 'master';
+
+/**
+ * `userData` key used to stash the live master Manifold on the Master group.
+ * Exported so `getMasterManifold` / `disposeMaster` — and future callers that
+ * need direct access (e.g. the silicone-shell generator) — share a single
+ * canonical key. Do not collide with this name elsewhere on the group's
+ * userData.
+ */
+export const MASTER_MANIFOLD_KEY = 'masterManifold';
 
 /**
  * Matte light-grey material. Non-transparent, no clearcoat — the mesh reads
@@ -114,12 +140,70 @@ function disposeMesh(mesh: Mesh): void {
  * export therefore keep the user's original coordinates. Future UI that
  * needs to display user-space coords (coord picker, dimension readouts)
  * can subtract this offset from a world-space point.
+ *
+ * `manifold` is the live manifold-3d handle corresponding to `mesh`. Ownership
+ * stays with the Master group (we cache it on `group.userData`) — callers
+ * must NOT `.delete()` it. It is valid until the next `setMaster` call or
+ * until `disposeMaster(scene)` runs. See file header for the lifetime
+ * contract and the rationale for keeping it alive.
  */
 export interface MasterResult {
   readonly mesh: Mesh;
   readonly volume_mm3: number;
   readonly bbox: Box3;
   readonly offset: Vector3;
+  readonly manifold: Manifold;
+}
+
+/**
+ * Internal helper: dispose whatever Manifold is currently cached on a Master
+ * group and clear the slot. Idempotent. Used by both `setMaster` (before
+ * installing a new master) and `disposeMaster` (on viewport teardown).
+ *
+ * `.delete()` releases the underlying WASM heap allocation. Dropping the JS
+ * reference without calling it would leak — Emscripten handles have no
+ * finaliser.
+ */
+function disposeCachedManifold(group: NonNullable<Mesh['parent']>): void {
+  const cached = group.userData[MASTER_MANIFOLD_KEY] as Manifold | undefined;
+  if (cached) {
+    try {
+      cached.delete();
+    } catch (err) {
+      // Non-fatal — a double-dispose / already-deleted handle shouldn't
+      // prevent us from proceeding. Log so leaks / double-frees still
+      // surface in dev.
+      console.warn('[master] disposing cached Manifold threw:', err);
+    }
+    delete group.userData[MASTER_MANIFOLD_KEY];
+  }
+}
+
+/**
+ * Returns the live master Manifold cached on the scene's Master group, or
+ * `null` if no master is currently loaded. This is the read-side API for the
+ * silicone-shell generator and any other geometry op that needs direct
+ * Manifold access outside the load path.
+ *
+ * Caller must NOT `.delete()` the returned handle — ownership stays with the
+ * Master group per the lifetime contract documented at the top of this file.
+ */
+export function getMasterManifold(scene: Scene): Manifold | null {
+  const group = findMasterGroup(scene);
+  if (!group) return null;
+  const cached = group.userData[MASTER_MANIFOLD_KEY] as Manifold | undefined;
+  return cached ?? null;
+}
+
+/**
+ * Tear down any live master Manifold and its cache slot. Idempotent and safe
+ * to call on a scene that never loaded a master. Intended for viewport
+ * disposal; `setMaster` handles the per-swap case internally.
+ */
+export function disposeMaster(scene: Scene): void {
+  const group = findMasterGroup(scene);
+  if (!group) return;
+  disposeCachedManifold(group);
 }
 
 /**
@@ -167,28 +251,33 @@ export async function setMaster(scene: Scene, buffer: ArrayBuffer): Promise<Mast
   // divergence.
   const loaded = await loadStl(buffer);
 
+  // Extract volume + derive the display geometry while the manifold is live.
+  // We deliberately do NOT dispose the manifold here — per the file-header
+  // lifetime contract, the Manifold is kept alive for the silicone-shell
+  // generator (issue #37). It's handed off to the group's userData below.
+  // If either derivation throws we must still release the manifold (and the
+  // STL parse output) to avoid leaking WASM memory.
   let volume_mm3: number;
   let displayGeometry;
   try {
     volume_mm3 = meshVolume(loaded.manifold);
     displayGeometry = await manifoldToBufferGeometry(loaded.manifold);
-  } finally {
-    // Release the WASM-backed manifold as soon as we've extracted what we
-    // need. Keeping it alive across renders would leak WASM heap memory on
-    // every Open STL. Future PRs that need the live manifold (booleans,
-    // offsets) will have to rework this lifecycle.
+  } catch (err) {
     loaded.manifold.delete();
-    // The parsed `loaded.geometry` is the three-js-side parse result from
-    // the STL loader; we don't attach it to the scene (we use the
-    // manifold-derived `displayGeometry` instead), so release its VBO too.
     loaded.geometry.dispose();
+    throw err;
   }
+  // The parsed `loaded.geometry` is the three-js-side parse result from the
+  // STL loader; we don't attach it to the scene (we use the manifold-derived
+  // `displayGeometry` instead), so release its VBO regardless of outcome.
+  loaded.geometry.dispose();
 
   if (
     !displayGeometry.hasAttribute('position') ||
     displayGeometry.getAttribute('position').count === 0
   ) {
     displayGeometry.dispose();
+    loaded.manifold.delete();
     throw new Error('setMaster: parsed STL has no vertices');
   }
 
@@ -200,6 +289,11 @@ export async function setMaster(scene: Scene, buffer: ArrayBuffer): Promise<Mast
       disposeMesh(child);
     }
   }
+
+  // Release the previous master's WASM-backed Manifold (if any) before
+  // installing the new one. At most one master Manifold is ever alive —
+  // this is the single eviction point that enforces that invariant.
+  disposeCachedManifold(group);
 
   // Reset rotation before adding the new mesh. A previous `setMaster` could
   // have composed a lay-flat rotation onto the group via the Place-on-face
@@ -266,5 +360,13 @@ export async function setMaster(scene: Scene, buffer: ArrayBuffer): Promise<Mast
   // would leave the origin grid + axes gizmo off-camera.
   const bbox = localBbox.clone().translate(offset);
 
-  return { mesh, volume_mm3, bbox, offset };
+  // Install the live Manifold on the group's userData so the silicone-shell
+  // generator (and future geometry ops) can retrieve it via
+  // `getMasterManifold(scene)`. Ownership is the group's — callers must not
+  // `.delete()` the handle; eviction happens via `disposeCachedManifold`
+  // above on the next `setMaster`, or via `disposeMaster(scene)` at
+  // viewport teardown.
+  group.userData[MASTER_MANIFOLD_KEY] = loaded.manifold;
+
+  return { mesh, volume_mm3, bbox, offset, manifold: loaded.manifold };
 }
