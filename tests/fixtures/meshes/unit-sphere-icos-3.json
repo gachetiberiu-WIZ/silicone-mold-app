@@ -1,0 +1,20 @@
+{
+  "name": "unit-sphere-icos-3",
+  "triCount": 1280,
+  "volume_mm3": 4.152741,
+  "surfaceArea_mm2": 12.506493,
+  "boundingBoxMin": [
+    -1,
+    -1,
+    -1
+  ],
+  "boundingBoxMax": [
+    1,
+    1,
+    1
+  ],
+  "isManifold": true,
+  "source": "procedurally generated via tests/fixtures/meshes/generate.ts",
+  "license": "public-domain",
+  "notes": "Icosahedron subdivided 3 times, vertices projected onto radius-1 sphere. Tessellated volume is a lower bound on the true sphere volume (4/3·π ≈ 4.18879)."
+}
