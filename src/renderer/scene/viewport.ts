@@ -29,7 +29,11 @@ import {
 import { createLayFlatController, type LayFlatController } from './layFlatController';
 import { createRenderer, resizeRendererToContainer } from './renderer';
 import { createScene } from './index';
-import { setMaster as sceneSetMaster, type MasterResult } from './master';
+import {
+  disposeMaster as sceneDisposeMaster,
+  setMaster as sceneSetMaster,
+  type MasterResult,
+} from './master';
 
 function hasTestQueryFlag(): boolean {
   if (typeof window === 'undefined') return false;
@@ -256,6 +260,10 @@ export function mount(container: HTMLElement): MountedViewport {
       window.removeEventListener('resize', onWindowResize);
     }
     layFlat.dispose();
+    // Release any cached master Manifold — the WASM kernel won't free it
+    // automatically when the viewport's JS state is dropped. Idempotent and
+    // safe on a scene that never loaded a master.
+    sceneDisposeMaster(scene);
     controls.dispose();
     renderer.dispose();
     if (canvas.parentElement === container) {
