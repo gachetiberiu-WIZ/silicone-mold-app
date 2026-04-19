@@ -17,9 +17,13 @@
 //   - unsubscribe detaches the listener
 //   - non-boolean detail is a safe no-op
 
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { LAY_FLAT_COMMITTED_EVENT } from '@/renderer/scene/layFlatController';
+import {
+  __resetGenerateEpochForTests,
+  getGenerateEpoch,
+} from '@/renderer/ui/generateEpoch';
 import {
   attachGenerateInvalidation,
   type InvalidationGenerateButton,
@@ -53,15 +57,43 @@ function dispatchCommittedEvent(detail: unknown): void {
   );
 }
 
+/**
+ * Per-test detach registry. `attachGenerateInvalidation` binds listeners
+ * to `document`, which is a shared singleton across tests in the same
+ * happy-dom environment. `document.body.innerHTML=''` in `beforeEach`
+ * only wipes DOM children — document-level event listeners leak across
+ * tests, which would double-count epoch bumps in the epoch-centric tests.
+ * We register each test's attach and detach them all in `afterEach`.
+ */
+const pendingDetaches: Array<() => void> = [];
+
+function attachAndTrack(
+  ...args: Parameters<typeof attachGenerateInvalidation>
+): ReturnType<typeof attachGenerateInvalidation> {
+  const detach = attachGenerateInvalidation(...args);
+  pendingDetaches.push(detach);
+  return detach;
+}
+
 beforeEach(() => {
   // Each test starts from a blank document so no listeners leak.
   document.body.innerHTML = '';
+  __resetGenerateEpochForTests();
+});
+
+afterEach(() => {
+  // Detach everything registered during the test so document-level
+  // listeners don't accumulate across tests.
+  while (pendingDetaches.length > 0) {
+    const detach = pendingDetaches.pop();
+    detach?.();
+  }
 });
 
 describe('attachGenerateInvalidation — commit (detail=true)', () => {
   test('enables the button and invalidates silicone + resin readouts', () => {
     const { topbar, generateButton } = makeMocks();
-    attachGenerateInvalidation(topbar, generateButton);
+    attachAndTrack(topbar, generateButton);
 
     dispatchCommittedEvent(true);
 
@@ -75,7 +107,7 @@ describe('attachGenerateInvalidation — commit (detail=true)', () => {
 describe('attachGenerateInvalidation — reset / master-load (detail=false)', () => {
   test('disables the button and invalidates silicone + resin readouts', () => {
     const { topbar, generateButton } = makeMocks();
-    attachGenerateInvalidation(topbar, generateButton);
+    attachAndTrack(topbar, generateButton);
 
     dispatchCommittedEvent(false);
 
@@ -103,7 +135,7 @@ describe('attachGenerateInvalidation — unsubscribe', () => {
 describe('attachGenerateInvalidation — defensive edges', () => {
   test('non-boolean detail is a safe no-op', () => {
     const { topbar, generateButton } = makeMocks();
-    attachGenerateInvalidation(topbar, generateButton);
+    attachAndTrack(topbar, generateButton);
 
     dispatchCommittedEvent('nope');
     dispatchCommittedEvent(undefined);
@@ -117,7 +149,7 @@ describe('attachGenerateInvalidation — defensive edges', () => {
 
   test('multiple transitions fire independent invalidations', () => {
     const { topbar, generateButton } = makeMocks();
-    attachGenerateInvalidation(topbar, generateButton);
+    attachAndTrack(topbar, generateButton);
 
     dispatchCommittedEvent(true);
     dispatchCommittedEvent(false);
@@ -129,5 +161,50 @@ describe('attachGenerateInvalidation — defensive edges', () => {
     expect(topbar.setSiliconeVolume).toHaveBeenNthCalledWith(1, null);
     expect(topbar.setSiliconeVolume).toHaveBeenNthCalledWith(2, null);
     expect(topbar.setSiliconeVolume).toHaveBeenNthCalledWith(3, null);
+  });
+});
+
+describe('attachGenerateInvalidation — epoch bump (QA blocker 2)', () => {
+  test('bumps the shared generate-epoch on every valid commit event', () => {
+    const { topbar, generateButton } = makeMocks();
+    attachAndTrack(topbar, generateButton);
+
+    // `beforeEach` resets the counter to 0 and `afterEach` detaches all
+    // listeners from prior tests — so the starting epoch is deterministic.
+    const startEpoch = getGenerateEpoch();
+
+    dispatchCommittedEvent(true);
+    expect(getGenerateEpoch()).toBe(startEpoch + 1);
+
+    dispatchCommittedEvent(false);
+    expect(getGenerateEpoch()).toBe(startEpoch + 2);
+
+    dispatchCommittedEvent(true);
+    expect(getGenerateEpoch()).toBe(startEpoch + 3);
+  });
+
+  test('non-boolean detail does NOT bump the epoch', () => {
+    const { topbar, generateButton } = makeMocks();
+    attachAndTrack(topbar, generateButton);
+
+    const startEpoch = getGenerateEpoch();
+    dispatchCommittedEvent('nope');
+    dispatchCommittedEvent(undefined);
+    dispatchCommittedEvent({ bogus: true });
+
+    expect(getGenerateEpoch()).toBe(startEpoch);
+  });
+
+  test('custom `bumpEpoch` option is called instead of the default', () => {
+    const { topbar, generateButton } = makeMocks();
+    const bumpEpoch = vi.fn<() => number>().mockReturnValue(42);
+    attachAndTrack(topbar, generateButton, { bumpEpoch });
+
+    const startEpoch = getGenerateEpoch();
+    dispatchCommittedEvent(true);
+
+    expect(bumpEpoch).toHaveBeenCalledTimes(1);
+    // The shared counter is NOT touched when the override is used.
+    expect(getGenerateEpoch()).toBe(startEpoch);
   });
 });
