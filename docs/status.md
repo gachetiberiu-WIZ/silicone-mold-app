@@ -542,4 +542,75 @@ Phase 3b delivered: parameter inputs are captured, lay-flat orientation is commi
 1. **[feat] Setup cue + disabled "Generate mold" button** (`agent:frontend`) — persistent hint ("Please orient the part on its base before generating the mold") + `#sidebar` button wired to a yet-unimplemented generator stub. Small scope, lands the UX gate without any geometry work.
 2. **[feat] Happy-path mold generator** (`agent:geometry`) — consume `parametersStore` state + current `group.quaternion`, output base + sides + cap + sprue as Manifolds. No preview yet, no export — just produce the geometry in memory + surface silicone + resin pour volumes in the topbar alongside the master volume. Multi-issue, opens up Phase 3d/e/f.
 
+---
+
+## 2026-04-19 night — Phase 3c wave 1 + 2
+
+User gave the "kick off Phase 3c" go-ahead. Mid-wave, surfaced a product direction: **mold generation is gated behind lay-flat orientation, triggered by an explicit button, and no mold-type picker at v1** (single-strategy means no branching). The wave split cleanly into two sub-waves:
+
+- **Wave 1**: UX gate (button + "please orient" hint) + geometry primitive (`generateSiliconeShell`). Both shipped in parallel.
+- **Wave 2**: Plumbing that wires them together — button triggers the primitive, volumes surface in the topbar, stale-invalidation on orientation change.
+
+### Issues opened
+
+| # | Title | Agent | Status |
+|---|---|---|---|
+| #36 | feat(ui): Generate-mold button + orientation-committed gate | `agent:frontend` | **DONE — PR #38 merged (`84f1307`)** |
+| #37 | feat(geometry): silicone shell generator (halves + volumes) | `agent:geometry` | **DONE — PR #39 merged (`e6fe202`)** |
+| #40 | feat(ui): wire Generate button to silicone-shell generator + topbar volumes | `agent:frontend` | **DONE — PR #41 merged (`783c805`)** |
+
+### PRs merged
+
+| PR | SHA | What |
+|---|---|---|
+| #38 | `84f1307` | Generate-mold button at top of sidebar, disabled until `LAY_FLAT_COMMITTED_EVENT` fires with `detail:true`, persistent three-state hint, console.log stub for onGenerate. |
+| #39 | `e6fe202` | `generateSiliconeShell(master, parameters, viewTransform)` — `levelSet` shell (via three-mesh-bvh SDF) + boolean cavity + horizontal `splitByPlane` at post-transform bbox mid-Y. Master Manifold lifecycle refactored to cache on group.userData. |
+| #41 | `783c805` | onGenerate calls `generateSiliconeShell`; topbar extended with Master + Silicone + Resin readouts; busy/error UX states on the button; shared `generateEpoch` module bumped on every invalidation (close the mid-flight race). |
+
+### Agent roster this wave
+
+| Agent | Task | Outcome |
+|---|---|---|
+| `frontend-dev` (a5663dd5) | #36 → PR #38 | Shipped clean, 1 QA round, approved. |
+| `geometry-dev` (aeb32171) | #37 → PR #39 | Shipped clean. Declared 3 deviations (coarser `edgeLength`, 5 s operational gate vs 3 s target, Manifold-lifecycle Option A) — all justified. |
+| `qa-engineer` (ac6e188b) | Review #38 | Approved — praised orthogonal `setEnabled`/`setHasMaster` state, no-master variant hint choice, empirical vertex-buffer-untouched assertion. |
+| `qa-engineer` (af99824e) | Review #39 | Approved — verified all 8 ACs, Manifold-lifecycle clean (single eviction point, no WASM leak), volume invariants + non-identity transform test + wall-thickness floor all covered. |
+| `frontend-dev` (af61d9bd) | #40 → PR #41 (round 1) | Shipped wired path + epoch counter for in-flight cancellation. CI red on a single E2E assertion + QA found a real latent race. |
+| `qa-engineer` (ad38eec9) | Review #41 round 1 | `Requires changes` — **caught a real latent bug**: `attachGenerateInvalidation` nulled the topbar readouts but did NOT bump `generateEpoch`, so a mid-flight commit could let the first resolve still push stale volumes. Also flagged the E2E busy-state race — Playwright's polling missed the transient "Generating…" label on fast CI. |
+| `frontend-dev` (ac7a2a20) | Fix #41 round 2 | Both blockers fixed cleanly — MutationObserver captures label transitions before click, `generateEpoch` extracted to shared module and bumped from the invalidation listener. Orchestrator extracted for testability; new race-condition unit test uses the REAL invalidation listener to prove the fix. |
+
+### Critical learnings captured
+
+- **Shared-module counter beats closure-scope counter when multiple sites need to increment.** The original PR put the epoch counter as a module-level variable in main.ts, only writable from `handleGenerate`. That silently miscompiled the race semantics: invalidation wiped the topbar but the in-flight resolve didn't know. Moving the counter to `generateEpoch.ts` with a `bumpGenerateEpoch()` exportable function is the right factoring for a multi-writer staleness guard.
+- **Playwright's polling-based assertions race transient UI states.** `toHaveText("Generating…", { timeout: 2000 })` fails if the state lasts < the polling interval. MutationObserver capture before the trigger event is race-free because the observer fires on every DOM mutation, independent of Playwright's poll loop.
+- **QA's value was concrete this wave.** The auto-generated tests would have missed the `generateEpoch` bug entirely — only a test that (a) uses the REAL invalidation listener, (b) uses a hand-resolvable deferred promise, catches it. QA caught the semantic hole and demanded that specific test shape. That's the kind of review no lint / type / happy-path test suite can substitute for.
+
+### Mini-figurine-on-default-params numbers (for eyeball sanity)
+
+After clicking Generate on the fixture with default parameters (wallThickness=10mm, baseThickness=5mm, sideCount=4):
+- Master volume: 127 452 mm³ (≈ 127.5 cm³ — sensible for an 85×69×110 mm miniature)
+- Silicone volume (both halves combined): 319 914 mm³ (≈ 2.51× master — sensible for a 10 mm wall at this scale)
+- Resin volume: 127 452 mm³ (= master at this stage; sprue + vent channels add later in Phase 3d/e)
+- Wall-clock: ~2.2 s local, ~3.4 s CI
+
+### Outstanding advisory / follow-up items (cumulative)
+
+- Visual-regression goldens still not committed — every new PR adds "first-run golden writes" to the advisory failures. Policy deadline is 2026-05-03; need a lead-owned PR to commit the artifact PNGs from a successful main-push CI run and flip `continue-on-error: false`.
+- QA follow-ups from #38 (not filed as issues yet): document golden-regeneration step when the advisory window closes; consider `getMasterGroup(scene)` helper to stop duplicating the `'master'` tag literal.
+- QA follow-ups from #39 (same): tighten `edgeLength` + SDF optimisation when printable silicone halves arrive (Phase 3d/e); harden the +X ray-parity SDF with majority-vote multi-ray when a failing real-world fixture surfaces.
+- QA follow-ups from #41 (same): `setVolume` → `setMasterVolume` call-site sweep + alias removal; E2E `'No master loaded'` i18n hard-coupling helper; `#e06c75` → `--error-color` CSS token promotion; direct new-STL-load invalidation test.
+- Lead-owned doc PR: codify "viewport-level Group transforms only, never geometry/manifold" invariant + "sticky shared counters for staleness guards" learning in `.claude/skills/three-js-viewer/SKILL.md`. Sub-agents can't edit skills.
+- `minkowskiSum` in manifold-3d 3.4.1 is effectively unusable for masters above ~1 k tri (measured ~180 s on mini-figurine against any ball tessellation). Parked reference — we use `levelSet` instead.
+- Master Manifold now lives on the scene graph; consider a tiny cleanup PR that exports `getMasterGroup` / `getMasterManifold` as a public API rather than walking scene.children for the `tag==='master'` literal.
+
+### Phase 3c wave 1 + 2 → wave 3 gate
+
+Phase 3c wave 1 + 2 delivered: the user can Open STL, orient, tweak parameters, and click Generate to get silicone + resin volumes in the topbar. All three volumes stale-invalidate correctly when orientation changes.
+
+**Next logical wave for 3c (Phase 3d/3e tying together):**
+
+1. **[feat] Viewport preview of generated silicone halves** (`agent:frontend` + `agent:geometry`) — render the two half-Manifolds as semi-transparent meshes in the scene, with an exploded-view toggle. Depends on keeping the halves alive after generate rather than `.delete()`-ing them (currently line 309-310 of main.ts).
+2. **[feat] Printable-parts pipeline** (`agent:geometry`) — the rest of the `.claude/skills/mold-generator/SKILL.md` algorithm (steps 5-7): containment box → base + N sides + top cap, registration keys on parting line, sprue + vent channels. Large scope; split into 3-4 PRs.
+3. **[feat] STL export of generated parts** (`agent:app-shell` + `agent:geometry`) — Phase 3f. Native save-dialog, multi-file export, canonicalised binary STLs.
+
 Awaiting user go-ahead.
