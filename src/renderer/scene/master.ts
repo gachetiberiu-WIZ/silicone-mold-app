@@ -29,12 +29,7 @@
 //     itself is never re-added — we always reuse whatever createScene() put
 //     there, so children like lights are unaffected and tags stay stable.
 
-import {
-  Box3,
-  Mesh,
-  MeshStandardMaterial,
-  type Scene,
-} from 'three';
+import { Box3, Mesh, MeshStandardMaterial, Vector3, type Scene } from 'three';
 
 import { loadStl } from '@/geometry/loadStl';
 import { manifoldToBufferGeometry } from '@/geometry/adapters';
@@ -100,14 +95,26 @@ function disposeMesh(mesh: Mesh): void {
 /**
  * Result of `setMaster`. `mesh` is live in the scene graph (callers should
  * not add it again). `volume_mm3` is the watertight volume reported by
- * manifold-3d's kernel (ADR-002); `bbox` is the world-space AABB of
- * `mesh.geometry` and is what `frameToBox3` should consume to frame the
- * camera.
+ * manifold-3d's kernel (ADR-002).
+ *
+ * `bbox` is the **world-space** AABB, i.e. the mesh's geometry-local AABB
+ * translated by the Master group's auto-centering offset. This is what
+ * `frameToBox3` should consume — framing the mesh-local AABB would put the
+ * origin grid + axes gizmo off-camera (see issue #25).
+ *
+ * `offset` is the translation that `setMaster` applied to the Master group
+ * so the mesh sits "on the bed" (min-Y on Y=0) and centered on X=0/Z=0.
+ * Internal `BufferGeometry` vertex coords are UNCHANGED; the offset lives
+ * purely on the Group's transform — downstream booleans / offsets / STL
+ * export therefore keep the user's original coordinates. Future UI that
+ * needs to display user-space coords (coord picker, dimension readouts)
+ * can subtract this offset from a world-space point.
  */
 export interface MasterResult {
   readonly mesh: Mesh;
   readonly volume_mm3: number;
   readonly bbox: Box3;
+  readonly offset: Vector3;
 }
 
 /**
@@ -116,20 +123,29 @@ export interface MasterResult {
  * mesh under that group is disposed first — only one master is live at a
  * time, as required by the issue ("no mesh accumulation").
  *
- * Does NOT frame the camera — that's `viewport.setMaster` / `frameToBox3`'s
- * job. Separating concerns keeps this module pure-geometry + scene-graph.
+ * Auto-centering (issue #25): after computing the mesh's local AABB, this
+ * function applies a translation to the **Master group** (not the geometry
+ * or the manifold) so the mesh sits "on the bed":
  *
- * Does NOT assume the STL is centered. The fixture's AABB is ~1094 mm off
- * the Y axis (see mini-figurine.json); we leave coordinates unchanged and
- * expect the camera to retarget via `frameToBox3`.
+ *   group.position.x = -bbox.center.x    (centered on X)
+ *   group.position.y = -bbox.min.y       (lowest point on Y=0)
+ *   group.position.z = -bbox.center.z    (centered on Z)
+ *
+ * The `BufferGeometry.attributes.position` values are NEVER mutated. This
+ * matters: Phase 3b mold-gen, booleans, offsets, and STL export all keep
+ * the user's original coordinates — the translation is a display-layer
+ * convenience only. `.position.set(...)` is absolute, so a second load
+ * fully replaces the offset (no accumulation).
+ *
+ * Does NOT frame the camera — that's `viewport.setMaster` / `frameToBox3`'s
+ * job. We return a **world-space** bbox (local bbox + offset) so that the
+ * camera framing reflects where the mesh actually sits post-translation,
+ * which in turn keeps the origin grid + axes gizmo in frame.
  *
  * @throws If the scene is missing its `master` group, or if the STL has no
  *   vertex data.
  */
-export async function setMaster(
-  scene: Scene,
-  buffer: ArrayBuffer,
-): Promise<MasterResult> {
+export async function setMaster(scene: Scene, buffer: ArrayBuffer): Promise<MasterResult> {
   const group = findMasterGroup(scene);
   if (!group) {
     throw new Error(
@@ -187,13 +203,41 @@ export async function setMaster(
   // apply renderer-layer scaling (locked convention in CLAUDE.md).
   group.add(mesh);
 
-  // World-space AABB. Mesh has identity transform so geometry AABB ==
-  // world AABB; clone so callers can mutate without side effects.
+  // Mesh-local AABB (the raw geometry bounds, before any group transform).
+  // This is the input to the auto-center calculation below.
   displayGeometry.computeBoundingBox();
-  const bbox = new Box3();
+  const localBbox = new Box3();
   if (displayGeometry.boundingBox) {
-    bbox.copy(displayGeometry.boundingBox);
+    localBbox.copy(displayGeometry.boundingBox);
   }
 
-  return { mesh, volume_mm3, bbox };
+  // Auto-center on the print bed (issue #25). We translate the Master GROUP
+  // so the mesh:
+  //   - is centered on the X and Z axes (bbox.center → origin)
+  //   - rests on Y=0 with its lowest face (bbox.min.y → 0)
+  // Applied on the group, never on the geometry: the vertex buffer must
+  // stay STL-faithful so downstream mold-gen + STL export see the user's
+  // original coordinates.
+  //
+  // `.set()` is absolute (not additive), which means a second load fully
+  // replaces any previous offset — no accumulation across loads. This is
+  // asserted in the unit tests.
+  const localCenter = new Vector3();
+  localBbox.getCenter(localCenter);
+  const offset = new Vector3(-localCenter.x, -localBbox.min.y, -localCenter.z);
+  group.position.set(offset.x, offset.y, offset.z);
+  // Keep the group's world matrices current so subsequent calls that rely on
+  // `mesh.getWorldPosition(...)` etc. see the new transform without waiting
+  // for the next render tick.
+  group.updateMatrixWorld(true);
+
+  // World-space AABB. The mesh itself has identity transform, but the
+  // group now carries the offset — apply it to the local bbox so callers
+  // (notably `frameToBox3`) frame the camera around where the mesh
+  // actually sits, not where the raw geometry would have sat. Framing the
+  // mesh-local bbox on an off-origin master (e.g. mini-figurine at Y≈1094)
+  // would leave the origin grid + axes gizmo off-camera — see issue #25.
+  const bbox = localBbox.clone().translate(offset);
+
+  return { mesh, volume_mm3, bbox, offset };
 }
