@@ -2,7 +2,6 @@ import { dialog, type OpenDialogOptions, type SaveDialogOptions } from 'electron
 import { promises as fs } from 'node:fs';
 import type {
   OpenStlRequest,
-  OpenStlResponse,
   SaveStlRequest,
   SaveStlResponse,
 } from '../../shared/ipc-contracts';
@@ -28,9 +27,21 @@ declare global {
 
 const isTest = (): boolean => process.env['NODE_ENV'] === 'test';
 
+/**
+ * Raw-dialog result for the Open-STL flow.
+ *
+ * Kept deliberately close to Electron's native `OpenDialogReturnValue` shape
+ * so the ipc.ts handler — which layers file reads and size checks on top —
+ * can stay thin.
+ */
+export interface OpenStlDialogResult {
+  canceled: boolean;
+  filePaths: string[];
+}
+
 export async function showOpenStl(
   request: OpenStlRequest,
-): Promise<OpenStlResponse> {
+): Promise<OpenStlDialogResult> {
   const options: OpenDialogOptions = {
     properties: request.multi
       ? ['openFile', 'multiSelections']
@@ -40,11 +51,14 @@ export async function showOpenStl(
 
   if (isTest() && globalThis.__testDialogStub?.showOpenDialog) {
     const stubbed = await globalThis.__testDialogStub.showOpenDialog(options);
-    return { canceled: stubbed.canceled, paths: stubbed.filePaths ?? [] };
+    return {
+      canceled: stubbed.canceled,
+      filePaths: stubbed.filePaths ?? [],
+    };
   }
 
   const result = await dialog.showOpenDialog(options);
-  return { canceled: result.canceled, paths: result.filePaths };
+  return { canceled: result.canceled, filePaths: result.filePaths };
 }
 
 export async function showSaveStl(
