@@ -74,7 +74,8 @@ Playwright tests replace `globalThis.__testDialogStub` via `electronApp.evaluate
 ## Security requirements
 
 - Never disable `contextIsolation` or enable `nodeIntegration` on any window, including diagnostic / debug windows.
-- CSP in the renderer's `index.html`: `default-src 'self'; script-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'`.
+- CSP in the renderer's `index.html`: `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; img-src 'self' data:; style-src 'self' 'unsafe-inline'`.
+- `'wasm-unsafe-eval'` permits WebAssembly compilation/instantiation (`WebAssembly.compile` / `WebAssembly.instantiate`); it is **distinct from** `'unsafe-eval'`, which additionally allows `eval()`, `new Function()`, and `setTimeout(string, ...)`. Only `'wasm-unsafe-eval'` is allowed in this repo — it is required for the locked `manifold-3d` WASM kernel (ADR-002). `'unsafe-eval'` must NEVER be added. If a future library claims to need `'unsafe-eval'`, replace the library; do not widen the CSP.
 - STL file handling: bound tri count at parse time (reject > 10 M tri by default, 500 MB file size hard limit). Never trust normals — always re-derive.
 - No remote code loading. All scripts bundled.
 - Auto-updater: `requireCodeSigningCert: true`. Unsigned updates are rejected.
