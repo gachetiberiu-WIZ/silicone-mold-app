@@ -2,7 +2,7 @@
 //
 // Glue: wire renderer + scene + camera + controls + axes overlay into a
 // container element, run a hidden-page-aware RAF loop, and expose a
-// `dispose()` for teardown.
+// `dispose()` and `setMaster()` for the outside world.
 //
 // The `test` mode (disables antialias + DPR + OrbitControls damping) is
 // derived from two signals, either of which suffices:
@@ -18,7 +18,7 @@
 import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import type { PerspectiveCamera, Scene, WebGLRenderer } from 'three';
 
-import { createCamera, computeAspect } from './camera';
+import { createCamera, computeAspect, frameToBox3 } from './camera';
 import { createControls } from './controls';
 import {
   createAxesGizmo,
@@ -28,6 +28,7 @@ import {
 } from './gizmos';
 import { createRenderer, resizeRendererToContainer } from './renderer';
 import { createScene } from './index';
+import { setMaster as sceneSetMaster, type MasterResult } from './master';
 
 function hasTestQueryFlag(): boolean {
   if (typeof window === 'undefined') return false;
@@ -45,6 +46,14 @@ export interface MountedViewport {
   readonly renderer: WebGLRenderer;
   readonly controls: OrbitControls;
   readonly axes: AxesGizmoOverlay;
+  /**
+   * Load an STL buffer as the active master: parses, builds the mesh, swaps
+   * out any previous master, then frames the camera + orbit to the mesh's
+   * AABB with 1.4× padding. Resolves with the `MasterResult` (mesh, volume,
+   * bbox) so callers can update dependent UI (e.g. the topbar volume
+   * readout).
+   */
+  setMaster: (buffer: ArrayBuffer) => Promise<MasterResult>;
   /** Stop RAF, detach listeners, dispose GPU resources, remove the canvas. */
   dispose: () => void;
 }
@@ -134,6 +143,38 @@ export function mount(container: HTMLElement): MountedViewport {
   };
   document.addEventListener('visibilitychange', onVisibilityChange);
 
+  // `setMaster` wires the scene-level loader into the camera + orbit retarget.
+  // We also notify any consumers waiting on `__testHooks.masterLoaded` so
+  // E2E specs can `await` the load flow deterministically.
+  let masterLoadedResolve: (() => void) | null = null;
+  let masterLoaded: Promise<void> = new Promise<void>((resolve) => {
+    masterLoadedResolve = resolve;
+  });
+
+  const setMaster = async (buffer: ArrayBuffer): Promise<MasterResult> => {
+    const result = await sceneSetMaster(scene, buffer);
+    frameToBox3(camera, controls, result.bbox);
+    // Signal test hooks, then install a fresh promise so a second load
+    // is independently awaitable.
+    if (masterLoadedResolve) {
+      masterLoadedResolve();
+      masterLoadedResolve = null;
+    }
+    if (BUILD_TIME_TEST) {
+      // Rotate the promise so callers that grab a reference AFTER the first
+      // load still have something that resolves on the next load.
+      const nextPromise = new Promise<void>((resolve) => {
+        masterLoadedResolve = resolve;
+      });
+      masterLoaded = nextPromise;
+      const w = window as unknown as {
+        __testHooks?: Record<string, unknown>;
+      };
+      if (w.__testHooks) w.__testHooks['masterLoaded'] = masterLoaded;
+    }
+    return result;
+  };
+
   // Test-hook surface — gated on BUILD-TIME NODE_ENV=test so prod bundles
   // tree-shake this block. Runtime `?test=1` alone does NOT expose hooks.
   if (BUILD_TIME_TEST) {
@@ -145,6 +186,10 @@ export function mount(container: HTMLElement): MountedViewport {
     hooks['camera'] = camera;
     hooks['renderer'] = renderer;
     hooks['viewportReady'] = true;
+    // `masterLoaded` starts as a pending promise; E2E specs can `await` it
+    // after clicking Open STL. The promise is rotated on each successful
+    // load so each new call-site sees a fresh waitable.
+    hooks['masterLoaded'] = masterLoaded;
   }
 
   rafId = requestAnimationFrame(tick);
@@ -166,7 +211,27 @@ export function mount(container: HTMLElement): MountedViewport {
     }
   };
 
-  return { scene, camera, renderer, controls, axes, dispose };
+  const handle: MountedViewport = {
+    scene,
+    camera,
+    renderer,
+    controls,
+    axes,
+    setMaster,
+    dispose,
+  };
+
+  // Expose the full handle on the test-hook surface so E2E specs can drive
+  // `setMaster` directly (bypassing the file dialog) — useful for visual
+  // regression snapshots that need a known mesh in the viewport.
+  if (BUILD_TIME_TEST) {
+    const w = window as unknown as {
+      __testHooks?: Record<string, unknown>;
+    };
+    if (w.__testHooks) w.__testHooks['viewport'] = handle;
+  }
+
+  return handle;
 }
 
 function syncSize(
