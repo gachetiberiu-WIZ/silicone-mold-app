@@ -71,6 +71,16 @@ export interface MountedViewport {
    * master is loaded.
    */
   resetOrientation: () => void;
+  /**
+   * Whether the user has committed an orientation via Place-on-face since
+   * the last reset or master load. Mirrors the controller's `isCommitted()`.
+   *
+   * The Generate-mold button (issue #36) gates on this: pristine /
+   * post-reset / post-Open-STL state returns `false`; post-commit returns
+   * `true`. Subscribers should prefer `LAY_FLAT_COMMITTED_EVENT` on
+   * `document` over polling this on every frame.
+   */
+  isOrientationCommitted: () => boolean;
   /** Stop RAF, detach listeners, dispose GPU resources, remove the canvas. */
   dispose: () => void;
 }
@@ -188,6 +198,12 @@ export function mount(container: HTMLElement): MountedViewport {
     if (layFlat.isActive()) layFlat.disable();
     const result = await sceneSetMaster(scene, buffer);
     layFlatMasterMesh = result.mesh;
+    // `scene/master.ts` resets the group quaternion to identity on every
+    // load (see its "Reset rotation before adding the new mesh" block).
+    // Tell the lay-flat controller so it clears any lingering committed
+    // flag and fires `LAY_FLAT_COMMITTED_EVENT` — the Generate-mold button
+    // (#36) re-disables itself on this edge.
+    layFlat.notifyMasterReset();
     frameToBox3(camera, controls, result.bbox);
     // Signal test hooks, then install a fresh promise so a second load
     // is independently awaitable.
@@ -258,6 +274,7 @@ export function mount(container: HTMLElement): MountedViewport {
     disableFacePicking: () => layFlat.disable(),
     isFacePickingActive: () => layFlat.isActive(),
     resetOrientation: () => layFlat.reset(),
+    isOrientationCommitted: () => layFlat.isCommitted(),
     dispose,
   };
 

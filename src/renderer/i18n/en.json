@@ -35,5 +35,11 @@
     "toggleHint": "Click a face on the mesh to lay it flat on the print bed (Esc to cancel)",
     "reset": "Reset orientation",
     "resetHint": "Restore the mesh to its original STL orientation"
+  },
+  "generate": {
+    "button": "Generate mold",
+    "hint": "Orient the part on its base (use Place on face in the toolbar), then click Generate.",
+    "ready": "Ready to generate",
+    "noMaster": "Load an STL to begin."
   }
 }

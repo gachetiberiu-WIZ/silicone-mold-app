@@ -171,6 +171,51 @@
         padding: 0;
         border: none;
       }
+      /* ---- Generate-mold block (issue #36) ------------------------------ */
+      .generate-block {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .generate-block__button {
+        width: 100%;
+        padding: 8px 12px;
+        font-size: 13px;
+        font-weight: 600;
+        background: var(--accent);
+        color: #0b0d10;
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        cursor: pointer;
+        transition: opacity 0.1s ease-out;
+      }
+      .generate-block__button:hover:not(:disabled) {
+        /* Reuse the accent tint; a hover tint is not in the token set */
+        filter: brightness(1.08);
+        border-color: var(--accent);
+      }
+      .generate-block__button:disabled {
+        background: transparent;
+        color: var(--muted);
+        border-color: var(--border);
+        cursor: not-allowed;
+        opacity: 0.7;
+      }
+      .generate-block__button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      .generate-block__hint {
+        font-size: 11px;
+        color: var(--muted);
+        line-height: 1.4;
+        margin: 0;
+      }
+      .generate-block__hint--ready {
+        color: var(--accent);
+      }
       .param-field {
         display: flex;
         flex-direction: column;
