@@ -120,6 +120,16 @@
       .units-toggle button:hover:not(.is-active) {
         color: var(--fg);
       }
+      .place-on-face {
+        display: inline-flex;
+        gap: 8px;
+      }
+      .place-on-face__toggle[aria-pressed='true'],
+      .place-on-face__toggle.is-active {
+        background: var(--accent);
+        color: #0b0d10;
+        border-color: var(--accent);
+      }
       /* ---- Body layout: viewport + sidebar grid -------------------------- */
       #body {
         flex: 1 1 auto;

@@ -32,7 +32,7 @@
 // manipulate the Three.js scene graph.
 
 import { readFileSync } from 'node:fs';
-import { Box3, Vector3, type Group, type Mesh } from 'three';
+import { Box3, Quaternion, Vector3, type Group, type Mesh } from 'three';
 import { describe, expect, test } from 'vitest';
 
 import { createScene } from '@/renderer/scene/index';
@@ -270,6 +270,51 @@ describe('setMaster — auto-center on print bed (issue #25)', () => {
       expect(worldCenter.y).toBeGreaterThan(0);
     },
   );
+
+  test('builds a three-mesh-bvh bounds tree on the loaded master (picking prep)', async () => {
+    const scene = createScene();
+    const ab = readFixtureBuffer('unit-cube');
+
+    const result = await setMaster(scene, ab);
+
+    // After setMaster, the master's BufferGeometry should carry a bounds
+    // tree set up by `prepareMeshForPicking`. This guards the issue #32
+    // BVH-setup contract: every loaded master is immediately ready for
+    // accelerated face picking without a separate enable step.
+    const geom = result.mesh.geometry as typeof result.mesh.geometry & {
+      boundsTree?: unknown;
+    };
+    expect(geom.boundsTree).toBeDefined();
+  });
+
+  test('second load after a lay-flat rotation resets group quaternion to identity', async () => {
+    // Issue #32 acceptance: "Load second STL after a lay-flat rotation →
+    // new master loads at identity orientation, not inheriting stale
+    // quaternion." We simulate a lay-flat by manually setting the group's
+    // quaternion to a non-identity rotation before the second setMaster.
+    const scene = createScene();
+    const group = getMasterGroup(scene);
+
+    // First load + pretend a lay-flat rotation was applied.
+    const abFirst = readFixtureBuffer('unit-cube');
+    await setMaster(scene, abFirst);
+    group.quaternion.setFromAxisAngle(new Vector3(1, 0, 0), Math.PI / 3);
+    // Sanity: rotation is non-identity.
+    const identity = new Quaternion();
+    expect(group.quaternion.equals(identity)).toBe(false);
+
+    // Second load — must reset the quaternion.
+    const abSecond = readFixtureBuffer('unit-cube');
+    await setMaster(scene, abSecond);
+
+    // Exactly identity, not just "close to identity".
+    expect({
+      x: group.quaternion.x,
+      y: group.quaternion.y,
+      z: group.quaternion.z,
+      w: group.quaternion.w,
+    }).toEqualWithTolerance({ x: 0, y: 0, z: 0, w: 1 }, { abs: 1e-12 });
+  });
 
   test('issue-25 exact example: bbox [267, 1094, 0]–[300, 1120, 40] → offset (-283.5, -1094, -20)', async () => {
     // The issue acceptance criteria quote a concrete bbox + expected offset.

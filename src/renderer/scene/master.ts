@@ -34,6 +34,7 @@ import { Box3, Mesh, MeshStandardMaterial, Vector3, type Scene } from 'three';
 import { loadStl } from '@/geometry/loadStl';
 import { manifoldToBufferGeometry } from '@/geometry/adapters';
 import { meshVolume } from '@/geometry/volume';
+import { prepareMeshForPicking, releaseMeshPicking } from './picking';
 
 /**
  * Pre-existing master-group tag placed by `createScene()`. We look the group
@@ -82,6 +83,10 @@ function findMasterGroup(scene: Scene): Mesh['parent'] | null {
  * dance, and skipping it leaks WebGL memory on every reload.
  */
 function disposeMesh(mesh: Mesh): void {
+  // Release the three-mesh-bvh bounds tree first. `disposeBoundsTree` is a
+  // no-op when no tree was ever built, so this is safe to call on meshes
+  // loaded by earlier code paths that didn't install picking.
+  releaseMeshPicking(mesh);
   mesh.geometry.dispose();
   const mat = mesh.material;
   if (Array.isArray(mat)) {
@@ -196,12 +201,27 @@ export async function setMaster(scene: Scene, buffer: ArrayBuffer): Promise<Mast
     }
   }
 
+  // Reset rotation before adding the new mesh. A previous `setMaster` could
+  // have composed a lay-flat rotation onto the group via the Place-on-face
+  // UI (issue #32); without this line, a second Open STL would inherit the
+  // prior orientation — which is jarring and would fail the issue's AC
+  // ("Load second STL after a lay-flat rotation → new master loads at
+  // identity orientation, not inheriting stale quaternion").
+  group.quaternion.identity();
+
   const material = createMasterMaterial();
   const mesh = new Mesh(displayGeometry, material);
   mesh.userData['tag'] = MASTER_MESH_TAG;
   // No scale / rotation / translation — scene is mm-native and we never
   // apply renderer-layer scaling (locked convention in CLAUDE.md).
   group.add(mesh);
+
+  // Build the three-mesh-bvh bounds tree on the new geometry so face
+  // picking (issue #32) is O(log N). This must happen AFTER the mesh is
+  // parented (the bounds tree only needs the geometry, but we keep the
+  // ordering obvious) and BEFORE any picking / raycasting by sibling
+  // code. Matched by `releaseMeshPicking(mesh)` inside `disposeMesh`.
+  prepareMeshForPicking(mesh);
 
   // Mesh-local AABB (the raw geometry bounds, before any group transform).
   // This is the input to the auto-center calculation below.
@@ -219,24 +239,31 @@ export async function setMaster(scene: Scene, buffer: ArrayBuffer): Promise<Mast
   // stay STL-faithful so downstream mold-gen + STL export see the user's
   // original coordinates.
   //
+  // We use the mesh-local bbox directly (instead of going through
+  // `recenterGroup` → `Box3.setFromObject` as the lay-flat path does)
+  // because we just reset the group quaternion to identity above. On
+  // identity rotation the local bbox equals the world-space bbox
+  // bit-identically, and reading it directly avoids the float32 drift
+  // that per-vertex world-matrix multiplies introduce on fixtures with
+  // large coordinates (e.g. mini-figurine at Y≈1094 → ~1e-4 mm drift).
+  //
   // `.set()` is absolute (not additive), which means a second load fully
-  // replaces any previous offset — no accumulation across loads. This is
-  // asserted in the unit tests.
+  // replaces any previous offset — no accumulation across loads.
   const localCenter = new Vector3();
   localBbox.getCenter(localCenter);
   const offset = new Vector3(-localCenter.x, -localBbox.min.y, -localCenter.z);
   group.position.set(offset.x, offset.y, offset.z);
-  // Keep the group's world matrices current so subsequent calls that rely on
-  // `mesh.getWorldPosition(...)` etc. see the new transform without waiting
-  // for the next render tick.
+  // Keep the group's world matrices current so subsequent calls that rely
+  // on `mesh.getWorldPosition(...)` etc. see the new transform without
+  // waiting for the next render tick.
   group.updateMatrixWorld(true);
 
-  // World-space AABB. The mesh itself has identity transform, but the
+  // World-space AABB. The mesh has identity local transform, but the
   // group now carries the offset — apply it to the local bbox so callers
   // (notably `frameToBox3`) frame the camera around where the mesh
   // actually sits, not where the raw geometry would have sat. Framing the
   // mesh-local bbox on an off-origin master (e.g. mini-figurine at Y≈1094)
-  // would leave the origin grid + axes gizmo off-camera — see issue #25.
+  // would leave the origin grid + axes gizmo off-camera.
   const bbox = localBbox.clone().translate(offset);
 
   return { mesh, volume_mm3, bbox, offset };
