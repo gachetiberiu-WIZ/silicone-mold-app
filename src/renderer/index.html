@@ -216,6 +216,12 @@
       .generate-block__hint--ready {
         color: var(--accent);
       }
+      .generate-block__hint--error {
+        /* Reuse the parameter-form error red (`.param-field__error`). Not a
+           theme token on purpose — only two places reference it, and
+           promoting to a --error-color var is churn for no benefit yet. */
+        color: #e06c75;
+      }
       .param-field {
         display: flex;
         flex-direction: column;
