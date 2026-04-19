@@ -13,10 +13,20 @@
 
 import { mount, type MountedViewport } from './scene/viewport';
 import { initI18n } from './i18n';
+import {
+  createParametersStore,
+  type ParametersStore,
+} from './state/parameters';
+import {
+  mountParameterPanel,
+  type ParameterPanelApi,
+} from './ui/parameters/panel';
 import { mountTopbar, type TopbarApi } from './ui/topbar';
 
 let topbar: TopbarApi | null = null;
 let viewport: MountedViewport | null = null;
+let parametersStore: ParametersStore | null = null;
+let parameterPanel: ParameterPanelApi | null = null;
 
 async function hydrateVersion(): Promise<void> {
   // The topbar owns the `[data-testid="app-version"]` element now; keep
@@ -59,6 +69,38 @@ function mountViewport(): void {
     return;
   }
   viewport = mount(container);
+}
+
+/**
+ * Create the parameters store and mount the right-sidebar panel. Called
+ * after i18n init so all labels resolve. The store is the single source of
+ * truth that Phase 3c's mold generator will read from.
+ *
+ * Exposed on `window.__testHooks.parameters` under `NODE_ENV === 'test'` so
+ * visual + E2E specs can drive or inspect state without clicking fields.
+ */
+function mountParameters(): void {
+  const container = document.getElementById('sidebar');
+  if (!container) {
+    console.error(
+      'Missing #sidebar container — renderer HTML is out of date.',
+    );
+    return;
+  }
+  parametersStore = createParametersStore();
+  parameterPanel = mountParameterPanel(container, parametersStore);
+
+  if (process.env.NODE_ENV === 'test') {
+    const w = window as unknown as {
+      __testHooks?: Record<string, unknown>;
+    };
+    const hooks = (w.__testHooks ??= {});
+    hooks['parameters'] = parametersStore;
+  }
+  // Silence unused-var lint for the panel handle — we need the reference
+  // to prevent early GC of its listeners, and to give future shutdown
+  // hooks a place to call destroy().
+  void parameterPanel;
 }
 
 /**
@@ -142,6 +184,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initI18n();
   mountUi();
   mountViewport();
+  mountParameters();
   wireOpenStlButton();
   void hydrateVersion();
 });
