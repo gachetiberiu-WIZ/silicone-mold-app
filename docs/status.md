@@ -476,4 +476,70 @@ User ran `pnpm dev`, clicked Open STL, and found:
 
 Phase 3a's user-visible slice is now **usable**: STL imports, renders centered on the bed, volume shows in topbar, camera frames correctly. Ready to open Phase 3b with the parameter-form agent + a pick-a-face-to-lay-flat agent spawned in parallel when the user gives the go.
 
+---
+
+## 2026-04-19 evening — Phase 3b wave 1
+
+User gave the "kick off Phase 3b" go-ahead. Spawned two `frontend-dev` agents in parallel, worktree-isolated. Both returned PRs; one shipped clean, one required two rounds of agent fix-up before landing.
+
+### Issues opened
+
+| # | Title | Agent | Status |
+|---|---|---|---|
+| #31 | feat(ui): mold parameter form in right sidebar | `agent:frontend` | **DONE — PR #33 merged (`38f65ae`)** |
+| #32 | feat(viewer): pick a face to lay flat on the bed | `agent:frontend` | **DONE — PR #34 merged (`149fd17`)** |
+
+### PRs merged
+
+| PR | SHA | What |
+|---|---|---|
+| #33 | `38f65ae` | Parameter form sidebar (8 fields, validation, clamp-on-blur, unit-aware, i18n, `ParametersStore` observable) |
+| #34 | `149fd17` | "Place on face" lay-flat (BVH picking, quaternion.premultiply, viewport-level rotation, re-centering, Escape-to-exit, Reset-orientation) |
+
+### Agent roster this wave
+
+| Agent | Task | Outcome |
+|---|---|---|
+| `frontend-dev` (a878fc22) | #31 → PR #33 | Shipped clean. 51 unit tests + 3 E2E + 2 visual specs. Two judgement-call deviations from issue spec — defaults from `molding-techniques.md §6` (doc wins over issue-table numbers) + `happy-dom@^20` added as **devDep only** for Vitest panel tests. Both surfaced via issue comment before coding, lead accepted both. |
+| `frontend-dev` (a3be5054) | #32 → PR #34 (round 1) | Shipped 900-line PR. Over the 600-line soft split threshold, justified in body. QA blocker: `worldMinY=15.95` post-lay-flat (should be ≈ 0). |
+| `qa-engineer` (a6563e40) | Review #34 round 1 | `Requires changes` — concrete blocker pinpointed, approved everything else (premultiply, BVH lifecycle, buffer-untouched invariant). |
+| `qa-engineer` (acf89b9f) | Review #33 | `Approved` with 3 non-blocking follow-ups. |
+| `frontend-dev` (a89ad883) | Fix #34 round 2 | Root-caused bbox bug to `Box3.setFromObject` using conservative-corner transform vs tight vertex walk. Fixed `recenterGroup` via new `computeWorldBoxTight` helper. Also fixed visual spec's bad `import 'three'` inside `page.evaluate`. Hit Sonnet rate-limit mid-rebase of main into the branch; commits pushed but conflict resolution incomplete. |
+| (lead) | Rebase + conflict resolution | Three files (`en.json`, `index.html`, `main.ts`) had PR #33 × PR #34 overlap. Resolved by hand: keep both top-level i18n keys, keep `#body` grid layout from PR #33, keep `.place-on-face` toggle styling from PR #34. Force-pushed. |
+| `frontend-dev` (ab9836c2) | Fix #34 round 3 | New failure mode: E2E test now **timed out at 30 s** instead of assertion-failing. Agent bisected it to the `for 51804 expect().toBe()` loop in the buffer-unchanged check — ~2 ms per `expect` × 51k = 118 s wall-clock. Collapsed to a single-assertion first-mismatch search; runtime dropped from 118 s to ms. |
+
+### Critical learnings captured
+
+- **`Box3.setFromObject(mesh)` without `precise=true` uses local-bbox-corner transform, not vertex walk.** For arbitrary rotations this over-estimates the world AABB. If a lay-flat-ish feature depends on `min.y`, use `setFromObject(mesh, true)` or a hand-rolled vertex walk. (Documented in `layFlat.ts` alongside `computeWorldBoxTight`.)
+- **`expect().toBe()` has ~2 ms of matcher overhead in Playwright.** Never loop-assert over 10k+ element arrays. Find-first-mismatch + single `expect` is the pattern.
+- **Parallel frontend-devs touching `i18n/en.json` + `index.html` + `main.ts` will conflict.** The issue bodies explicitly flagged "whichever PR lands first wins, the other rebases" — but when the second PR also hits a QA-blocker round, the rebase timing compounds. Lead owned the rebase in the end; future parallel waves should preferentially target non-overlapping files.
+- **Sonnet agent rate-limit mid-task** (reset 7pm local) cut off the first round-2 fix. Recovered by re-spawning after reset. Worth tracking cumulative rate-limit hits per wave as a health metric.
+
+### User-driven product direction captured
+
+Mid-wave, the user set a product direction for Phase 3c:
+
+1. **Lay-flat orientation is a required setup step** — the user must commit a face before the mold-generate action is enabled.
+2. **Mold generation is an explicit button**, not automatic. Greyed out until orientation is committed.
+3. **"Mold type" picker is out** — single-strategy (two-halves-in-box) at v1 means there's nothing to pick. The "Generate mold" button IS the mold-type commitment.
+4. The UX cue is a persistent "Please orient the part on its base" hint, not a blocking modal.
+
+Recorded here because it resets the shape of Phase 3c.
+
+### Outstanding advisory / follow-up items (cumulative, not new this wave)
+
+- Visual regression on ubuntu (SwiftShader) was FAILURE on #24, #29, #33, #34 — still the no-linux-CI-goldens situation. Policy (ADR-003 §B): first-successful-main-push CI → commit artifact PNGs → flip `continue-on-error: false` around 2026-05-03.
+- QA follow-ups from #33: (F1) Phase 3c integration point — `parametersStore` only exposed via `window.__testHooks.parameters`; add a proper import re-export when 3c needs it. (F2) Skip-to-viewport keyboard shortcut + light-theme parity deferred to 3j.
+- QA follow-ups from #34: (F3) add regression test for `localNormalToWorld` under non-uniform scale (future mirror feature). (F4) the agent included Escape-exit + cursor-crosshair E2E in the fix wave, so those two AC bullets are now covered.
+- "auto-center on Group, never on geometry" + "lay-flat rotation is group-level" invariants should be codified in `.claude/skills/three-js-viewer/SKILL.md` — lead-authored doc PR, since sub-agents can't edit skills.
+- Overlapping `tests/visual/empty-scene.spec.ts` + `scene-empty-axes.spec.ts` — consolidate.
+- `build windows installer` CI job has now run on main pushes (verify on next run) and continues to SKIP on PRs — intentional, it's a main-branch-only job.
+
+### Phase 3b → 3c gate
+
+Phase 3b delivered: parameter inputs are captured, lay-flat orientation is committable. Phase 3c ("Mold generation — happy path") can start. Suggested first-wave:
+
+1. **[feat] Setup cue + disabled "Generate mold" button** (`agent:frontend`) — persistent hint ("Please orient the part on its base before generating the mold") + `#sidebar` button wired to a yet-unimplemented generator stub. Small scope, lands the UX gate without any geometry work.
+2. **[feat] Happy-path mold generator** (`agent:geometry`) — consume `parametersStore` state + current `group.quaternion`, output base + sides + cap + sprue as Manifolds. No preview yet, no export — just produce the geometry in memory + surface silicone + resin pour volumes in the topbar alongside the master volume. Multi-issue, opens up Phase 3d/e/f.
+
 Awaiting user go-ahead.
