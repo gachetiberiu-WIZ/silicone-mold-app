@@ -272,3 +272,119 @@ test('lay-flat: pick top face → mesh re-seats on Y=0 + vertex buffer unchanged
     await app.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Non-blocking follow-ups from PR #34 QA (round 1):
+//   - Escape exits picking mode (AC #1 of issue #32).
+//   - `enableFacePicking()` sets `canvas.style.cursor = 'crosshair'`
+//     (AC #1 of issue #32).
+// Both run in a single Electron launch to amortise the ~3 s boot cost.
+// ---------------------------------------------------------------------------
+
+test('lay-flat UX: Escape exits picking mode + cursor becomes crosshair on enable', async () => {
+  const app = await launchApp();
+  try {
+    const page = await app.firstWindow();
+    await page.waitForLoadState('domcontentloaded');
+
+    await app.evaluate((_electron, fixturePath) => {
+      (
+        globalThis as unknown as {
+          __testDialogStub: {
+            showOpenDialog: () => Promise<{
+              canceled: boolean;
+              filePaths: string[];
+            }>;
+          };
+        }
+      ).__testDialogStub = {
+        showOpenDialog: () =>
+          Promise.resolve({ canceled: false, filePaths: [fixturePath] }),
+      };
+    }, MINI_FIGURINE_PATH);
+
+    const openBtn = page.locator('[data-testid="open-stl-btn"]');
+    await expect(openBtn).toBeVisible();
+
+    // Snapshot the masterLoaded promise BEFORE clicking Open STL.
+    await page.evaluate(() => {
+      const hooks = (
+        window as unknown as {
+          __testHooks?: { masterLoaded?: Promise<void> };
+        }
+      ).__testHooks;
+      if (!hooks?.masterLoaded) {
+        throw new Error('window.__testHooks.masterLoaded missing');
+      }
+      (
+        globalThis as unknown as { __pendingMasterLoaded: Promise<void> }
+      ).__pendingMasterLoaded = hooks.masterLoaded;
+    });
+
+    await openBtn.click();
+    await page.evaluate(
+      () =>
+        (
+          globalThis as unknown as { __pendingMasterLoaded: Promise<void> }
+        ).__pendingMasterLoaded,
+    );
+
+    // Enable face-picking and verify the cursor becomes crosshair AND the
+    // controller reports active.
+    await page.evaluate(() => {
+      type ViewportHooks = {
+        viewport?: {
+          enableFacePicking: () => void;
+          isFacePickingActive: () => boolean;
+        };
+      };
+      const hooks = (window as unknown as { __testHooks?: ViewportHooks })
+        .__testHooks;
+      const vp = hooks?.viewport;
+      if (!vp) throw new Error('viewport hook missing');
+      vp.enableFacePicking();
+      if (!vp.isFacePickingActive()) {
+        throw new Error('face-picking did not activate');
+      }
+    });
+
+    // AC #1 — cursor becomes crosshair on the canvas.
+    const cursorAfterEnable = await page.evaluate(() => {
+      const canvas = document.querySelector(
+        '#viewport canvas',
+      ) as HTMLCanvasElement | null;
+      return canvas?.style.cursor ?? '';
+    });
+    expect(cursorAfterEnable).toBe('crosshair');
+
+    // AC #1 — Escape exits picking mode. We dispatch a keydown on the
+    // window (the controller attaches the listener there, not on the
+    // canvas — matches browser conventions for global shortcuts).
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+
+    const stateAfterEscape = await page.evaluate(() => {
+      type ViewportHooks = {
+        viewport?: { isFacePickingActive: () => boolean };
+      };
+      const hooks = (window as unknown as { __testHooks?: ViewportHooks })
+        .__testHooks;
+      return hooks?.viewport?.isFacePickingActive() ?? null;
+    });
+    expect(stateAfterEscape).toBe(false);
+
+    // Cursor reverts on disable (empty string = inherits from CSS).
+    const cursorAfterEscape = await page.evaluate(() => {
+      const canvas = document.querySelector(
+        '#viewport canvas',
+      ) as HTMLCanvasElement | null;
+      return canvas?.style.cursor ?? 'missing';
+    });
+    expect(cursorAfterEscape).toBe('');
+  } finally {
+    await app.close();
+  }
+});
