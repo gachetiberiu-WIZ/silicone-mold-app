@@ -7,6 +7,7 @@
 // behaviour arrives with mesh loading in a later PR.
 
 import { PerspectiveCamera, Box3, Vector3 } from 'three';
+import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
 export const CAMERA_FOV_DEG = 45;
 export const CAMERA_NEAR = 1;
@@ -56,7 +57,11 @@ export function computeAspect(container: HTMLElement): number {
  * the box centre from a fixed iso-ish angle (+X, +Y, +Z octant). Visible
  * in visual tests — keep deterministic.
  */
-export function frameBox(camera: PerspectiveCamera, box: Box3): void {
+export function frameBox(
+  camera: PerspectiveCamera,
+  box: Box3,
+  padding = FRAME_PADDING,
+): void {
   const size = new Vector3();
   const center = new Vector3();
   box.getSize(size);
@@ -65,7 +70,7 @@ export function frameBox(camera: PerspectiveCamera, box: Box3): void {
   const maxDim = Math.max(size.x, size.y, size.z, 1e-3);
   const fovRad = (camera.fov * Math.PI) / 180;
   // Distance so the largest dimension fits the vertical FOV, times padding.
-  const distance = (maxDim / 2 / Math.tan(fovRad / 2)) * FRAME_PADDING;
+  const distance = (maxDim / 2 / Math.tan(fovRad / 2)) * padding;
 
   // Fixed iso-ish viewpoint. Deterministic: same camera for every visual test
   // until mesh loading supplies a per-mesh target.
@@ -74,4 +79,41 @@ export function frameBox(camera: PerspectiveCamera, box: Box3): void {
   camera.up.set(0, 1, 0);
   camera.lookAt(center);
   camera.updateProjectionMatrix();
+}
+
+/**
+ * Frame the camera AND retarget the OrbitControls to a given AABB.
+ *
+ * Why this exists (and not just `frameBox`):
+ *   - `frameBox` repositions the camera and calls `camera.lookAt(center)`,
+ *     which sets the camera's rotation to look at `center`. But OrbitControls
+ *     owns orbit rotation via its own `.target` — if we don't update the
+ *     controls' target, the next mouse-drag snaps the camera back to orbit
+ *     around the old target (typically origin). That is jarring and hides
+ *     the freshly-loaded mesh.
+ *   - We therefore set `controls.target` to the box centre AND call
+ *     `controls.update()` so the camera's rotation is re-derived from
+ *     target + position in one consistent pass.
+ *
+ * `padding` defaults to 1.4 per the three-js-viewer skill ("Frame-on-load
+ * to master's AABB with 1.4× padding").
+ */
+export function frameToBox3(
+  camera: PerspectiveCamera,
+  controls: OrbitControls,
+  box: Box3,
+  padding = FRAME_PADDING,
+): void {
+  const center = new Vector3();
+  box.getCenter(center);
+
+  // Position the camera via the shared helper. `frameBox` calls
+  // `camera.lookAt(center)`; we re-assert that orientation via
+  // `controls.update()` below so both agree on the target.
+  frameBox(camera, box, padding);
+
+  // Retarget the orbit so subsequent pans/rotates pivot around the mesh,
+  // not the world origin.
+  controls.target.copy(center);
+  controls.update();
 }
