@@ -74,6 +74,26 @@ export const LAY_FLAT_WIDGETS_TAG = 'lay-flat-widgets';
  */
 export const LAY_FLAT_ACTIVE_EVENT = 'lay-flat-active-changed';
 
+/**
+ * Custom event fired on `document` when the "orientation committed" state
+ * changes. Distinct from `LAY_FLAT_ACTIVE_EVENT` (which tracks picking-mode
+ * in/out) — this tracks whether the user has actually committed a face via
+ * `commit()`:
+ *
+ *   - `{ detail: true }`  after a successful `commit()` (face rotated onto
+ *                         the bed; controller auto-exits picking).
+ *   - `{ detail: false }` when the orientation is returned to the pristine
+ *                         state via `reset()`.
+ *   - `{ detail: false }` when `notifyMasterReset()` is called (a new STL
+ *                         is loaded → orientation resets to identity; any
+ *                         previous commit must NOT carry over).
+ *
+ * The Generate-mold button subscribes to this event to gate itself behind
+ * a committed orientation (issue #36). Consumers should prefer this event
+ * over polling `MountedViewport.isOrientationCommitted()` on every frame.
+ */
+export const LAY_FLAT_COMMITTED_EVENT = 'lay-flat-committed';
+
 /** Dimensions for the flat normal-indicator quad, in mm. */
 const NORMAL_QUAD_SIZE_MM = 15;
 
@@ -86,6 +106,19 @@ export interface LayFlatController {
   reset(): void;
   /** Whether picking mode is currently active. */
   isActive(): boolean;
+  /**
+   * Whether the user has committed an orientation since the last reset or
+   * master load. Mirrored onto `document` via `LAY_FLAT_COMMITTED_EVENT`.
+   */
+  isCommitted(): boolean;
+  /**
+   * Signal that the master mesh has been replaced (new STL loaded). The
+   * controller forgets any previous committed orientation and fires
+   * `LAY_FLAT_COMMITTED_EVENT` with `detail: false` so gated UI re-locks.
+   * The scene-graph side of the master swap is owned by `setMaster`; this
+   * method only manages the controller's own state + event.
+   */
+  notifyMasterReset(): void;
   /** Tear down permanently — remove widget group from the scene. */
   dispose(): void;
 }
@@ -116,6 +149,10 @@ export function createLayFlatController(
 
   let active = false;
   let disposed = false;
+  // Orientation-committed flag (issue #36). Starts false: a freshly-loaded
+  // master has pristine identity orientation. Flipped true inside `commit()`,
+  // flipped false inside `reset()` and `notifyMasterReset()`.
+  let committed = false;
 
   // --- Widgets --------------------------------------------------------------
 
@@ -336,8 +373,21 @@ export function createLayFlatController(
     group.quaternion.normalize();
 
     // Clean up hover widgets + auto-exit picking mode (issue AC: "picking
-    // mode auto-exits on commit").
+    // mode auto-exits on commit"). `disable()` fires its own active-event;
+    // sequencing it BEFORE the committed-event means subscribers observing
+    // both events see them in causal order: "picking ended → orientation
+    // committed". This matters for the Generate-mold button gate (#36):
+    // the button's enable tick lands after the picking cue has cleared,
+    // not in the middle of it.
     disable();
+
+    // Flip committed=true and notify — AFTER the rotation has been applied
+    // and the scene-graph is consistent. The Generate-mold button (#36)
+    // listens to this event to unlock itself.
+    if (!committed) {
+      committed = true;
+      emitCommittedChanged();
+    }
   }
 
   function reset(): void {
@@ -355,6 +405,28 @@ export function createLayFlatController(
     // Reset does not force picking mode on or off — the user might want to
     // reset while the toggle is active (to pick a different face cleanly)
     // or while it is inactive (pure "undo"). Respect current state.
+
+    // Orientation has been returned to identity → the committed flag must
+    // drop, re-disabling the Generate-mold button (#36). Only fire the
+    // event when the flag actually transitions, to keep the event stream
+    // meaningful.
+    if (committed) {
+      committed = false;
+      emitCommittedChanged();
+    }
+  }
+
+  /**
+   * External signal: the master mesh has been replaced (new STL loaded).
+   * Any previous committed orientation is no longer meaningful — the new
+   * master enters at identity with the committed flag cleared. See
+   * issue #36 AC: "After Open STL loads a new master → button re-disabled
+   * (inherited commit state does not carry over)".
+   */
+  function notifyMasterReset(): void {
+    if (!committed) return;
+    committed = false;
+    emitCommittedChanged();
   }
 
   // --- Enable / disable / dispose -------------------------------------------
@@ -362,6 +434,19 @@ export function createLayFlatController(
   function emitActiveChanged(): void {
     document.dispatchEvent(
       new CustomEvent<boolean>(LAY_FLAT_ACTIVE_EVENT, { detail: active }),
+    );
+  }
+
+  /**
+   * Fire `LAY_FLAT_COMMITTED_EVENT` with the current `committed` flag. The
+   * Generate-mold button subscribes so its disabled state mirrors the
+   * controller's truth. We always fire on transitions (caller's
+   * responsibility to only call when the flag actually changed) so
+   * listeners receive a consistent sequence.
+   */
+  function emitCommittedChanged(): void {
+    document.dispatchEvent(
+      new CustomEvent<boolean>(LAY_FLAT_COMMITTED_EVENT, { detail: committed }),
     );
   }
 
@@ -406,6 +491,8 @@ export function createLayFlatController(
     disable,
     reset,
     isActive: () => active,
+    isCommitted: () => committed,
+    notifyMasterReset,
     dispose,
   };
 }

@@ -11,13 +11,20 @@
  * tsconfig include).
  */
 
-import { LAY_FLAT_ACTIVE_EVENT } from './scene/layFlatController';
+import {
+  LAY_FLAT_ACTIVE_EVENT,
+  LAY_FLAT_COMMITTED_EVENT,
+} from './scene/layFlatController';
 import { mount, type MountedViewport } from './scene/viewport';
 import { initI18n } from './i18n';
 import {
   createParametersStore,
   type ParametersStore,
 } from './state/parameters';
+import {
+  mountGenerateButton,
+  type GenerateButtonApi,
+} from './ui/generateButton';
 import {
   mountParameterPanel,
   type ParameterPanelApi,
@@ -33,6 +40,7 @@ let viewport: MountedViewport | null = null;
 let parametersStore: ParametersStore | null = null;
 let parameterPanel: ParameterPanelApi | null = null;
 let placeOnFace: PlaceOnFaceToggleApi | null = null;
+let generateButton: GenerateButtonApi | null = null;
 
 async function hydrateVersion(): Promise<void> {
   // The topbar owns the `[data-testid="app-version"]` element now; keep
@@ -123,7 +131,50 @@ function mountParameters(): void {
     return;
   }
   parametersStore = createParametersStore();
+  // Panel mounts first because `mountParameterPanel` does `container.textContent = ''`
+  // to wipe any pre-mount HTML fallback. Mounting the generate-block before
+  // the panel would have it clobbered.
   parameterPanel = mountParameterPanel(container, parametersStore);
+
+  // Mount the Generate-mold block and move it to the TOP of the sidebar
+  // (issue #36: "at the TOP of the right sidebar, above the parameter
+  // form"). `appendChild` followed by `prepend` gives us idempotent top-
+  // insertion regardless of how many children `mountParameterPanel` added.
+  generateButton = mountGenerateButton(container, {
+    onGenerate() {
+      // Issue #36 stub: log the payload. Phase 3c wave-1-geometry (#37)
+      // replaces this with the real `generateSiliconeShell(master,
+      // parameters, viewTransform)` call once that PR lands.
+      //
+      // We look up the master group by its `userData.tag === 'master'`
+      // on the scene root — `createScene()` always seeds this child, and
+      // duplicating the tag literal (instead of importing a constant from
+      // `scene/master.ts`) keeps this module independent of the
+      // master-module internals.
+      const masterGroup = viewport?.scene.children.find(
+        (c) => c.userData['tag'] === 'master',
+      );
+      const q = masterGroup?.quaternion;
+      console.log('[generate] requested', {
+        quaternion: q ? [q.x, q.y, q.z, q.w] : null,
+        parameters: parametersStore?.get() ?? null,
+      });
+      // TODO(phase-3c): replace with `generateSiliconeShell(master, parameters, q)` once #37 merges.
+    },
+  });
+  container.prepend(generateButton.element);
+
+  // Subscribe to orientation-committed transitions. The controller fires
+  // true after a Place-on-face commit, false after Reset orientation, and
+  // false when a new master is loaded. We drive `setEnabled` straight off
+  // the event detail so the button's state is always the controller's
+  // truth — no polling.
+  document.addEventListener(LAY_FLAT_COMMITTED_EVENT, (ev) => {
+    const detail = (ev as CustomEvent<boolean>).detail;
+    if (typeof detail === 'boolean' && generateButton) {
+      generateButton.setEnabled(detail);
+    }
+  });
 
   if (process.env.NODE_ENV === 'test') {
     const w = window as unknown as {
@@ -131,6 +182,7 @@ function mountParameters(): void {
     };
     const hooks = (w.__testHooks ??= {});
     hooks['parameters'] = parametersStore;
+    if (generateButton) hooks['generateButton'] = generateButton;
   }
   // Silence unused-var lint for the panel handle — we need the reference
   // to prevent early GC of its listeners, and to give future shutdown
@@ -195,6 +247,15 @@ async function handleOpenStl(button: HTMLButtonElement): Promise<void> {
     if (placeOnFace) {
       placeOnFace.setEnabled(true);
       placeOnFace.setActive(false);
+    }
+    // Flip the Generate-block's hint from "Load an STL to begin." to
+    // "Orient the part on its base...". The button stays disabled — the
+    // LAY_FLAT_COMMITTED_EVENT subscription in `mountParameters()` will
+    // re-enable it after a commit. `viewport.setMaster` already called
+    // `layFlat.notifyMasterReset()`, which fires committed=false, so any
+    // stale enabled state from a previous master is cleared.
+    if (generateButton) {
+      generateButton.setHasMaster(true);
     }
   } catch (err) {
     console.error('[open-stl] unexpected error during load:', err);
