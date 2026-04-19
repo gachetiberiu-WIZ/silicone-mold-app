@@ -217,16 +217,78 @@ test('generate wire-up: click → volumes populate → re-commit → volumes sta
     await commitTopFace(page);
     await expect(page.locator('[data-testid="generate-btn"]')).toBeEnabled();
 
-    // Click Generate. The button label should flip to "Generating…".
+    // Click Generate. The button label should flip to "Generating…" during
+    // generation. On fast Windows CI runners the generator can resolve in
+    // under the 2 s Playwright polling window, racing `toHaveText`. Install
+    // a `MutationObserver` on the button BEFORE clicking so we record every
+    // `textContent` transition — the assertion later reads the array and
+    // requires "Generating…" to appear at least once regardless of timing.
+    await page.evaluate(() => {
+      const btn = document.querySelector<HTMLButtonElement>(
+        '[data-testid="generate-btn"]',
+      );
+      if (!btn) throw new Error('generate-btn missing');
+      const seen: string[] = [btn.textContent ?? ''];
+      const seenDisabled: boolean[] = [btn.disabled];
+      const observer = new MutationObserver(() => {
+        const text = btn.textContent ?? '';
+        if (seen[seen.length - 1] !== text) seen.push(text);
+        const disabled = btn.disabled;
+        if (seenDisabled[seenDisabled.length - 1] !== disabled) {
+          seenDisabled.push(disabled);
+        }
+      });
+      observer.observe(btn, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['disabled', 'aria-disabled'],
+      });
+      (
+        globalThis as unknown as {
+          __generateBtnTransitions: {
+            text: string[];
+            disabled: boolean[];
+            observer: MutationObserver;
+          };
+        }
+      ).__generateBtnTransitions = { text: seen, disabled: seenDisabled, observer };
+    });
+
     await page.locator('[data-testid="generate-btn"]').click();
-    await expect(page.locator('[data-testid="generate-btn"]'))
-      .toHaveText('Generating…', { timeout: 2_000 });
-    await expect(page.locator('[data-testid="generate-btn"]')).toBeDisabled();
 
     // Wait for the generator to finish — ≤ 15 s total (2-3 s typical).
     await expect(page.locator('[data-testid="generate-btn"]'))
       .toHaveText('Generate mold', { timeout: 15_000 });
     await expect(page.locator('[data-testid="generate-btn"]')).toBeEnabled();
+
+    // Drain the observer and assert the busy-state transition was visible.
+    // This is race-free: the observer captures every DOM mutation that
+    // happens on the button between click and now.
+    const transitions = await page.evaluate(() => {
+      const cache = (
+        globalThis as unknown as {
+          __generateBtnTransitions: {
+            text: string[];
+            disabled: boolean[];
+            observer: MutationObserver;
+          };
+        }
+      ).__generateBtnTransitions;
+      cache.observer.disconnect();
+      return { text: cache.text, disabled: cache.disabled };
+    });
+    expect(
+      transitions.text,
+      `button text transitions: ${JSON.stringify(transitions.text)}`,
+    ).toContain('Generating…');
+    expect(
+      transitions.disabled,
+      `button disabled transitions: ${JSON.stringify(transitions.disabled)}`,
+    ).toContain(true);
+    // After generation the button must be back to the ready label + enabled.
+    expect(transitions.text[transitions.text.length - 1]).toBe('Generate mold');
 
     // Both silicone + resin readouts now show concrete values (not the
     // placeholder) with the mm³ suffix.
