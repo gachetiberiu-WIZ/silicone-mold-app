@@ -21,7 +21,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:fixtures-regen": "node tests/fixtures/meshes/regen.mjs",
-    "test:e2e": "pnpm run build:renderer && playwright test --project=e2e-electron",
+    "test:e2e": "pnpm run build:renderer:test && playwright test --project=e2e-electron",
     "test:visual": "pnpm run build:renderer:test && playwright test --project=visual",
     "format": "prettier --write ."
   },
