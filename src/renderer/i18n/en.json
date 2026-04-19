@@ -1,0 +1,14 @@
+{
+  "volume": {
+    "label": "Volume",
+    "none": "No master loaded"
+  },
+  "units": {
+    "mm": "mm",
+    "in": "in"
+  },
+  "topbar": {
+    "open": "Open STL",
+    "appName": "Silicone Mold App"
+  }
+}

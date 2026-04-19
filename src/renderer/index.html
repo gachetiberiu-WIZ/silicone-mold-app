@@ -39,31 +39,85 @@
         height: 100%;
         width: 100%;
       }
-      header {
+      header.topbar {
         flex: 0 0 var(--topbar-h);
-        display: flex;
+        display: grid;
+        grid-template-columns: 1fr auto 1fr;
         align-items: center;
-        justify-content: space-between;
         padding: 0 16px;
         border-bottom: 1px solid var(--border);
         gap: 12px;
+        background: var(--bg);
       }
-      header .left,
-      header .right {
+      .topbar__left,
+      .topbar__center,
+      .topbar__right {
         display: flex;
         align-items: center;
         gap: 12px;
       }
-      header h1 {
+      .topbar__left {
+        justify-content: flex-start;
+      }
+      .topbar__center {
+        justify-content: center;
+      }
+      .topbar__right {
+        justify-content: flex-end;
+      }
+      .topbar__app-name {
         font-size: 14px;
         font-weight: 600;
         margin: 0;
         letter-spacing: 0.01em;
       }
-      header .version {
+      .topbar__version {
         color: var(--muted);
         font-variant-numeric: tabular-nums;
         font-size: 12px;
+      }
+      .topbar__volume {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 6px;
+        font-variant-numeric: tabular-nums;
+      }
+      .topbar__volume-label {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .topbar__volume-value {
+        color: var(--fg);
+        font-size: 13px;
+        min-width: 10ch;
+        text-align: right;
+      }
+      .units-toggle {
+        display: inline-flex;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      .units-toggle button {
+        appearance: none;
+        background: transparent;
+        color: var(--muted);
+        border: none;
+        border-radius: 0;
+        padding: 4px 10px;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .units-toggle button + button {
+        border-left: 1px solid var(--border);
+      }
+      .units-toggle button.is-active {
+        background: var(--accent);
+        color: #0b0d10;
+      }
+      .units-toggle button:hover:not(.is-active) {
+        color: var(--fg);
       }
       #viewport {
         flex: 1 1 auto;
@@ -93,16 +147,8 @@
   </head>
   <body>
     <div id="app">
-      <header>
-        <div class="left">
-          <h1>Silicone Mold App</h1>
-        </div>
-        <div class="right">
-          <button type="button" data-testid="open-stl-btn" disabled>
-            Open STL…
-          </button>
-          <span class="version" data-testid="app-version">v…</span>
-        </div>
+      <header class="topbar" data-testid="topbar">
+        <!-- Populated by src/renderer/ui/topbar.ts on DOMContentLoaded -->
       </header>
       <div id="viewport" data-testid="viewport"></div>
     </div>
