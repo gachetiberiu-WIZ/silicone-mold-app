@@ -13,9 +13,16 @@
 //     build-time NODE_ENV=test but belt-and-braces.
 //
 // Determinism notes:
-//   - Fixture is origin-offset (AABB at ~X=267..351, Y=1094..1163). The
-//     `frameToBox3` call inside `setMaster` retargets the camera + orbit
-//     to the mesh centre so the mesh fills the frame regardless.
+//   - Fixture is origin-offset in its STL bytes (AABB at ~X=267..351,
+//     Y=1094..1163). Issue #25 auto-centers the Master group on the print
+//     bed: after `setMaster`, the mesh's lowest point sits on Y=0 and its
+//     X/Z-centre is on the origin. The golden therefore shows the
+//     figurine sitting ON the grid with the origin axes gizmo visible
+//     behind it — NOT floating ~1 m off the grid as it would have if we
+//     rendered the STL coordinates verbatim.
+//   - `frameToBox3` inside `setMaster` then retargets the camera + orbit
+//     to the world-space bbox (local bbox + offset), so the mesh fills
+//     the frame alongside the origin gizmo.
 //   - manifold-3d is deterministic cross-platform (ADR-002), so volume +
 //     vertex positions are stable, which in turn makes the rendered output
 //     stable modulo the SwiftShader rasteriser jitter budget.
@@ -26,18 +33,10 @@ import { resolve } from 'node:path';
 
 const RENDERER_URL = 'http://localhost:5174/?test=1';
 
-const FIXTURE_PATH = resolve(
-  __dirname,
-  '..',
-  'fixtures',
-  'meshes',
-  'mini-figurine.stl',
-);
+const FIXTURE_PATH = resolve(__dirname, '..', 'fixtures', 'meshes', 'mini-figurine.stl');
 
 test.describe('visual — scene with master', () => {
-  test('renders mini-figurine master with camera framed to AABB', async ({
-    page,
-  }) => {
+  test('renders mini-figurine master with camera framed to AABB', async ({ page }) => {
     await page.clock.install({ time: new Date('2026-04-18T00:00:00Z') });
 
     // Stub `window.api` before navigation. The visual bundle runs in plain
@@ -57,9 +56,11 @@ test.describe('visual — scene with master', () => {
     // canvas appears inside #viewport.
     await page.waitForFunction(
       () => {
-        const hooks = (window as unknown as {
-          __testHooks?: { viewportReady?: boolean };
-        }).__testHooks;
+        const hooks = (
+          window as unknown as {
+            __testHooks?: { viewportReady?: boolean };
+          }
+        ).__testHooks;
         if (hooks?.viewportReady) return true;
         const container = document.getElementById('viewport');
         return !!container?.querySelector('canvas');
@@ -79,10 +80,7 @@ test.describe('visual — scene with master', () => {
       const u8 = new Uint8Array(bytes);
       // Clone into a standalone ArrayBuffer (not a view over a shared one)
       // so the buffer looks identical to the IPC round-trip output.
-      const ab = u8.buffer.slice(
-        u8.byteOffset,
-        u8.byteOffset + u8.byteLength,
-      );
+      const ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
       const hooks = (
         window as unknown as {
           __testHooks?: {
