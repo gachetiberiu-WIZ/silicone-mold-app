@@ -31,11 +31,12 @@ test('smoke: Electron app launches and shows package version via IPC', async () 
       timeout: 10_000,
     });
 
-    // The Open STL button exists but is disabled in this PR — renderer-side
-    // wiring ships in a follow-up issue.
+    // The Open STL button is enabled as of issue #16 — clicking it drives
+    // the full Open STL IPC flow + viewport setMaster. The disabled state
+    // was a pre-wiring marker that no longer applies.
     const openBtn = page.locator('[data-testid="open-stl-btn"]');
     await expect(openBtn).toBeVisible();
-    await expect(openBtn).toBeDisabled();
+    await expect(openBtn).toBeEnabled();
   } finally {
     await app.close();
   }
