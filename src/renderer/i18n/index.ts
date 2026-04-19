@@ -54,13 +54,23 @@ export function initI18n(): void {
  * Translation helper. Thin wrapper over `i18next.t` so call sites don't need
  * to import i18next directly and we can swap the backing lib later without
  * a widespread refactor.
+ *
+ * Accepts an optional `options` bag for interpolation — e.g.
+ * `t('parameters.invalid', { min: '2', max: '20' })` looks up the key and
+ * substitutes `{{min}}` / `{{max}}` in the resolved string. Values are
+ * stringified by i18next; the escapeValue:false setting applies (safe
+ * because we only ever assign results to `textContent`, never to innerHTML).
  */
-export function t(key: string): string {
+export function t(
+  key: string,
+  options?: Record<string, string | number>,
+): string {
   if (!i18next.isInitialized) {
     initI18n();
   }
-  // i18next's `t()` returns string when called with a plain key + no options.
-  return i18next.t(key);
+  // i18next's `t()` returns string when called with a plain key + optional
+  // interpolation options (`returnObjects` is not enabled).
+  return options ? i18next.t(key, options) : i18next.t(key);
 }
 
 /**

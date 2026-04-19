@@ -26,6 +26,9 @@ export type UnitSystem = 'mm' | 'in';
 /** mm³ per in³. Pinned so the conversion is trivially auditable. */
 const MM3_PER_IN3 = 25.4 ** 3; // 16387.064
 
+/** mm per in. The single source of truth for length conversion. */
+const MM_PER_IN = 25.4;
+
 /**
  * en-US integer formatter for mm³. Thousands grouped with comma, no decimals.
  * Rounds half-away-from-zero per `Intl.NumberFormat`'s default rounding mode
@@ -68,4 +71,72 @@ export function formatVolume(mm3: number | null, unit: UnitSystem): string {
 
   // Default / mm branch.
   return `${MM3_FORMATTER.format(mm3)} mm\u00B3`;
+}
+
+// ----------------------------------------------------------------------------
+// Length formatters (parameter form).
+//
+// Unlike `formatVolume` (which is locale-grouped + unit-suffixed for a readout
+// display), lengths are displayed inside <input type="number"> fields. Number
+// inputs parse with `.` as the decimal separator and ignore grouping
+// separators. So these functions deliberately produce:
+//
+//   - NO thousands separators (e.g. 1234.5 → "1234.5", NOT "1,234.5")
+//   - NO unit suffix (the field renders the unit in a sibling label)
+//   - Fixed decimal places per unit system: 1 for mm, 3 for inches
+//     (0.05" ≈ 1.27 mm, so 3 decimal places covers the whole 2–25 mm range
+//     without loss when a user flips mm→in→mm)
+//
+// Parsing is permissive: trims whitespace, accepts `,` or `.` as decimal
+// separator (common in en-GB / de-DE locales even though we pin en-US for
+// display). Returns NaN on anything unparseable — callers clamp NaN to the
+// default, per issue #31 UX contract.
+// ----------------------------------------------------------------------------
+
+/** Tolerance for the `parseLength(formatLength(x, u), u) === x` round-trip in tests. */
+export const LENGTH_ROUND_TRIP_ABS_TOL_MM = 1e-4;
+
+/**
+ * Format a length in mm for display in a number input.
+ *
+ * @param mm   Length in mm. Internal storage unit.
+ * @param unit Active unit system. In `'mm'` returns the mm value with 1
+ *             decimal; in `'in'` converts to inches and returns with 3
+ *             decimals. No grouping separators. No unit suffix.
+ *
+ * @returns    Plain numeric string suitable for an `<input type="number">`
+ *             `.value`, or empty string if `mm` is non-finite.
+ */
+export function formatLength(mm: number, unit: UnitSystem): string {
+  if (!Number.isFinite(mm)) return '';
+  if (unit === 'in') {
+    const inches = mm / MM_PER_IN;
+    return inches.toFixed(3);
+  }
+  return mm.toFixed(1);
+}
+
+/**
+ * Parse a user-entered length string and return the value in mm.
+ *
+ * @param text Raw input text. Trimmed; accepts '.' or ',' as decimal.
+ * @param unit Active unit system that the text is expressed in. If 'in',
+ *             the numeric part is multiplied by 25.4 to reach mm.
+ *
+ * @returns    Length in mm, or NaN if the text cannot be parsed as a
+ *             finite number. Negative values are permitted by the
+ *             formatter (they round-trip cleanly) and left to range-
+ *             checking at the field level — we don't clamp sign here.
+ */
+export function parseLength(text: string, unit: UnitSystem): number {
+  if (typeof text !== 'string') return Number.NaN;
+  const trimmed = text.trim();
+  if (trimmed === '') return Number.NaN;
+  // Normalise locale comma to dot before parsing. Avoids surprising the
+  // German / French / Finnish / etc. users who reflexively type `6,35`.
+  const normalised = trimmed.replace(',', '.');
+  const n = Number(normalised);
+  if (!Number.isFinite(n)) return Number.NaN;
+  if (unit === 'in') return n * MM_PER_IN;
+  return n;
 }
