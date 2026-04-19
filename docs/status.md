@@ -165,3 +165,46 @@ Checked against `docs/plan.md` Phase 1 criteria:
 ### Agent events
 
 No sub-agents spawned this session (Phase 1 scaffolding is lead-only work by design).
+
+### GitHub bootstrap
+
+- **Remote created:** https://github.com/gachetiberiu-WIZ/silicone-mold-app (private).
+- **gh CLI:** v2.90.0 authenticated as `gachetiberiu-WIZ` (token scopes `gist`, `read:org`, `repo`, `workflow`). Choco install picked up an existing install.
+- **Pushed:** initial commit `cc7d0cf` to `origin/main`.
+- **Labels:** 18 labels applied from `.github/labels.yml` — 4 phase, 8 agent, 6 type (bug, enhancement, tech-debt, blocked, needs-human, good-first-issue). Default `documentation`, `question`, `wontfix`, `help wanted`, `invalid`, `duplicate`, `good first issue` deleted.
+- **Milestones:** Phase 0 (closed), Phase 1, Phase 2, Phase 3 (all open).
+
+### Branch protection — BLOCKED on GitHub plan
+
+`gh api PUT .../branches/main/protection` returned `403 Upgrade to GitHub Pro or make this repository public to enable this feature.` This is a GitHub Free limitation — branch protection rules and rulesets are both private-repo-gated behind Pro/Team/Enterprise.
+
+**Three resolution paths (user decision):**
+1. **Make repo public** — $0. Full branch protection available. Trade-off: code + issues visible to everyone.
+2. **Upgrade to GitHub Pro** — $4/month. Keep repo private, get branch protection + protected branches history.
+3. **Accept unprotected `main` + enforce via discipline** — $0, private. Relies on:
+   - Pre-push git hook (local) rejecting pushes to `main`.
+   - Convention: all work on feature branches, PRs only.
+   - CI still runs but cannot block merge. Lead merges discipline becomes the gate.
+   - Risk: an accidental `git push origin main` from a wrong branch ships unreviewed code.
+
+Until resolved, treat `main` as convention-protected (rule #1 in `CLAUDE.md` unchanged: **never commit to `main` directly**).
+
+### Phase 1 status
+
+Phase 1 acceptance criteria (from `docs/plan.md`):
+
+- [x] GitHub repo created (private)
+- [ ] Protected main — **BLOCKED** (see above)
+- [x] Labels in sync with `.github/labels.yml`
+- [x] Milestones Phase-1 / Phase-2 / Phase-3 created; Phase-0 closed
+- [x] `CLAUDE.md` committed and pushed
+- [x] 7 skills committed and pushed
+- [x] 8 agent roles + README committed and pushed
+- [x] `.github/` templates + CI workflow committed and pushed
+- [x] Root config (package.json, tsconfig, ignores, formatter, env template) committed
+- [x] Initial commit pushed to `origin/main`
+- [ ] **CI green on first push** — will verify on next PR; no PR open yet, so no CI run has triggered
+- [x] `docs/plan.md` + `docs/status.md` committed
+- [x] `tests/fixtures/meshes/README.md` committed
+
+**Phase 1 is functionally complete** modulo the branch-protection blocker and the first CI run (which will trigger on the first PR). Ready to start Phase 2 test infrastructure once the user picks a branch-protection path.
