@@ -6,20 +6,22 @@
 // tagging it per the `three-js-viewer` skill, and swapping it into the scene
 // under the pre-existing `userData.tag === 'master'` group.
 //
-// CSP note (important, surface in PR):
-//   The locked renderer CSP is `script-src 'self'` — no `'wasm-unsafe-eval'`.
-//   That means `manifold-3d`'s WASM kernel CANNOT be instantiated in the
-//   renderer process today (Chromium 124+ blocks `WebAssembly.instantiate`
-//   without `wasm-unsafe-eval`). Calling `loadStl` from `src/geometry/` would
-//   drag in manifold-3d and fail at runtime. To stay within the CSP decision
-//   we:
-//     1. Parse the STL with three-js's `STLLoader.parse` directly (pure JS).
-//     2. Compute volume via the signed-tetrahedra formula below (pure JS,
-//        matches `Manifold.volume()` to within 1e-4 on watertight inputs).
-//     3. Leave Manifold-backed ops (boolean, offset) for a future PR that
-//        either runs geometry in the main process behind IPC, in a Worker
-//        with its own CSP, or after the renderer CSP is widened.
-//   See the PR description for recommended follow-up.
+// Kernel integration (post-CSP-widen):
+//   The locked renderer CSP now includes `'wasm-unsafe-eval'` (see
+//   `src/renderer/index.html` and `.claude/skills/desktop-app-shell/SKILL.md`),
+//   which permits `manifold-3d`'s WASM kernel to instantiate in the renderer.
+//   Per ADR-002 the kernel is the single source of truth for geometry:
+//   - `loadStl(buffer)` parses the STL and returns `{ geometry, manifold }`
+//     with an automatic repair pass (silent repair is surfaced via a console
+//     warning inside `bufferGeometryToManifold`).
+//   - `meshVolume(manifold)` returns the watertight volume in mm³, matching
+//     the manifold-3d `volume()` API — deterministic cross-platform.
+//   - The display mesh's `BufferGeometry` is derived from the repaired
+//     manifold via `manifoldToBufferGeometry`, so the rendered mesh is
+//     guaranteed to match what downstream booleans / offsets will consume.
+//   We deliberately do NOT hold onto the `Manifold` here; we `.delete()` it
+//   before returning to release WASM memory. Future PRs that need the live
+//   manifold (booleans, offsets, slicing) will rework the lifecycle then.
 //
 // Swap semantics:
 //   - At most one master is live at a time. `setMaster` disposes the previous
@@ -29,14 +31,14 @@
 
 import {
   Box3,
-  type BufferAttribute,
-  type BufferGeometry,
   Mesh,
   MeshStandardMaterial,
   type Scene,
-  Vector3,
 } from 'three';
-import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+
+import { loadStl } from '@/geometry/loadStl';
+import { manifoldToBufferGeometry } from '@/geometry/adapters';
+import { meshVolume } from '@/geometry/volume';
 
 /**
  * Pre-existing master-group tag placed by `createScene()`. We look the group
@@ -96,72 +98,11 @@ function disposeMesh(mesh: Mesh): void {
 }
 
 /**
- * Signed-volume-of-tetrahedra formula for a closed triangle mesh:
- *
- *   V = (1/6) Σ  v1 · (v2 × v3)
- *
- * Triangles are taken with consistent CCW outward winding (which STLLoader +
- * `computeVertexNormals` preserves). The result is in mm³ because vertex
- * coordinates are in mm (scene convention, 1 unit = 1 mm).
- *
- * Numerical behaviour:
- *   - The formula is robust against numerical drift for watertight meshes,
- *     and returns an approximation (not necessarily positive) for slightly
- *     non-watertight ones.
- *   - We take `Math.abs` at the end because STL winding orientation is not
- *     a property we trust (some exporters invert normals). On the mini-
- *     figurine fixture this agrees with `manifold.volume()` to ≈ 0.01%.
- *   - No repair / merge happens here — the user sees the raw volume. Future
- *     PRs can route through manifold-3d (in a worker or main process) for
- *     watertightness feedback.
- *
- * See the fixture README + `tests/geometry/loadStl.test.ts` for the
- * manifold-measured reference volume; unit tests compare the two within
- * a relative tolerance.
- */
-function computeMeshVolumeMm3(geometry: BufferGeometry): number {
-  const pos = geometry.getAttribute('position');
-  if (!pos) return 0;
-  const index = geometry.getIndex();
-
-  // Scratch vectors reused across the loop — avoid GC pressure on large
-  // meshes. Measured: ~40% faster than allocating per triangle on a 500k-tri
-  // mesh in a quick benchmark.
-  const a = new Vector3();
-  const b = new Vector3();
-  const c = new Vector3();
-  const cross = new Vector3();
-
-  let sixV = 0;
-  const triCount = index ? index.count / 3 : pos.count / 3;
-  for (let t = 0; t < triCount; t++) {
-    let i0: number;
-    let i1: number;
-    let i2: number;
-    if (index) {
-      i0 = index.getX(t * 3);
-      i1 = index.getX(t * 3 + 1);
-      i2 = index.getX(t * 3 + 2);
-    } else {
-      i0 = t * 3;
-      i1 = t * 3 + 1;
-      i2 = t * 3 + 2;
-    }
-    a.fromBufferAttribute(pos as BufferAttribute, i0);
-    b.fromBufferAttribute(pos as BufferAttribute, i1);
-    c.fromBufferAttribute(pos as BufferAttribute, i2);
-    cross.crossVectors(b, c);
-    sixV += a.dot(cross);
-  }
-  return Math.abs(sixV) / 6;
-}
-
-/**
  * Result of `setMaster`. `mesh` is live in the scene graph (callers should
- * not add it again). `volume_mm3` is computed from triangle signed volumes
- * (see `computeMeshVolumeMm3` for why not Manifold); `bbox` is the
- * world-space AABB of `mesh.geometry` and is what `frameToBox3` should
- * consume to frame the camera.
+ * not add it again). `volume_mm3` is the watertight volume reported by
+ * manifold-3d's kernel (ADR-002); `bbox` is the world-space AABB of
+ * `mesh.geometry` and is what `frameToBox3` should consume to frame the
+ * camera.
  */
 export interface MasterResult {
   readonly mesh: Mesh;
@@ -197,25 +138,36 @@ export async function setMaster(
     );
   }
 
-  // Parse the STL directly via three-js. STLLoader handles both ASCII and
-  // binary payloads. We deliberately do NOT call `src/geometry/loadStl.ts`
-  // here — that pulls in manifold-3d's WASM kernel, which the locked
-  // renderer CSP (`script-src 'self'`) forbids. See the top-of-file CSP
-  // note.
-  const loader = new STLLoader();
-  const geometry = loader.parse(buffer);
+  // Hand off to the geometry kernel. `loadStl` produces both the parsed
+  // `BufferGeometry` and the paired `Manifold` (repaired by the kernel).
+  // We use the manifold's watertight volume and a BufferGeometry derived
+  // from the manifold so the rendered mesh matches what a downstream
+  // boolean/offset would consume — no "what you see isn't what gets cut"
+  // divergence.
+  const loaded = await loadStl(buffer);
 
-  // Drop the STL's stored face normals (per-triangle, often wrong in
-  // real-world files) and re-derive smooth vertex normals from winding.
-  if (geometry.hasAttribute('normal')) {
-    geometry.deleteAttribute('normal');
+  let volume_mm3: number;
+  let displayGeometry;
+  try {
+    volume_mm3 = meshVolume(loaded.manifold);
+    displayGeometry = await manifoldToBufferGeometry(loaded.manifold);
+  } finally {
+    // Release the WASM-backed manifold as soon as we've extracted what we
+    // need. Keeping it alive across renders would leak WASM heap memory on
+    // every Open STL. Future PRs that need the live manifold (booleans,
+    // offsets) will have to rework this lifecycle.
+    loaded.manifold.delete();
+    // The parsed `loaded.geometry` is the three-js-side parse result from
+    // the STL loader; we don't attach it to the scene (we use the
+    // manifold-derived `displayGeometry` instead), so release its VBO too.
+    loaded.geometry.dispose();
   }
-  geometry.computeVertexNormals();
 
   if (
-    !geometry.hasAttribute('position') ||
-    geometry.getAttribute('position').count === 0
+    !displayGeometry.hasAttribute('position') ||
+    displayGeometry.getAttribute('position').count === 0
   ) {
+    displayGeometry.dispose();
     throw new Error('setMaster: parsed STL has no vertices');
   }
 
@@ -229,23 +181,18 @@ export async function setMaster(
   }
 
   const material = createMasterMaterial();
-  const mesh = new Mesh(geometry, material);
+  const mesh = new Mesh(displayGeometry, material);
   mesh.userData['tag'] = MASTER_MESH_TAG;
   // No scale / rotation / translation — scene is mm-native and we never
   // apply renderer-layer scaling (locked convention in CLAUDE.md).
   group.add(mesh);
 
-  // Volume in mm³ computed on-geometry. Matches manifold-3d's volume to
-  // within ~1e-4 relative on watertight input; the test fixture's manifold
-  // volume is 127 451.6 mm³ and this path yields the same ballpark.
-  const volume_mm3 = computeMeshVolumeMm3(geometry);
-
   // World-space AABB. Mesh has identity transform so geometry AABB ==
   // world AABB; clone so callers can mutate without side effects.
-  geometry.computeBoundingBox();
+  displayGeometry.computeBoundingBox();
   const bbox = new Box3();
-  if (geometry.boundingBox) {
-    bbox.copy(geometry.boundingBox);
+  if (displayGeometry.boundingBox) {
+    bbox.copy(displayGeometry.boundingBox);
   }
 
   return { mesh, volume_mm3, bbox };
