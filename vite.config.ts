@@ -47,6 +47,19 @@ export default defineConfig(({ mode }) => ({
     port: 5173,
     strictPort: true,
   },
+  // `manifold-3d` ships an Emscripten JS loader that locates its sidecar
+  // `.wasm` via a relative URL. Vite's default pre-bundling rewrites the
+  // JS into `node_modules/.vite/deps/` but does NOT surface the sibling
+  // `.wasm` to the dev server, so `WebAssembly.instantiate` receives the
+  // SPA fallback HTML and fails with `expected magic word ... found 3c 21 64 6f`.
+  // Excluding manifold-3d from pre-bundling preserves the upstream
+  // relative-URL resolution. `assetsInclude` makes Vite serve .wasm with
+  // the correct MIME. Production `vite build` is unaffected (Rollup
+  // handles the WASM asset).
+  optimizeDeps: {
+    exclude: ['manifold-3d'],
+  },
+  assetsInclude: ['**/*.wasm'],
   plugins: [
     electron({
       main: {
