@@ -424,4 +424,56 @@ Next natural wave is **parameter input** (the controls the mold generator will n
 
 These are parallelisable. Defer mold-generation (Phase 3c) until parameters are in place.
 
+User wants **pick-a-face-to-lay-flat** (OrcaSlicer-style) shipped in parallel with the parameter form — different agents, same wave.
+
+---
+
+## 2026-04-19 late PM — live testing + first quality-of-life wave
+
+### User-observed issues during first local dev run
+
+User ran `pnpm dev`, clicked Open STL, and found:
+
+1. **STL wouldn't render** — `wasm streaming compile failed ... found 3c 21 64 6f` in DevTools console. Vite dev pre-bundled `manifold-3d` into `node_modules/.vite/deps/` without exposing the sibling `.wasm` asset; WebAssembly received the SPA fallback HTML.
+2. **Mesh rendered at offset coords** — mini-figurine STL has bbox min `[267, 1094, 0]` (Rhino export). Mesh was invisible relative to axes/grid at world origin.
+3. **Axis flicker at origin** — z-fighting between `AxesHelper` and `GridHelper` at Y=0.
+4. **Drag-drop missing** — user expected to drop an `.stl` onto the window.
+5. **`ELECTRON_RUN_AS_NODE=1`** leaking from Claude Code's VS Code Electron host into bash crashes `electron .` with `app is undefined`. Local workaround: `unset ELECTRON_RUN_AS_NODE` before `pnpm dev`.
+
+### PRs merged
+
+| PR | SHA | What |
+|---|---|---|
+| #23 | `b567c01` | Phase 3a closeout |
+| #24 | `cf1d849` | Vite dev WASM fix (`optimizeDeps.exclude: ['manifold-3d']` + `assetsInclude: ['**/*.wasm']`) |
+| #29 | `30b4cf8` | Viewer auto-centers master on bed (group-level translation; STL-faithful geometry preserved) |
+
+### Agent roster this wave
+
+| Agent | Task | Outcome |
+|---|---|---|
+| (lead) | PR #24 direct fix | Merged admin-bypass |
+| `frontend-dev` (a5eba8e0) | Issue #25 → PR #29 | 1 PR, green on all required CI. 7 new Vitest tests. Visual regression failure is expected first-run golden-write. |
+| `qa-engineer` (a5b8797c) | Review PR #29 | Approved via `--comment` (same-identity restriction). Praised the additive `MasterResult.offset` seam. |
+
+### Tech-debt + feature issues opened (not yet assigned)
+
+| # | Title | Agent | Scope |
+|---|---|---|---|
+| #25 | feat(viewer): auto-center master on print bed | `agent:frontend` | **DONE — PR #29 merged** |
+| #26 | fix(viewer): z-fighting between axes and grid at origin | `agent:frontend` | ~30 min cosmetic |
+| #27 | feat(app): drag-drop STL onto window | `agent:frontend` | ~2 hours |
+| #28 | chore(dev): wrap pnpm dev to unset `ELECTRON_RUN_AS_NODE` | `agent:app-shell` | ~30 min |
+
+### Outstanding advisory / follow-up items
+
+- Visual regression on ubuntu (SwiftShader) was FAILURE on both #24 and #29 — expected: no linux-CI goldens committed yet. Policy (ADR-003 §B): fresh goldens from first successful main-push CI run commit in a follow-up, then flip `continue-on-error: false` around 2026-05-03.
+- QA flagged a separate docs-only follow-up: codify "auto-center on Group, never on geometry" invariant in `.claude/skills/three-js-viewer/SKILL.md` (lead-authored since sub-agents can't edit skills).
+- Overlapping `tests/visual/empty-scene.spec.ts` + `scene-empty-axes.spec.ts` should consolidate (qa flagged earlier wave).
+- `build windows installer` CI job still hasn't actually run — it's push-to-main-only and the last two main-pushes should have triggered it; verify next session.
+
+### Phase 3a → 3b gate
+
+Phase 3a's user-visible slice is now **usable**: STL imports, renders centered on the bed, volume shows in topbar, camera frames correctly. Ready to open Phase 3b with the parameter-form agent + a pick-a-face-to-lay-flat agent spawned in parallel when the user gives the go.
+
 Awaiting user go-ahead.
