@@ -1,0 +1,20 @@
+{
+  "name": "unit-cube",
+  "triCount": 12,
+  "volume_mm3": 1,
+  "surfaceArea_mm2": 6,
+  "boundingBoxMin": [
+    -0.5,
+    -0.5,
+    -0.5
+  ],
+  "boundingBoxMax": [
+    0.5,
+    0.5,
+    0.5
+  ],
+  "isManifold": true,
+  "source": "procedurally generated via tests/fixtures/meshes/generate.ts",
+  "license": "public-domain",
+  "notes": "1×1×1 mm cube centered at origin. Exact volume = 1.0 mm³."
+}
