@@ -21,14 +21,24 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"],
+      "@shared/*": ["shared/*"],
       "@fixtures/*": ["tests/fixtures/*"]
     },
+
+    "types": ["node"],
 
     "outDir": "dist",
     "sourceMap": true,
     "declaration": false,
     "noEmit": true
   },
-  "include": ["src/**/*", "tests/**/*"],
-  "exclude": ["node_modules", "dist", "out", "release"]
+  "include": [
+    "src/**/*",
+    "shared/**/*",
+    "tests/**/*",
+    "vite.config.ts",
+    "playwright.config.ts",
+    "eslint.config.mjs"
+  ],
+  "exclude": ["node_modules", "dist", "dist-electron", "out", "release"]
 }
