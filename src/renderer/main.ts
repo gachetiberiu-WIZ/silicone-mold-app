@@ -1,20 +1,33 @@
 /**
  * Renderer entry point.
  *
- * Boots i18n, mounts the topbar (owns the Open STL button + volume readout
- * + mm/inches toggle), hydrates the version string via the typed IPC
- * bridge, mounts the Three.js viewport into `#viewport`, and wires the
- * Open STL button → `window.api.openStl()` → `viewport.setMaster(buffer)`
- * → `topbar.setVolume(volume_mm3)`.
+ * Boots i18n, mounts the topbar (owns the Open STL button + master /
+ * silicone / resin volume readouts + mm/inches toggle), hydrates the
+ * version string via the typed IPC bridge, mounts the Three.js viewport
+ * into `#viewport`, and wires:
+ *
+ *   Open STL → `window.api.openStl()` → `viewport.setMaster(buffer)`
+ *            → `topbar.setMasterVolume(volume_mm3)`.
+ *   Generate → `generateSiliconeShell(master, parameters, viewTransform)`
+ *            → `topbar.setSiliconeVolume + setResinVolume`.
+ *
+ * Stale-invalidation (issue #40): the silicone + resin readouts reset to
+ * the `null` placeholder on any of:
+ *   - new STL load,
+ *   - lay-flat commit (orientation changed),
+ *   - reset orientation (orientation changed).
+ * Master volume is invariant under rigid transform → resets only on new
+ * STL load.
  *
  * The `window.api` surface is declared in ./types.d.ts (picked up via the
  * tsconfig include).
  */
 
-import {
-  LAY_FLAT_ACTIVE_EVENT,
-  LAY_FLAT_COMMITTED_EVENT,
-} from './scene/layFlatController';
+import { Matrix4 } from 'three';
+
+import { generateSiliconeShell } from '@/geometry/generateMold';
+import { LAY_FLAT_ACTIVE_EVENT } from './scene/layFlatController';
+import { getMasterManifold } from './scene/master';
 import { mount, type MountedViewport } from './scene/viewport';
 import { initI18n } from './i18n';
 import {
@@ -25,6 +38,7 @@ import {
   mountGenerateButton,
   type GenerateButtonApi,
 } from './ui/generateButton';
+import { attachGenerateInvalidation } from './ui/generateInvalidation';
 import {
   mountParameterPanel,
   type ParameterPanelApi,
@@ -142,15 +156,10 @@ function mountParameters(): void {
   // insertion regardless of how many children `mountParameterPanel` added.
   generateButton = mountGenerateButton(container, {
     onGenerate() {
-      // Issue #36 stub: log the payload. Phase 3c wave-1-geometry (#37)
-      // replaces this with the real `generateSiliconeShell(master,
-      // parameters, viewTransform)` call once that PR lands.
-      //
-      // We look up the master group by its `userData.tag === 'master'`
-      // on the scene root — `createScene()` always seeds this child, and
-      // duplicating the tag literal (instead of importing a constant from
-      // `scene/master.ts`) keeps this module independent of the
-      // master-module internals.
+      // Phase 3c wave 2 (issue #40): fire-and-forget the async generation;
+      // the button's own busy-state handles re-entrancy. We keep the
+      // trailing `[generate] requested` console line so the existing
+      // `generate-gate.spec.ts` assertion stays green without changes.
       const masterGroup = viewport?.scene.children.find(
         (c) => c.userData['tag'] === 'master',
       );
@@ -159,22 +168,23 @@ function mountParameters(): void {
         quaternion: q ? [q.x, q.y, q.z, q.w] : null,
         parameters: parametersStore?.get() ?? null,
       });
-      // TODO(phase-3c): replace with `generateSiliconeShell(master, parameters, q)` once #37 merges.
+      void handleGenerate();
     },
   });
   container.prepend(generateButton.element);
 
   // Subscribe to orientation-committed transitions. The controller fires
   // true after a Place-on-face commit, false after Reset orientation, and
-  // false when a new master is loaded. We drive `setEnabled` straight off
-  // the event detail so the button's state is always the controller's
-  // truth — no polling.
-  document.addEventListener(LAY_FLAT_COMMITTED_EVENT, (ev) => {
-    const detail = (ev as CustomEvent<boolean>).detail;
-    if (typeof detail === 'boolean' && generateButton) {
-      generateButton.setEnabled(detail);
-    }
-  });
+  // false when a new master is loaded. `attachGenerateInvalidation`:
+  //   - drives `setEnabled` off the event detail so the button's state is
+  //     always the controller's truth,
+  //   - invalidates silicone + resin readouts (orientation change → any
+  //     previously-computed volumes are stale for the new frame),
+  //   - clears any lingering error message from a prior failed attempt.
+  // See `src/renderer/ui/generateInvalidation.ts` for the full semantics.
+  if (topbar && generateButton) {
+    attachGenerateInvalidation(topbar, generateButton);
+  }
 
   if (process.env.NODE_ENV === 'test') {
     const w = window as unknown as {
@@ -188,6 +198,132 @@ function mountParameters(): void {
   // to prevent early GC of its listeners, and to give future shutdown
   // hooks a place to call destroy().
   void parameterPanel;
+}
+
+/**
+ * Monotonically-incrementing counter used to invalidate stale
+ * generate-in-flight resolutions. If the user re-orients (committing a new
+ * face) or loads a new STL while a generation is still resolving, the
+ * promise's `.then` must be ignored because its inputs are now stale.
+ *
+ * We increment on: every Generate click (starts a new epoch). When the
+ * promise resolves, we compare the epoch it was started under against the
+ * current value; mismatch → drop the result on the floor.
+ */
+let generateEpoch = 0;
+
+/**
+ * Run one silicone-shell generation pass. Drives the busy / error states
+ * on the Generate button, and pushes the result volumes to the topbar on
+ * success. Does NOT dispose the returned half-Manifolds until they get
+ * used downstream (Phase 3d's preview renderer) — we keep them alive on
+ * `window.__latestSiliconeShell` for later waves, but this wave just needs
+ * the volumes. To stay within the WASM-memory budget, we DO delete the
+ * halves right after reading the numbers; re-generation reallocates them.
+ *
+ * Defence-in-depth: guards against missing viewport / manifold / topbar /
+ * button so a mis-wired tick doesn't throw.
+ */
+async function handleGenerate(): Promise<void> {
+  if (!viewport) {
+    console.error('[generate] viewport not mounted');
+    return;
+  }
+  if (!generateButton) {
+    console.error('[generate] generateButton not mounted');
+    return;
+  }
+  if (!parametersStore) {
+    console.error('[generate] parametersStore not mounted');
+    return;
+  }
+  if (!topbar) {
+    console.error('[generate] topbar not mounted');
+    return;
+  }
+
+  // Defence-in-depth: the button is gated behind `isOrientationCommitted`
+  // so this path should always have a master. Still, a null-check here
+  // gives a clean user-facing error instead of an opaque TypeError if the
+  // gate somehow slips.
+  const master = getMasterManifold(viewport.scene);
+  if (!master) {
+    const msg = 'No master mesh loaded';
+    console.error(`[generate] ${msg}`);
+    generateButton.setError(msg);
+    return;
+  }
+
+  // The Master group's world matrix encodes the user's committed
+  // orientation (lay-flat rotation) + the auto-center offset. Pass it
+  // straight to the generator; `generateSiliconeShell` applies this as
+  // step 1 of its algorithm so the parting plane operates in the oriented
+  // frame the user sees.
+  const masterGroup = viewport.scene.children.find(
+    (c) => c.userData['tag'] === 'master',
+  );
+  if (!masterGroup) {
+    const msg = 'Master group missing from scene';
+    console.error(`[generate] ${msg}`);
+    generateButton.setError(msg);
+    return;
+  }
+  // Ensure the world matrix reflects the current transform — most of the
+  // app keeps it up to date, but belt-and-braces.
+  masterGroup.updateMatrixWorld(true);
+  const viewTransform = new Matrix4().copy(masterGroup.matrixWorld);
+
+  const parameters = parametersStore.get();
+  const epoch = ++generateEpoch;
+
+  generateButton.setError(null);
+  generateButton.setBusy(true);
+  // Clear stale numbers immediately so the user doesn't see previous values
+  // behind the "Generating…" label.
+  topbar.setSiliconeVolume(null);
+  topbar.setResinVolume(null);
+
+  try {
+    const result = await generateSiliconeShell(
+      master,
+      parameters,
+      viewTransform,
+    );
+
+    // Staleness guard: if a later click / commit / reset bumped the epoch
+    // while we were awaiting, drop the result. The later event already
+    // cleared the topbar; re-pushing our numbers would be wrong.
+    if (epoch !== generateEpoch) {
+      // Free the WASM-heap allocations so they don't leak.
+      result.siliconeUpperHalf.delete();
+      result.siliconeLowerHalf.delete();
+      return;
+    }
+
+    topbar.setSiliconeVolume(result.siliconeVolume_mm3);
+    topbar.setResinVolume(result.resinVolume_mm3);
+
+    // v1 doesn't render or export the halves — they were for volume
+    // compute only. Release the WASM memory now that we've read the
+    // numbers. Phase 3d will keep them alive for the preview renderer.
+    result.siliconeUpperHalf.delete();
+    result.siliconeLowerHalf.delete();
+  } catch (err) {
+    // If the user invalidated this run mid-flight, swallow — the topbar
+    // and error state have already been managed by the committed-event
+    // listener. Showing an error message from a superseded run would be
+    // confusing.
+    if (epoch !== generateEpoch) return;
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[generate] failed:', err);
+    generateButton.setError(message);
+  } finally {
+    // Only release busy if this run is still current. An earlier,
+    // superseded run must NOT un-busy a later, in-flight run.
+    if (epoch === generateEpoch) {
+      generateButton.setBusy(false);
+    }
+  }
 }
 
 /**
@@ -239,7 +375,19 @@ async function handleOpenStl(button: HTMLButtonElement): Promise<void> {
     // volume; feed it straight to the topbar.
     const result = await viewport.setMaster(response.buffer);
     if (topbar) {
-      topbar.setVolume(result.volume_mm3);
+      topbar.setMasterVolume(result.volume_mm3);
+      // Any previously-populated silicone + resin values are for the OLD
+      // master and must be cleared. The lay-flat controller's
+      // `notifyMasterReset` will also fire a committed-event that clears
+      // them, but only when a commit was previously live — belt-and-
+      // braces here covers the first-load case and any defensive UI state.
+      topbar.setSiliconeVolume(null);
+      topbar.setResinVolume(null);
+    }
+    // Clear any residual error from a previous generate attempt.
+    if (generateButton) {
+      generateButton.setError(null);
+      generateButton.setBusy(false);
     }
     // Enable the lay-flat controls now that a master is in the scene.
     // `setMaster` resets the master group to identity rotation, so the

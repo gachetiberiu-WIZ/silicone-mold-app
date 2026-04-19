@@ -271,6 +271,132 @@ describe('generateButton — destroy', () => {
   });
 });
 
+describe('generateButton — busy state (issue #40)', () => {
+  test('setBusy(true) disables the button and swaps the label to "Generating…"', () => {
+    const { container, api } = mount();
+    api.setHasMaster(true);
+    api.setEnabled(true);
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )!;
+    expect(btn.textContent).toBe(i18next.t('generate.button'));
+    expect(btn.disabled).toBe(false);
+
+    api.setBusy(true);
+    expect(btn.disabled).toBe(true);
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
+    expect(btn.textContent).toBe(i18next.t('generate.buttonBusy'));
+    expect(api.isBusy()).toBe(true);
+  });
+
+  test('setBusy(false) restores the label and the enabled flag is honoured', () => {
+    const { container, api } = mount();
+    api.setHasMaster(true);
+    api.setEnabled(true);
+    api.setBusy(true);
+    api.setBusy(false);
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )!;
+    expect(btn.disabled).toBe(false);
+    expect(btn.textContent).toBe(i18next.t('generate.button'));
+    expect(api.isBusy()).toBe(false);
+  });
+
+  test('busy swallows clicks even on an enabled button', () => {
+    const onGenerate = vi.fn();
+    const { container, api } = mount(onGenerate);
+    api.setHasMaster(true);
+    api.setEnabled(true);
+    api.setBusy(true);
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )!;
+    // Synthetic dispatch bypasses the native disabled check, so the
+    // component's internal guard must swallow the call.
+    btn.dispatchEvent(new Event('click', { bubbles: true }));
+    expect(onGenerate).not.toHaveBeenCalled();
+  });
+
+  test('idempotent setBusy (same value twice is a no-op)', () => {
+    const { container, api } = mount();
+    api.setHasMaster(true);
+    api.setEnabled(true);
+    api.setBusy(true);
+    api.setBusy(true);
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )!;
+    expect(btn.textContent).toBe(i18next.t('generate.buttonBusy'));
+  });
+});
+
+describe('generateButton — error state (issue #40)', () => {
+  test('setError replaces the hint with the i18n error template', () => {
+    const { container, api } = mount();
+    api.setHasMaster(true);
+    api.setEnabled(true);
+    api.setError('wall too thin');
+
+    const hint = container.querySelector<HTMLElement>(
+      '[data-testid="generate-hint"]',
+    )!;
+    expect(hint.textContent).toBe(
+      i18next.t('generate.error', { reason: 'wall too thin' }),
+    );
+    expect(hint.classList.contains('generate-block__hint--error')).toBe(true);
+    // Error state removes the accent-ready colour even when enabled.
+    expect(hint.classList.contains('generate-block__hint--ready')).toBe(false);
+  });
+
+  test('setError(null) restores the normal hint sequence', () => {
+    const { container, api } = mount();
+    api.setHasMaster(true);
+    api.setEnabled(true);
+    api.setError('boom');
+    api.setError(null);
+
+    const hint = container.querySelector<HTMLElement>(
+      '[data-testid="generate-hint"]',
+    )!;
+    expect(hint.textContent).toBe(i18next.t('generate.ready'));
+    expect(hint.classList.contains('generate-block__hint--error')).toBe(false);
+    expect(hint.classList.contains('generate-block__hint--ready')).toBe(true);
+  });
+
+  test('setError does NOT disable the button (user retries via click)', () => {
+    const { container, api } = mount();
+    api.setHasMaster(true);
+    api.setEnabled(true);
+    api.setError('boom');
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="generate-btn"]',
+    )!;
+    expect(btn.disabled).toBe(false);
+  });
+
+  test('starting a new busy cycle clears any prior error', () => {
+    const { container, api } = mount();
+    api.setHasMaster(true);
+    api.setEnabled(true);
+    api.setError('boom');
+    api.setBusy(true);
+
+    const hint = container.querySelector<HTMLElement>(
+      '[data-testid="generate-hint"]',
+    )!;
+    expect(hint.classList.contains('generate-block__hint--error')).toBe(false);
+    // Busy doesn't touch the hint text itself (keeps "Ready to generate"),
+    // it only clears the error branch. Re-assert the ready hint shows.
+    expect(hint.textContent).toBe(i18next.t('generate.ready'));
+  });
+});
+
 describe('generateButton — i18n', () => {
   test('button label, hint, and ready text all resolve through i18next', () => {
     const { container, api } = mount();

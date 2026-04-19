@@ -10,7 +10,10 @@
   },
   "topbar": {
     "open": "Open STL",
-    "appName": "Silicone Mold App"
+    "appName": "Silicone Mold App",
+    "volumeMaster": "Master",
+    "volumeSilicone": "Silicone",
+    "volumeResin": "Resin"
   },
   "parameters": {
     "title": "Mold parameters",
@@ -38,8 +41,10 @@
   },
   "generate": {
     "button": "Generate mold",
+    "buttonBusy": "Generating…",
     "hint": "Orient the part on its base (use Place on face in the toolbar), then click Generate.",
     "ready": "Ready to generate",
-    "noMaster": "Load an STL to begin."
+    "noMaster": "Load an STL to begin.",
+    "error": "Could not generate mold: {{reason}}"
   }
 }
