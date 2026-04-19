@@ -42,6 +42,7 @@
     "electron-updater": "^6.3.0",
     "eslint": "^9.16.0",
     "globals": "^17.5.0",
+    "happy-dom": "^20.9.0",
     "prettier": "^3.4.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.58.2",

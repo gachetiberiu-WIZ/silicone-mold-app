@@ -5,10 +5,29 @@
   },
   "units": {
     "mm": "mm",
-    "in": "in"
+    "in": "in",
+    "deg": "°"
   },
   "topbar": {
     "open": "Open STL",
     "appName": "Silicone Mold App"
+  },
+  "parameters": {
+    "title": "Mold parameters",
+    "wall": "Wall thickness",
+    "base": "Base thickness",
+    "sideCount": "Side count",
+    "sprue": "Sprue diameter",
+    "vent": "Vent diameter",
+    "ventCount": "Vent count",
+    "keyStyle": "Registration keys",
+    "keyStyleOptions": {
+      "asymmetric-hemi": "Asymmetric hemispheres",
+      "cone": "Cone",
+      "keyhole": "Keyhole"
+    },
+    "draft": "Draft angle",
+    "reset": "Reset to defaults",
+    "invalid": "Out of range ({{min}}–{{max}})"
   }
 }

@@ -17,6 +17,7 @@
         --accent: #4a9eff;
         --border: #333333;
         --topbar-h: 48px;
+        --sidebar-w: 280px;
       }
       * {
         box-sizing: border-box;
@@ -119,12 +120,107 @@
       .units-toggle button:hover:not(.is-active) {
         color: var(--fg);
       }
-      #viewport {
+      /* ---- Body layout: viewport + sidebar grid -------------------------- */
+      #body {
         flex: 1 1 auto;
+        display: grid;
+        grid-template-columns: 1fr var(--sidebar-w);
+        min-height: 0;
+      }
+      #viewport {
         position: relative;
         overflow: hidden;
         background: var(--bg);
         /* The WebGL canvas inherits 100%/100% from its own inline styles. */
+      }
+
+      /* ---- Right sidebar: mold parameters ------------------------------- */
+      #sidebar {
+        border-left: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--fg);
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 16px;
+        overflow-y: auto;
+      }
+      .sidebar__title {
+        margin: 0 0 4px 0;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .sidebar__form {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin: 0;
+        padding: 0;
+        border: none;
+      }
+      .param-field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .param-field__label {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .param-field__label label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .param-field__unit {
+        font-size: 11px;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+      .param-field__input,
+      .param-field__select {
+        appearance: none;
+        background: transparent;
+        color: var(--fg);
+        border: 1px solid var(--border);
+        padding: 6px 8px;
+        border-radius: 6px;
+        font: inherit;
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+        width: 100%;
+      }
+      .param-field__input:focus,
+      .param-field__select:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+        border-color: var(--accent);
+      }
+      .param-field__input[aria-invalid='true'] {
+        border-color: #e06c75;
+      }
+      .param-field__error {
+        color: #e06c75;
+        font-size: 11px;
+        min-height: 1em;
+      }
+      .sidebar__reset {
+        margin-top: auto;
+        align-self: stretch;
+      }
+      /* Firefox: hide number-input spin buttons — the kb-arrows still work. */
+      .param-field__input::-webkit-outer-spin-button,
+      .param-field__input::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+      }
+      .param-field__input[type='number'] {
+        -moz-appearance: textfield;
       }
       button {
         appearance: none;
@@ -150,7 +246,12 @@
       <header class="topbar" data-testid="topbar">
         <!-- Populated by src/renderer/ui/topbar.ts on DOMContentLoaded -->
       </header>
-      <div id="viewport" data-testid="viewport"></div>
+      <div id="body">
+        <div id="viewport" data-testid="viewport"></div>
+        <aside id="sidebar" data-testid="sidebar">
+          <!-- Populated by src/renderer/ui/parameters/panel.ts on DOMContentLoaded -->
+        </aside>
+      </div>
     </div>
     <script type="module" src="./main.ts"></script>
   </body>
