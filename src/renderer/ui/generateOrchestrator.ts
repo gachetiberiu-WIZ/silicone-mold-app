@@ -298,6 +298,14 @@ export function createGenerateOrchestrator(
           console.debug(`[generate] printableVolume=${result.printableVolume_mm3.toFixed(1)} mm³`);
         }
 
+        // Wave 3 (issue #55): surface soft warnings at debug level.
+        // Empty array on the happy path is the common case; the log is
+        // only useful when fewer vents fit than the user requested. A
+        // future UI wave will hoist these into a toast / sidebar.
+        if (Array.isArray(result.warnings) && result.warnings.length > 0) {
+          console.debug('[generate] warnings:', result.warnings);
+        }
+
         if (scene) {
           // Happy path (issue #47): hand ownership of BOTH half-Manifolds
           // to the scene sink. `scene.setSilicone` is responsible for
