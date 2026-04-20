@@ -5,7 +5,9 @@
 //
 //   Scene
 //   ├── Origin (Group, tag: 'origin')
-//   │   └── GridHelper (tag: 'grid-major' + 'grid-minor' child)
+//   │   └── origin-gizmos (Group)
+//   │       ├── GridHelper (tag: 'grid-major' + 'grid-minor' child)
+//   │       └── AxesHelper (tag: 'world-axes')
 //   ├── Master (Group, tag: 'master')   ← populated by later PRs
 //   ├── Mold   (Group, tag: 'mold', visible=false)   ← populated later
 //   └── Widgets (Group, tag: 'widgets')   ← populated later
@@ -20,7 +22,7 @@ import {
   Scene,
 } from 'three';
 import { SCENE_BACKGROUND } from './renderer';
-import { createGrid } from './gizmos';
+import { createOriginGizmos } from './gizmos';
 
 export function createScene(): Scene {
   const scene = new Scene();
@@ -48,7 +50,7 @@ export function createScene(): Scene {
   // Scene graph scaffolding — future PRs populate Master / Mold / Widgets.
   const origin = new Group();
   origin.userData['tag'] = 'origin';
-  origin.add(createGrid());
+  origin.add(createOriginGizmos());
   scene.add(origin);
 
   const master = new Group();
