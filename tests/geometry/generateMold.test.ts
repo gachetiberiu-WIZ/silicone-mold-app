@@ -25,6 +25,7 @@ import {
   loadStl,
   manifoldToBufferGeometry,
 } from '@/geometry';
+import type { MoldGenerationResult } from '@/geometry/generateMold';
 import { DEFAULT_PARAMETERS, type MoldParameters } from '@/renderer/state/parameters';
 import { fixtureExists, fixturePaths } from '@fixtures/meshes/loader';
 import { readFileSync } from 'node:fs';
@@ -42,6 +43,20 @@ function readFixtureBuffer(name: string): ArrayBuffer {
   // fresh ArrayBuffer so `loadStl` (and manifold-3d) don't read beyond
   // byteLength.
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+}
+
+/**
+ * Dispose every Manifold owned by a `MoldGenerationResult` — both silicone
+ * halves and every printable-box part. Extracted so each test's `finally`
+ * block stays a one-liner and so adding a new result-bound Manifold in the
+ * future is a one-site change here, not N sites across the suite.
+ */
+function disposeAll(result: MoldGenerationResult): void {
+  result.siliconeUpperHalf.delete();
+  result.siliconeLowerHalf.delete();
+  result.basePart.delete();
+  result.topCapPart.delete();
+  for (const s of result.sideParts) s.delete();
 }
 
 describe('generateSiliconeShell — unit-cube fixture', () => {
@@ -93,10 +108,7 @@ describe('generateSiliconeShell — unit-cube fixture', () => {
           // Halves sum to total silicone volume (issue AC).
           const upperVol = result.siliconeUpperHalf.volume();
           const lowerVol = result.siliconeLowerHalf.volume();
-          expect(upperVol + lowerVol).toBeCloseTo(
-            result.siliconeVolume_mm3,
-            6,
-          );
+          expect(upperVol + lowerVol).toBeCloseTo(result.siliconeVolume_mm3, 6);
 
           // The cube is symmetric about y=0, so both halves should be
           // equal to each other within kernel noise. 1% rel tolerance.
@@ -115,15 +127,13 @@ describe('generateSiliconeShell — unit-cube fixture', () => {
           // transform) while tolerating the grid-quantisation cost we
           // accept in exchange for meeting the 3 s budget.
           const relErr =
-            Math.abs(result.siliconeVolume_mm3 - ANALYTIC_SILICONE_VOL) /
-            ANALYTIC_SILICONE_VOL;
+            Math.abs(result.siliconeVolume_mm3 - ANALYTIC_SILICONE_VOL) / ANALYTIC_SILICONE_VOL;
           expect(relErr).toBeLessThan(0.03);
 
           // Resin = master volume = 1.0 mm³.
           expect(result.resinVolume_mm3).toBeCloseTo(1.0, 4);
         } finally {
-          result.siliconeUpperHalf.delete();
-          result.siliconeLowerHalf.delete();
+          disposeAll(result);
         }
       } finally {
         manifold.delete();
@@ -137,9 +147,7 @@ describe('generateSiliconeShell — unit-sphere fixture', () => {
   test.skipIf(!fixtureExists('unit-sphere-icos-3'))(
     'computes shell around an icosphere within 5% of the analytic solution',
     async () => {
-      const { manifold } = await loadStl(
-        readFixtureBuffer('unit-sphere-icos-3'),
-      );
+      const { manifold } = await loadStl(readFixtureBuffer('unit-sphere-icos-3'));
       try {
         // unit-sphere-icos-3 fixture is a radius-1 icosphere (3 subdivisions).
         // The master's volume per the sidecar JSON is ~4.188 mm³ ≈ (4/3)π.
@@ -170,24 +178,19 @@ describe('generateSiliconeShell — unit-sphere fixture', () => {
           // Halves sum to total.
           const upperVol = result.siliconeUpperHalf.volume();
           const lowerVol = result.siliconeLowerHalf.volume();
-          expect(upperVol + lowerVol).toBeCloseTo(
-            result.siliconeVolume_mm3,
-            6,
-          );
+          expect(upperVol + lowerVol).toBeCloseTo(result.siliconeVolume_mm3, 6);
 
           // Symmetry: y=0 centred sphere has identical halves.
           expect(upperVol / lowerVol).toBeCloseTo(1.0, 1);
 
           // Analytic silicone volume within 5% (icosphere tolerance).
           const relErr =
-            Math.abs(result.siliconeVolume_mm3 - ANALYTIC_SILICONE_VOL) /
-            ANALYTIC_SILICONE_VOL;
+            Math.abs(result.siliconeVolume_mm3 - ANALYTIC_SILICONE_VOL) / ANALYTIC_SILICONE_VOL;
           expect(relErr).toBeLessThan(0.05);
 
           expect(result.resinVolume_mm3).toBeCloseTo(MASTER_VOL, 4);
         } finally {
-          result.siliconeUpperHalf.delete();
-          result.siliconeLowerHalf.delete();
+          disposeAll(result);
         }
       } finally {
         manifold.delete();
@@ -277,8 +280,7 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
           // Resin = master (no sprue/vent yet).
           expect(result.resinVolume_mm3).toBeCloseTo(masterVol, 3);
         } finally {
-          result.siliconeUpperHalf.delete();
-          result.siliconeLowerHalf.delete();
+          disposeAll(result);
         }
       } finally {
         manifold.delete();
@@ -333,8 +335,51 @@ describe('generateSiliconeShell — integration with adapter', () => {
           bg.dispose();
         }
       } finally {
-        result.siliconeUpperHalf.delete();
-        result.siliconeLowerHalf.delete();
+        disposeAll(result);
+      }
+    } finally {
+      master.delete();
+    }
+  }, 30_000);
+});
+
+describe('generateSiliconeShell — printable-box integration (Wave 2, issue #50)', () => {
+  // Light integration: Wave 2 outputs flow through the full
+  // `generateSiliconeShell` call. Pure-geometry invariants live in
+  // `tests/geometry/printableBox.test.ts`; this suite just pins the
+  // end-to-end wiring — shape, sideCount, volumes.
+  test('returns basePart, sideParts (length=sideCount), topCapPart + printableVolume', async () => {
+    const toplevel = await initManifold();
+    const master = toplevel.Manifold.cube([4, 4, 4], true);
+    try {
+      for (const sideCount of [2, 3, 4] as const) {
+        const result = await generateSiliconeShell(
+          master,
+          params({ wallThickness_mm: 5, sideCount, baseThickness_mm: 3 }),
+          new Matrix4(),
+        );
+        try {
+          expect(isManifold(result.basePart)).toBe(true);
+          expect(isManifold(result.topCapPart)).toBe(true);
+          expect(result.sideParts).toHaveLength(sideCount);
+          for (const s of result.sideParts) {
+            expect(isManifold(s)).toBe(true);
+          }
+
+          // printableVolume_mm3 matches the sum of parts.
+          let sum = result.basePart.volume() + result.topCapPart.volume();
+          for (const s of result.sideParts) sum += s.volume();
+          expect(result.printableVolume_mm3).toBeCloseTo(sum, 3);
+
+          // printableVolume is strictly positive.
+          expect(result.printableVolume_mm3).toBeGreaterThan(0);
+        } finally {
+          result.siliconeUpperHalf.delete();
+          result.siliconeLowerHalf.delete();
+          result.basePart.delete();
+          result.topCapPart.delete();
+          for (const s of result.sideParts) s.delete();
+        }
       }
     } finally {
       master.delete();
@@ -348,12 +393,38 @@ describe('generateSiliconeShell — validation', () => {
     const master = toplevel.Manifold.cube([1, 1, 1], true);
     try {
       await expect(
-        generateSiliconeShell(
-          master,
-          params({ wallThickness_mm: 2 }),
-          new Matrix4(),
-        ),
+        generateSiliconeShell(master, params({ wallThickness_mm: 2 }), new Matrix4()),
       ).rejects.toThrow(/wallThickness_mm=2/);
+    } finally {
+      master.delete();
+    }
+  });
+
+  test('rejects sideCount outside {2, 3, 4} before Manifold allocation', async () => {
+    // Wave 2 (issue #50) AC: "invalid sideCount (e.g., 5) throws
+    // InvalidParametersError before any Manifold allocation". The
+    // validation runs before the `initManifold()` await inside the
+    // generator, so a bad sideCount surfaces as a rejected promise
+    // with the `InvalidParametersError` name.
+    const toplevel = await initManifold();
+    const master = toplevel.Manifold.cube([1, 1, 1], true);
+    try {
+      const bad = {
+        ...DEFAULT_PARAMETERS,
+        sideCount: 5 as unknown as 2 | 3 | 4,
+      };
+      await expect(generateSiliconeShell(master, bad, new Matrix4())).rejects.toThrow(
+        /sideCount=5/,
+      );
+      // Error class assertion — the thrown error must be the dedicated
+      // `InvalidParametersError` so callers can branch on type.
+      try {
+        await generateSiliconeShell(master, bad, new Matrix4());
+        throw new Error('expected generateSiliconeShell to reject');
+      } catch (err) {
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error).name).toBe('InvalidParametersError');
+      }
     } finally {
       master.delete();
     }
@@ -390,10 +461,7 @@ describe('generateSiliconeShell — validation', () => {
       try {
         // Silicone volume is invariant to rigid transform — both must
         // produce the same total (within numerical noise).
-        expect(rotated.siliconeVolume_mm3).toBeCloseTo(
-          upright.siliconeVolume_mm3,
-          1,
-        );
+        expect(rotated.siliconeVolume_mm3).toBeCloseTo(upright.siliconeVolume_mm3, 1);
 
         // But the upper/lower split is NOT invariant. In the upright
         // case the bar is tall on Y → cut at midY splits down the long
@@ -406,10 +474,8 @@ describe('generateSiliconeShell — validation', () => {
         expect(isManifold(rotated.siliconeUpperHalf)).toBe(true);
         expect(isManifold(rotated.siliconeLowerHalf)).toBe(true);
       } finally {
-        upright.siliconeUpperHalf.delete();
-        upright.siliconeLowerHalf.delete();
-        rotated.siliconeUpperHalf.delete();
-        rotated.siliconeLowerHalf.delete();
+        disposeAll(upright);
+        disposeAll(rotated);
       }
     } finally {
       bar.delete();

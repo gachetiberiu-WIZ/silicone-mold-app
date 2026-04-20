@@ -41,7 +41,7 @@
 // Manifold ownership (issue #47)
 // ------------------------------
 //
-// The half-Manifolds in `SiliconeShellResult` are generator-owned until
+// The half-Manifolds in `MoldGenerationResult` are generator-owned until
 // the orchestrator decides what to do with them:
 //
 //   - Happy path + `scene` supplied:  ownership HANDS OFF to the scene
@@ -62,8 +62,41 @@ import type { Manifold } from 'manifold-3d';
 import type { Matrix4 } from 'three';
 
 import type { MoldParameters } from '../state/parameters';
-import type { SiliconeShellResult } from '@/geometry/generateMold';
+import type { MoldGenerationResult } from '@/geometry/generateMold';
 import { bumpGenerateEpoch, getGenerateEpoch } from './generateEpoch';
+
+/**
+ * Dispose every printable-box Manifold in a `MoldGenerationResult`
+ * (base + every side + top cap). Factored out because Wave 2 (issue #50)
+ * added these fields to the result shape and the orchestrator has to
+ * dispose them on FOUR code paths — happy, stale, generator-rejection,
+ * and scene-setSilicone-rejection — so inlining would drift.
+ *
+ * Kept as a free function so the tests (which mock Manifolds with
+ * `.delete` spies) can exercise the same dispose path as production.
+ * Resilient to missing fields / legacy mocks — some of the existing
+ * tests construct a minimal `MoldGenerationResult`-shaped object without
+ * the new printable fields, and the production-shaped result always
+ * has them; an `undefined`-tolerant loop absorbs both.
+ *
+ * No-op safe: calling with already-disposed Manifolds is the caller's
+ * contract; we never double-dispose within this helper.
+ */
+function disposePrintableParts(result: MoldGenerationResult): void {
+  // The production generator always populates these; tests may omit.
+  // A simple truthy check covers both.
+  if (result.basePart && typeof result.basePart.delete === 'function') {
+    result.basePart.delete();
+  }
+  if (result.topCapPart && typeof result.topCapPart.delete === 'function') {
+    result.topCapPart.delete();
+  }
+  if (Array.isArray(result.sideParts)) {
+    for (const s of result.sideParts) {
+      if (s && typeof s.delete === 'function') s.delete();
+    }
+  }
+}
 
 /** Minimal topbar surface the orchestrator writes to. */
 export interface OrchestratorTopbar {
@@ -117,7 +150,7 @@ export interface GenerateOrchestratorDeps {
     master: Manifold,
     parameters: MoldParameters,
     viewTransform: Matrix4,
-  ) => Promise<SiliconeShellResult>;
+  ) => Promise<MoldGenerationResult>;
   /** The topbar-readout surface. */
   topbar: OrchestratorTopbar;
   /** The Generate-mold button's busy/error surface. */
@@ -244,13 +277,26 @@ export function createGenerateOrchestrator(
           // NEVER reached the scene, so the orchestrator is still the
           // owner — release them here. (Issue #47 kept this branch's
           // `.delete()` unchanged; only the happy-path hand-off moved.)
+          // Wave 2 (issue #50) added the printable-box parts to the
+          // result; dispose them on the same branch since nothing
+          // downstream will see them either.
           result.siliconeUpperHalf.delete();
           result.siliconeLowerHalf.delete();
+          disposePrintableParts(result);
           return;
         }
 
         topbar.setSiliconeVolume(result.siliconeVolume_mm3);
         topbar.setResinVolume(result.resinVolume_mm3);
+
+        // Wave 2 (issue #50): surface the printable volume at debug
+        // level so devs can eyeball it in DevTools. A follow-up UI
+        // wave will surface it in the topbar proper. The printable
+        // Manifolds are disposed a few lines down — no Wave-2 viewport
+        // preview owns them yet.
+        if (typeof result.printableVolume_mm3 === 'number') {
+          console.debug(`[generate] printableVolume=${result.printableVolume_mm3.toFixed(1)} mm³`);
+        }
 
         if (scene) {
           // Happy path (issue #47): hand ownership of BOTH half-Manifolds
@@ -279,8 +325,7 @@ export function createGenerateOrchestrator(
             // setSilicone is contracted to dispose the Manifolds on
             // failure. We still have to surface the error — route
             // through the button's error channel so the user sees it.
-            const message =
-              err instanceof Error ? err.message : String(err);
+            const message = err instanceof Error ? err.message : String(err);
             logger.error('[generate] setSilicone failed:', err);
             button.setError(message);
           }
@@ -291,6 +336,15 @@ export function createGenerateOrchestrator(
           result.siliconeUpperHalf.delete();
           result.siliconeLowerHalf.delete();
         }
+
+        // Wave 2 (issue #50) — printable-box parts. No scene preview
+        // for them in this wave, so the orchestrator disposes them
+        // immediately after reading `printableVolume_mm3`. Runs on the
+        // happy path regardless of whether the silicone scene sink is
+        // wired. Wave 4 will introduce a viewport preview that takes
+        // over printable-parts ownership (same pattern as issue #47
+        // for the silicone halves).
+        disposePrintableParts(result);
       } catch (err) {
         // Stale rejection → user already moved on; no point alarming
         // them with an error from a superseded run.
