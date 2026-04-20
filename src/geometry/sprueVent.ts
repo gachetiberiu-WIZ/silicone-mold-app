@@ -82,6 +82,20 @@ export interface DrillVentsResult {
   readonly skipped: number;
   /** Soft warnings (e.g. "only N of M vents placed"). */
   readonly warnings: ReadonlyArray<string>;
+  /**
+   * Per-vent metadata (issue #58): for each successfully placed vent,
+   * the source vertex Y (`fromY`) and the XZ position shared with the
+   * drilled cylinder. `placedVents.length === placed`. Used by the
+   * caller to compute exact per-vent analytic channel lengths for the
+   * resin-volume sum (`ventTopY − fromY` per vent), instead of bounding
+   * each by a conservative `ventTopY − masterMaxY` upper envelope.
+   *
+   * Empty on the `ventCount=0` / `placed=0` short-circuit paths.
+   */
+  readonly placedVents: ReadonlyArray<{
+    readonly fromY: number;
+    readonly xz: { readonly x: number; readonly z: number };
+  }>;
 }
 
 /** Pure-geometry option bag for `drillSprue`. */
@@ -333,6 +347,7 @@ export function drillVents(
       placed: 0,
       skipped: 0,
       warnings: [],
+      placedVents: [],
     };
   }
 
@@ -377,6 +392,7 @@ export function drillVents(
       placed,
       skipped,
       warnings,
+      placedVents: [],
     };
   }
 
@@ -389,6 +405,11 @@ export function drillVents(
   let updatedTopCap: Manifold | undefined;
   try {
     const cylinders: Manifold[] = [];
+    // Per-vent metadata (issue #58): record the source vertex Y and the
+    // XZ position so the caller can sum the EXACT analytic vent-channel
+    // volumes (`ventTopY − fromY` per vent) instead of bounding each by
+    // a worst-case full-extent cylinder.
+    const placedVents: Array<{ fromY: number; xz: { x: number; z: number } }> = [];
     for (const pos of selected) {
       // Each vent's bottom Y is the candidate vertex's Y — NOT the
       // master's max Y. That's what lets local maxima on ridges / limbs
@@ -397,6 +418,7 @@ export function drillVents(
       const cyl = verticalCylinder(toplevel, vertY, opts.topY, pos, radius);
       tools.push(cyl);
       cylinders.push(cyl);
+      placedVents.push({ fromY: vertY, xz: { x: pos.x, z: pos.z } });
     }
 
     const ventUnion =
@@ -418,6 +440,7 @@ export function drillVents(
       placed,
       skipped,
       warnings,
+      placedVents,
     };
     updatedUpper = undefined;
     updatedTopCap = undefined;

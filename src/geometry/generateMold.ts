@@ -554,6 +554,11 @@ export async function generateSiliconeShell(
           const warnings: string[] = [];
           let ventPlaced = 0;
           let ventSkipped = 0;
+          // Per-vent `fromY` values (issue #58). Populated in the Wave-3
+          // `drillVents` step; consumed by the analytic resin-volume sum
+          // below. Default `[]` covers the error path where step 5 hasn't
+          // run yet (we keep the FINAL volumes out of the throw path).
+          let ventPlacedFromYs: ReadonlyArray<number> = [];
 
           // Derived geometry for the sprue + vents. The master bbox lives
           // in the post-transform frame (we read from `transformedMaster`
@@ -610,6 +615,9 @@ export async function generateSiliconeShell(
             ventPlaced = vented.placed;
             ventSkipped = vented.skipped;
             for (const w of vented.warnings) warnings.push(w);
+            // Capture per-vent source Ys for the exact analytic resin-
+            // volume sum below (issue #58). Length === `vented.placed`.
+            ventPlacedFromYs = vented.placedVents.map((v) => v.fromY);
           } catch (err) {
             // Release all Manifolds we currently own across both groups.
             // `currentUpper` / `currentLower` / `currentTopCap` point at
@@ -635,24 +643,21 @@ export async function generateSiliconeShell(
           const sprueR = parameters.sprueDiameter_mm / 2;
           const ventR = parameters.ventDiameter_mm / 2;
           const sprueChannelVol = Math.PI * sprueR * sprueR * sprueLength;
-          // Per-vent length varies — each cylinder runs from its source
-          // vertex Y up to the shared topY. `drillVents` doesn't report
-          // per-vent lengths; for the analytic sum we conservatively use
-          // the FULL vent-to-top length (topY − masterBbox.max.y) as an
-          // overestimate of any individual vent's length. The issue's
-          // AC is "resinVolume ≈ master + sprue + Σ vents within 1e-3
-          // relative tolerance" — using the max length per vent is
-          // within that bound on the mini-figurine (vents start within
-          // ~wallThickness of the top).
-          //
-          // Upgrading to the exact per-vent length in a follow-up is
-          // cheap (drillVents already has the per-vent `fromY` in its
-          // `cylinders[]` construction); keeping it conservative here
-          // means we never under-report the pour volume, which is the
-          // safer direction to err for the user planning a casting run.
-          const ventMaxLength = ventTopY - masterBbox.max[1];
-          const ventChannelVolEach = Math.PI * ventR * ventR * ventMaxLength;
-          const ventChannelVolTotal = ventPlaced * ventChannelVolEach;
+          // Per-vent EXACT analytic length (issue #58). Each cylinder
+          // runs from its source vertex Y (`v.fromY`, recorded by
+          // `drillVents`) up to the shared `ventTopY`. Summing
+          // `π·r²·(ventTopY − fromY)` over the actually-placed vents
+          // gives the exact poured-resin volume in the vent channels,
+          // rather than the prior conservative overestimate that used
+          // `ventTopY − masterBbox.max.y` for every vent. The old bound
+          // over-reported by at most ~`ventCount · π·r² · wall/2` mm³
+          // (on default params: ~18 mm³ on a ~127 000 mm³ mini-figurine
+          // → ~1.4e-4 relative); the exact sum tightens this to kernel
+          // noise.
+          const ventChannelVolTotal = ventPlacedFromYs.reduce(
+            (sum, fromY) => sum + Math.PI * ventR * ventR * (ventTopY - fromY),
+            0,
+          );
           const finalResinVolume_mm3 =
             master.volume() + sprueChannelVol + ventChannelVolTotal;
 

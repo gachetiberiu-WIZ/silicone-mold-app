@@ -26,6 +26,11 @@ import {
   manifoldToBufferGeometry,
 } from '@/geometry';
 import type { MoldGenerationResult } from '@/geometry/generateMold';
+import {
+  MIN_VENT_SEPARATION_MM,
+  readMasterVertices,
+  selectVentCandidates,
+} from '@/geometry/sprueVent';
 import { DEFAULT_PARAMETERS, type MoldParameters } from '@/renderer/state/parameters';
 import { fixtureExists, fixturePaths } from '@fixtures/meshes/loader';
 import { readFileSync } from 'node:fs';
@@ -647,6 +652,13 @@ describe('generateSiliconeShell — Wave 3 (keys, sprue, vents)', () => {
 
   test('resin volume identity: resin ≈ master + π·(sprueR)²·length + Σ vent cyls', async () => {
     // A 4×4×4 cube gives a simple-to-compute analytic resin volume.
+    // ventCount=0 so the sprue channel is the only analytic contribution
+    // on top of the master's 64 mm³. We read `shellBbox.max.y` indirectly
+    // via the silicone halves' bbox — kernel rounding makes this a ~5e-4
+    // approximation of the exact value the generator used, so we leave
+    // the tolerance at 1e-3 here. The tight 1e-5 identity is exercised
+    // in the mini-figurine test below (issue #58) where ventCount=2 AND
+    // we pin the shellBbox via a secondary generator call.
     const toplevel = await initManifold();
     const master = toplevel.Manifold.cube([4, 4, 4], true);
     try {
@@ -747,6 +759,128 @@ describe('generateSiliconeShell — Wave 3 (keys, sprue, vents)', () => {
       master.delete();
     }
   }, 30_000);
+
+  test.skipIf(!fixtureExists('mini-figurine'))(
+    'exact per-vent analytic resin length — ventCount=2 mini-figurine, 1e-5 relative (issue #58)',
+    async () => {
+      // Issue #58: `generateMold.ts` now sums per-vent analytic channel
+      // length exactly (`Σ π · r² · (ventTopY − fromY)` over placed
+      // vents), not the conservative `ventCount · π · r² · ventMaxLength`
+      // bound that over-reported by up to ~`ventCount · π · r² · wall/2`.
+      //
+      // Test strategy: run the generator twice on the mini-figurine —
+      // once with `ventCount=0` (resin₀ = master + sprue) and once with
+      // `ventCount=2` (resin₂ = master + sprue + Σvents). Since the
+      // silicone body's bbox is derived before the vent step, the
+      // sprue-channel contribution is identical in both runs, so:
+      //
+      //   resin₂ − resin₀ = Σ π · r² · (ventTopY − fromY)
+      //
+      // We reconstruct `ventTopY` from the sprue contribution alone
+      // (`resin₀ − masterVol = π · sprueR² · (ventTopY − sprueFromY)`)
+      // and replicate the NMS to get the same `fromY` values the
+      // generator picked. That gives us an analytic expected vent sum
+      // at machine precision. 1e-5 tolerance holds when the formula is
+      // exact; prior to this refactor the same test at 1e-5 would have
+      // failed by a multiplicative factor determined by how much lower
+      // each vent's `fromY` was below `masterMaxY`.
+      const { manifold } = await loadStl(readFixtureBuffer('mini-figurine'));
+      try {
+        const p0 = params({ ventCount: 0 });
+        const p2 = params({ ventCount: 2 });
+
+        const r0 = await generateSiliconeShell(manifold, p0, new Matrix4());
+        const r2 = await generateSiliconeShell(manifold, p2, new Matrix4());
+        try {
+          // The vent step placed `r2.warnings[0]` may exist if fewer
+          // than 2 vents fit; in that case the "only N of M" pattern
+          // tells us `placed`.
+          let placed = p2.ventCount;
+          const m = (r2.warnings[0] ?? '').match(/only (\d+) of/);
+          if (m) placed = Number.parseInt(m[1] ?? String(p2.ventCount), 10);
+
+          // Both runs share the silicone body's shellBbox, so the
+          // sprue-channel contribution is the same:
+          //   π · sprueR² · (ventTopY − sprueFromY)
+          // where sprueFromY = masterBbox.max.y + 0.1 and ventTopY =
+          // shellBbox.max.y + baseThickness.
+          const masterMaxY = manifold.boundingBox().max[1];
+          const sprueFromY = masterMaxY + 0.1; // SPRUE_Y_EPSILON_MM
+          const sprueR = p0.sprueDiameter_mm / 2;
+          const ventR = p0.ventDiameter_mm / 2;
+          const masterVol = manifold.volume();
+
+          // Back-solve ventTopY from the sprue-only case.
+          const sprueChannelVol0 = r0.resinVolume_mm3 - masterVol;
+          const sprueLen0 = sprueChannelVol0 / (Math.PI * sprueR * sprueR);
+          const ventTopY = sprueFromY + sprueLen0;
+
+          // Replicate NMS on the master to get the same fromY values
+          // the generator's `drillVents` would pick.
+          const vertices = readMasterVertices(manifold);
+          const minSeparation = Math.max(
+            MIN_VENT_SEPARATION_MM,
+            2 * p2.ventDiameter_mm,
+          );
+          const masterBbox = manifold.boundingBox();
+          const sprueXZ = {
+            x: (masterBbox.min[0] + masterBbox.max[0]) / 2,
+            z: (masterBbox.min[2] + masterBbox.max[2]) / 2,
+          };
+          const sprueExclusion = p2.sprueDiameter_mm + p2.ventDiameter_mm;
+          const selected = selectVentCandidates(vertices, {
+            ventCount: p2.ventCount,
+            minSeparation,
+            sprueXZ,
+            sprueExclusion,
+          });
+          expect(selected.length).toBe(placed);
+
+          // For each selected XZ, look up its source vertex Y (this is
+          // the same `vertexYForXZ` logic `drillVents` uses).
+          const fromYs: number[] = [];
+          for (const xz of selected) {
+            let firstMatchY: number | undefined;
+            for (const v of vertices) {
+              if (v.x === xz.x && v.z === xz.z) {
+                if (firstMatchY === undefined) firstMatchY = v.y;
+              }
+            }
+            expect(firstMatchY).toBeDefined();
+            fromYs.push(firstMatchY as number);
+          }
+
+          // Expected analytic vent channel sum using the exact per-vent
+          // length (issue #58's refactor output).
+          const expectedVentSum = fromYs.reduce(
+            (sum, fromY) => sum + Math.PI * ventR * ventR * (ventTopY - fromY),
+            0,
+          );
+          const actualVentSum = r2.resinVolume_mm3 - r0.resinVolume_mm3;
+
+          // Sanity: placed > 0 so this test actually exercises the
+          // changed code path. Mini-figurine has rich top geometry; we
+          // expect 2 vents to fit.
+          expect(placed).toBeGreaterThan(0);
+          expect(expectedVentSum).toBeGreaterThan(0);
+
+          const relErr =
+            Math.abs(actualVentSum - expectedVentSum) / expectedVentSum;
+          // 1e-5 relative. Prior to #58 the generator over-reported each
+          // vent by `wall/2` × π · r² on average, which on default
+          // params (wall=10, ventR=0.75, placed=2) would give relErr
+          // ~1e-1 — catastrophically above 1e-5.
+          expect(relErr).toBeLessThan(1e-5);
+        } finally {
+          disposeAll(r0);
+          disposeAll(r2);
+        }
+      } finally {
+        manifold.delete();
+      }
+    },
+    60_000,
+  );
 
   test('ventCount=0 produces empty warnings and skipped=0', async () => {
     const toplevel = await initManifold();

@@ -14,6 +14,7 @@ import {
   MIN_VENT_SEPARATION_MM,
   drillSprue,
   drillVents,
+  readMasterVertices,
   selectVentCandidates,
 } from '@/geometry/sprueVent';
 
@@ -223,6 +224,9 @@ describe('drillVents — CSG + metadata', () => {
         expect(result.placed).toBe(0);
         expect(result.skipped).toBe(0);
         expect(result.warnings).toEqual([]);
+        // Issue #58: placedVents is present and empty on the
+        // ventCount=0 short-circuit path.
+        expect(result.placedVents).toEqual([]);
         // Output Manifolds are fresh handles with matching volume.
         expect(result.updatedUpper.volume()).toBeCloseTo(upperVolBefore, 3);
         expect(isManifold(result.updatedUpper)).toBe(true);
@@ -301,6 +305,76 @@ describe('drillVents — CSG + metadata', () => {
         expect(result.skipped).toBe(2);
         expect(result.warnings).toHaveLength(1);
         expect(result.warnings[0]).toMatch(/only 0 of 2 vents placed/);
+        // Issue #58: placedVents is empty on the all-clipped path too.
+        expect(result.placedVents).toEqual([]);
+      } finally {
+        result.updatedUpper.delete();
+        result.updatedTopCap.delete();
+      }
+    } finally {
+      upper.delete();
+      topCap.delete();
+      master.delete();
+    }
+  }, 30_000);
+
+  test('placedVents — length matches `placed`, each fromY is a master vertex Y (issue #58)', async () => {
+    // Master: an asymmetric prism with KNOWN vertex Y-values so we can
+    // assert `fromY` picks match. We build it by translating two cubes:
+    //   - tall peak at (0, 0, 0) with max Y = 4
+    //   - shorter peak at (15, 0, 0) with max Y = 2
+    // Both tops are separated by 15 mm in X (well above the 5 mm floor)
+    // and by 15+15 = 30 mm from the sprue at (100, 100), so both fit.
+    // Each corner of each top has Y equal to that cube's top, and the
+    // expected `fromY` set is exactly {4, 2}.
+    const toplevel = await initManifold();
+    const peakA = toplevel.Manifold.cube([2, 4, 2], false).translate([-1, 0, -1]);
+    const peakB = toplevel.Manifold.cube([2, 2, 2], false).translate([14, 0, -1]);
+    const master = toplevel.Manifold.union([peakA, peakB]);
+    peakA.delete();
+    peakB.delete();
+    // Enclosing upper + cap, wide enough to host both vent cylinders.
+    const upper = toplevel.Manifold.cube([40, 10, 10], false).translate([-10, 0, -5]);
+    const topCap = toplevel.Manifold.cube([40, 2, 10], false).translate([-10, 10, -5]);
+    try {
+      const result = drillVents(toplevel, upper, topCap, {
+        master,
+        topY: 12,
+        sprueXZ: { x: 100, z: 100 }, // far away — no sprue exclusion
+        sprueDiameter: 5,
+        ventDiameter: 1,
+        ventCount: 2,
+      });
+      try {
+        // Length invariant: one entry per placed vent.
+        expect(result.placedVents).toHaveLength(result.placed);
+        expect(result.placed).toBeGreaterThan(0);
+
+        // Every `fromY` must match an actual vertex Y of the master
+        // (exact equality — drillVents reads the vertex Y directly via
+        // `vertexYForXZ` on the master's own vertex list, no rounding
+        // or grid quantisation in the pipeline).
+        const masterVertices = readMasterVertices(master);
+        const masterYs = new Set(masterVertices.map((v) => v.y));
+        for (const v of result.placedVents) {
+          expect(masterYs.has(v.fromY)).toBe(true);
+        }
+
+        // Every reported XZ must EXACTLY equal an XZ the NMS selector
+        // would have returned, so the `{fromY, xz}` tuple faithfully
+        // represents a true vertex position of the master.
+        const masterXZs = new Set(masterVertices.map((v) => `${v.x},${v.z}`));
+        for (const v of result.placedVents) {
+          expect(masterXZs.has(`${v.xz.x},${v.xz.z}`)).toBe(true);
+        }
+
+        // XZ sanity: fromY + xz are finite numbers (defence against
+        // NaN/Infinity regressions).
+        for (const v of result.placedVents) {
+          expect(Number.isFinite(v.fromY)).toBe(true);
+          expect(Number.isFinite(v.xz.x)).toBe(true);
+          expect(Number.isFinite(v.xz.z)).toBe(true);
+        }
       } finally {
         result.updatedUpper.delete();
         result.updatedTopCap.delete();
