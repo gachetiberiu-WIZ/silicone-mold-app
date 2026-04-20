@@ -123,15 +123,77 @@ function bufferGeometryToManifoldMesh(
 }
 
 /**
- * Convert a three.js `BufferGeometry` to a manifold-3d `Manifold`.
+ * Extended result of `bufferGeometryToManifoldWithRepair` — the Manifold
+ * plus the input / output tri counts so callers can surface the repair
+ * delta to the user (issue #64). `repairedTriCount` is the absolute
+ * difference (`|input - output|`) and is zero when the input was already
+ * manifold.
+ */
+export interface BufferGeometryToManifoldResult {
+  manifold: Manifold;
+  /** Tri count of the input BufferGeometry as seen by manifold-3d. */
+  inputTriCount: number;
+  /** Tri count of the resulting Manifold after construction. */
+  outputTriCount: number;
+  /**
+   * `|inputTriCount - outputTriCount|`. Zero iff the input was already a
+   * valid 2-manifold. Positive when manifold-3d collapsed / dropped
+   * degenerate triangles on construction — surface this to the user via a
+   * notice-level toast (issue #64).
+   */
+  repairedTriCount: number;
+}
+
+/**
+ * Convert a three.js `BufferGeometry` to a manifold-3d `Manifold`,
+ * returning the Manifold plus tri-count metadata so callers can surface
+ * silent-repair events to the user (issue #64).
  *
  * Side effects:
  * - Calls `initManifold()` (module-scope cached) to ensure the WASM kernel
  *   is ready. Safe to call repeatedly.
  * - Logs a tri-count delta warning to the console if Manifold's construction
  *   repaired non-manifold input (see the `mesh-operations` skill's
- *   "Watertightness discipline" section — users need to know their mesh
- *   was modified).
+ *   "Watertightness discipline" section — developers watching the console
+ *   keep the old signal; the structured return value is what the UI layer
+ *   uses to drive the user-visible toast).
+ *
+ * @returns `{ manifold, inputTriCount, outputTriCount, repairedTriCount }`.
+ *   Caller owns `manifold` and must `.delete()` it when done. The result
+ *   is not guaranteed non-empty — check `isManifold(manifold)` if you
+ *   need watertightness confirmation.
+ */
+export async function bufferGeometryToManifoldWithRepair(
+  geometry: BufferGeometry,
+): Promise<BufferGeometryToManifoldResult> {
+  const toplevel = await initManifold();
+  const mesh = bufferGeometryToManifoldMesh(geometry, toplevel);
+  const inputTriCount = mesh.triVerts.length / 3;
+  const manifold = new toplevel.Manifold(mesh);
+  const outputTriCount = manifold.numTri();
+  const repairedTriCount = Math.abs(inputTriCount - outputTriCount);
+  if (repairedTriCount !== 0) {
+    // Surface silent repair to the developer. Non-fatal — a diff of a
+    // handful of degenerate triangles is normal even on clean STL files.
+    // User-visible surfacing is the caller's job (see `loadStl` + the
+    // `loadMasterFromBuffer` path in `main.ts`).
+    console.warn(
+      `[geometry] manifold-3d repaired non-manifold input: ${inputTriCount} tri → ${outputTriCount} tri (status=${manifold.status()})`,
+    );
+  }
+  return { manifold, inputTriCount, outputTriCount, repairedTriCount };
+}
+
+/**
+ * Convert a three.js `BufferGeometry` to a manifold-3d `Manifold`.
+ *
+ * Backwards-compatible wrapper around `bufferGeometryToManifoldWithRepair`
+ * that discards the tri-count metadata. Prefer the `WithRepair` variant
+ * when you want to surface silent-repair events to the user (issue #64);
+ * this thin wrapper is kept for call sites (tests, generateMold's
+ * re-ingest path) that only need the Manifold.
+ *
+ * Side effects identical to `bufferGeometryToManifoldWithRepair`.
  *
  * @returns A fresh `Manifold`. Caller owns it and must `.delete()` when done
  *   to release WASM memory. The return is not guaranteed to be non-empty —
@@ -140,18 +202,7 @@ function bufferGeometryToManifoldMesh(
 export async function bufferGeometryToManifold(
   geometry: BufferGeometry,
 ): Promise<Manifold> {
-  const toplevel = await initManifold();
-  const mesh = bufferGeometryToManifoldMesh(geometry, toplevel);
-  const inputTriCount = mesh.triVerts.length / 3;
-  const manifold = new toplevel.Manifold(mesh);
-  const outputTriCount = manifold.numTri();
-  if (outputTriCount !== inputTriCount) {
-    // Surface silent repair to the developer / user. Non-fatal — a diff of a
-    // handful of degenerate triangles is normal even on clean STL files.
-    console.warn(
-      `[geometry] manifold-3d repaired non-manifold input: ${inputTriCount} tri → ${outputTriCount} tri (status=${manifold.status()})`,
-    );
-  }
+  const { manifold } = await bufferGeometryToManifoldWithRepair(geometry);
   return manifold;
 }
 

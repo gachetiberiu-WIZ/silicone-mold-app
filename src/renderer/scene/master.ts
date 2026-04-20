@@ -153,6 +153,15 @@ export interface MasterResult {
   readonly bbox: Box3;
   readonly offset: Vector3;
   readonly manifold: Manifold;
+  /**
+   * Tri-count delta around the manifold-3d construction call (issue #64).
+   * Zero when the STL was already a watertight 2-manifold; positive when
+   * the kernel silently repaired non-manifold input. Surfaced here so the
+   * `loadMasterFromBuffer` path in `main.ts` can fire a notice-level toast
+   * ("Repaired non-manifold STL on load...") without reaching back into
+   * the geometry adapter layer.
+   */
+  readonly repairedTriCount: number;
 }
 
 /**
@@ -368,5 +377,12 @@ export async function setMaster(scene: Scene, buffer: ArrayBuffer): Promise<Mast
   // viewport teardown.
   group.userData[MASTER_MANIFOLD_KEY] = loaded.manifold;
 
-  return { mesh, volume_mm3, bbox, offset, manifold: loaded.manifold };
+  return {
+    mesh,
+    volume_mm3,
+    bbox,
+    offset,
+    manifold: loaded.manifold,
+    repairedTriCount: loaded.repairedTriCount,
+  };
 }
