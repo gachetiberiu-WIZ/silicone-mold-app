@@ -53,12 +53,17 @@ import {
   mountPlaceOnFaceToggle,
   type PlaceOnFaceToggleApi,
 } from './ui/placeOnFaceToggle';
+import {
+  mountExplodedViewToggle,
+  type ExplodedViewToggleApi,
+} from './ui/explodedViewToggle';
 
 let topbar: TopbarApi | null = null;
 let viewport: MountedViewport | null = null;
 let parametersStore: ParametersStore | null = null;
 let parameterPanel: ParameterPanelApi | null = null;
 let placeOnFace: PlaceOnFaceToggleApi | null = null;
+let explodedView: ExplodedViewToggleApi | null = null;
 let generateButton: GenerateButtonApi | null = null;
 let generateOrchestrator: GenerateOrchestratorApi | null = null;
 
@@ -101,6 +106,20 @@ function mountUi(): void {
       },
     });
 
+    // Exploded-view toggle (issue #47). Sits next to Place-on-face. Stays
+    // disabled until `generateOrchestrator` successfully installs
+    // silicone into the scene — we flip enabled=true inside the
+    // orchestrator's `onSiliconeInstalled` hook (wired in
+    // `mountParameters`). Every staleness transition also flips
+    // enabled=false (wired in `attachGenerateInvalidation` + the
+    // loadMasterFromBuffer path).
+    explodedView = mountExplodedViewToggle(center, {
+      onToggle(active) {
+        if (!viewport) return;
+        viewport.setExplodedView(active);
+      },
+    });
+
     // Mirror viewport-side state transitions (auto-exit-on-commit,
     // Escape-key exit) back into the toggle button so its pressed state
     // never drifts from the controller's truth.
@@ -121,6 +140,7 @@ function mountUi(): void {
     const hooks = w.__testHooks ?? {};
     hooks['topbar'] = topbar;
     if (placeOnFace) hooks['placeOnFace'] = placeOnFace;
+    if (explodedView) hooks['explodedView'] = explodedView;
     w.__testHooks = hooks;
   }
 }
@@ -208,6 +228,24 @@ function mountParameters(): void {
       generate: generateSiliconeShell,
       topbar: tbar,
       button: btn,
+      // Issue #47: hand the generated halves to the scene's silicone
+      // module on the happy path INSTEAD of `.delete()`-ing them. The
+      // viewport's `setSilicone` also re-frames the camera to the
+      // master+silicone union, so the user sees the full result
+      // without a manual zoom-out.
+      scene: {
+        setSilicone: (halves) => vp.setSilicone(halves),
+      },
+      onSiliconeInstalled() {
+        // Silicone is in the scene → the exploded-view toggle can be
+        // used. Start collapsed (setActive(false)) because every fresh
+        // generate resets the state — the scene module installs halves
+        // with currentFraction = 0.
+        if (explodedView) {
+          explodedView.setActive(false);
+          explodedView.setEnabled(true);
+        }
+      },
     });
   }
 
@@ -220,10 +258,25 @@ function mountParameters(): void {
   //     previously-computed volumes are stale for the new frame),
   //   - clears any lingering error message from a prior failed attempt,
   //   - bumps the shared generate-epoch counter so any in-flight
-  //     `generateSiliconeShell` promise drops its result on resolve.
+  //     `generateSiliconeShell` promise drops its result on resolve,
+  //   - tears down the silicone preview + disposes paired Manifolds
+  //     (issue #47 — silicone lifetime matches the volume-readout
+  //     lifetime, so every staleness signal clears both).
   // See `src/renderer/ui/generateInvalidation.ts` for the full semantics.
-  if (topbar && generateButton) {
-    attachGenerateInvalidation(topbar, generateButton);
+  if (topbar && generateButton && viewport) {
+    const vp = viewport;
+    attachGenerateInvalidation(topbar, generateButton, {
+      clearSilicone: () => {
+        vp.clearSilicone();
+        // Keep the exploded-view toggle's enabled state in lock-step with
+        // whether silicone is in the scene. Also force the pressed state
+        // off so a stale "exploded" flag doesn't carry over to the next
+        // generate cycle.
+        if (explodedView) {
+          explodedView.setEnabled(false);
+        }
+      },
+    });
   }
 
   if (process.env.NODE_ENV === 'test') {
@@ -265,6 +318,14 @@ async function loadMasterFromBuffer(buffer: ArrayBuffer): Promise<void> {
   // the invalidation listener covers only the "had-commit → new-STL"
   // path. Bumping here covers the first-load / no-prior-commit path too.
   bumpGenerateEpoch();
+  // Issue #47: any silicone preview attached to the PREVIOUS master is
+  // stale. Tear it down + release the cached half-Manifolds. Idempotent
+  // and safe on a first-load with no silicone installed. The
+  // `notifyMasterReset` path fires a committed-event (→ listener does
+  // the same) only when a commit was previously live; covering both
+  // paths here makes first-load-with-stale-silicone-from-prior-master
+  // safe as well.
+  viewport.clearSilicone();
   if (topbar) {
     topbar.setMasterVolume(result.volume_mm3);
     // Any previously-populated silicone + resin values are for the OLD
@@ -286,6 +347,10 @@ async function loadMasterFromBuffer(buffer: ArrayBuffer): Promise<void> {
   if (placeOnFace) {
     placeOnFace.setEnabled(true);
     placeOnFace.setActive(false);
+  }
+  // Silicone is gone → exploded-view toggle goes back to disabled + off.
+  if (explodedView) {
+    explodedView.setEnabled(false);
   }
   // Flip the Generate-block's hint from "Load an STL to begin." to
   // "Orient the part on its base...". The button stays disabled — the
