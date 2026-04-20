@@ -54,14 +54,23 @@ const IN3_FORMATTER = new Intl.NumberFormat('en-US', {
 /**
  * Format a volume for display in the topbar.
  *
- * @param mm3  Volume in mm³, or `null` for the "no master loaded" state.
- * @param unit The unit system to render — 'mm' → "X mm³", 'in' → "Y in³".
+ * @param mm3      Volume in mm³, or `null` for the empty state.
+ * @param unit     The unit system to render — 'mm' → "X mm³", 'in' → "Y in³".
+ * @param emptyKey i18n key to use for the empty-state placeholder. Defaults
+ *                 to `'volume.none'` ("No master loaded"). Pass
+ *                 `'volume.notGenerated'` for silicone / resin slots, where
+ *                 a null value means "master loaded but not generated yet",
+ *                 NOT "master missing".
  *
  * @returns    Human-readable, locale-formatted string. Never throws.
  */
-export function formatVolume(mm3: number | null, unit: UnitSystem): string {
+export function formatVolume(
+  mm3: number | null,
+  unit: UnitSystem,
+  emptyKey: string = 'volume.none',
+): string {
   if (mm3 === null || !Number.isFinite(mm3)) {
-    return t('volume.none');
+    return t(emptyKey);
   }
 
   if (unit === 'in') {

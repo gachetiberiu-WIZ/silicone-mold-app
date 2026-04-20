@@ -1,7 +1,8 @@
 {
   "volume": {
     "label": "Volume",
-    "none": "No master loaded"
+    "none": "No master loaded",
+    "notGenerated": "Click Generate"
   },
   "units": {
     "mm": "mm",
