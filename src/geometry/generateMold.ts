@@ -171,17 +171,6 @@ export interface MoldGenerationResult {
 }
 
 /**
- * @deprecated Renamed to `MoldGenerationResult` in Wave 2 (issue #50)
- * once the return shape started carrying printable-box parts alongside
- * the silicone halves. The old name misrepresented the contents; this
- * alias remains temporarily so existing call sites (and tests that
- * explicitly typed against `SiliconeShellResult`) keep compiling during
- * the transition window. Remove in a follow-up once the renderer /
- * orchestrator have migrated.
- */
-export type SiliconeShellResult = MoldGenerationResult;
-
-/**
  * Hard lower bound on the silicone wall thickness the generator will
  * accept, in mm. The parameter store already clamps to ≥ 2 mm, and the
  * `mold-generator` skill prescribes rejecting any value below 3 mm

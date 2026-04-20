@@ -17,6 +17,5 @@ export {
   generateSiliconeShell,
   InvalidParametersError,
   type MoldGenerationResult,
-  type SiliconeShellResult,
 } from './generateMold';
 export { buildPrintableBox, SIDE_CUT_ANGLES, type PrintableBoxParts } from './printableBox';

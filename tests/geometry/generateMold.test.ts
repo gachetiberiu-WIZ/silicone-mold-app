@@ -25,6 +25,7 @@ import {
   loadStl,
   manifoldToBufferGeometry,
 } from '@/geometry';
+import type { MoldGenerationResult } from '@/geometry/generateMold';
 import { DEFAULT_PARAMETERS, type MoldParameters } from '@/renderer/state/parameters';
 import { fixtureExists, fixturePaths } from '@fixtures/meshes/loader';
 import { readFileSync } from 'node:fs';
@@ -42,6 +43,20 @@ function readFixtureBuffer(name: string): ArrayBuffer {
   // fresh ArrayBuffer so `loadStl` (and manifold-3d) don't read beyond
   // byteLength.
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+}
+
+/**
+ * Dispose every Manifold owned by a `MoldGenerationResult` — both silicone
+ * halves and every printable-box part. Extracted so each test's `finally`
+ * block stays a one-liner and so adding a new result-bound Manifold in the
+ * future is a one-site change here, not N sites across the suite.
+ */
+function disposeAll(result: MoldGenerationResult): void {
+  result.siliconeUpperHalf.delete();
+  result.siliconeLowerHalf.delete();
+  result.basePart.delete();
+  result.topCapPart.delete();
+  for (const s of result.sideParts) s.delete();
 }
 
 describe('generateSiliconeShell — unit-cube fixture', () => {
@@ -118,8 +133,7 @@ describe('generateSiliconeShell — unit-cube fixture', () => {
           // Resin = master volume = 1.0 mm³.
           expect(result.resinVolume_mm3).toBeCloseTo(1.0, 4);
         } finally {
-          result.siliconeUpperHalf.delete();
-          result.siliconeLowerHalf.delete();
+          disposeAll(result);
         }
       } finally {
         manifold.delete();
@@ -176,8 +190,7 @@ describe('generateSiliconeShell — unit-sphere fixture', () => {
 
           expect(result.resinVolume_mm3).toBeCloseTo(MASTER_VOL, 4);
         } finally {
-          result.siliconeUpperHalf.delete();
-          result.siliconeLowerHalf.delete();
+          disposeAll(result);
         }
       } finally {
         manifold.delete();
@@ -267,8 +280,7 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
           // Resin = master (no sprue/vent yet).
           expect(result.resinVolume_mm3).toBeCloseTo(masterVol, 3);
         } finally {
-          result.siliconeUpperHalf.delete();
-          result.siliconeLowerHalf.delete();
+          disposeAll(result);
         }
       } finally {
         manifold.delete();
@@ -323,8 +335,7 @@ describe('generateSiliconeShell — integration with adapter', () => {
           bg.dispose();
         }
       } finally {
-        result.siliconeUpperHalf.delete();
-        result.siliconeLowerHalf.delete();
+        disposeAll(result);
       }
     } finally {
       master.delete();
@@ -463,10 +474,8 @@ describe('generateSiliconeShell — validation', () => {
         expect(isManifold(rotated.siliconeUpperHalf)).toBe(true);
         expect(isManifold(rotated.siliconeLowerHalf)).toBe(true);
       } finally {
-        upright.siliconeUpperHalf.delete();
-        upright.siliconeLowerHalf.delete();
-        rotated.siliconeUpperHalf.delete();
-        rotated.siliconeLowerHalf.delete();
+        disposeAll(upright);
+        disposeAll(rotated);
       }
     } finally {
       bar.delete();

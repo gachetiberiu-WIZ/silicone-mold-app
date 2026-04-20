@@ -37,9 +37,9 @@ function params(patch: Partial<MoldParameters>): MoldParameters {
   return { ...DEFAULT_PARAMETERS, ...patch };
 }
 
-/** Tolerance for "no overlap between adjacent wedges". The trim planes
- *  share a zero-area boundary; any real overlap would be a bug. */
-const OVERLAP_TOLERANCE_MM3 = 1e-3;
+// Pairwise overlap is ~0 in practice (manifold-3d trimByPlane is exact on
+// axis-aligned ring frames); 1e-9 leaves CI-variance headroom.
+const OVERLAP_TOLERANCE_MM3 = 1e-9;
 
 /** Relative tolerance for volume invariants (sides-sum vs ring frame,
  *  total vs outer-minus-inner). */
@@ -264,7 +264,7 @@ describe.each([2, 3, 4] as const)('buildPrintableBox — sideCount=%i invariants
     });
   });
 
-  test('no two side parts overlap (pairwise intersect volume < 1e-3)', async () => {
+  test('no two side parts overlap (pairwise intersect volume < 1e-9)', async () => {
     await withPrintableBox(sideCount, ({ sideParts }) => {
       for (let i = 0; i < sideParts.length; i++) {
         for (let j = i + 1; j < sideParts.length; j++) {
