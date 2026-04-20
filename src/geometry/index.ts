@@ -10,7 +10,13 @@
 // at startup (ADR-002 §"WASM packaging").
 
 export { initManifold } from './initManifold';
-export { bufferGeometryToManifold, manifoldToBufferGeometry, isManifold } from './adapters';
+export {
+  bufferGeometryToManifold,
+  bufferGeometryToManifoldWithRepair,
+  manifoldToBufferGeometry,
+  isManifold,
+  type BufferGeometryToManifoldResult,
+} from './adapters';
 export { loadStl, type LoadedStl } from './loadStl';
 export { meshVolume } from './volume';
 export {

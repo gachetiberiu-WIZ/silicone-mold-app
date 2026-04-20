@@ -38,11 +38,24 @@ export type InvalidationTopbar = Pick<
   'setSiliconeVolume' | 'setResinVolume'
 >;
 
-/** Minimal surface required of the Generate button by the invalidation wire. */
+/**
+ * Minimal surface required of the Generate button by the invalidation wire.
+ * Issue #64 adds `setGenerated` and `setStale` so staleness signals
+ * (orientation commit, reset, new STL load) reset the post-success hint
+ * ("Generated — click to re-run...") back to the pre-generate states.
+ *
+ * Both are typed as optional `Pick` fields via an intersection so that
+ * pre-#64 test mocks (which didn't stub these methods) keep compiling —
+ * the production `GenerateButtonApi` has both so `main.ts`'s real call
+ * site is fully typed.
+ */
 export type InvalidationGenerateButton = Pick<
   GenerateButtonApi,
   'setEnabled' | 'setError'
->;
+> & {
+  setGenerated?(generated: boolean): void;
+  setStale?(stale: boolean): void;
+};
 
 /**
  * Options for `attachGenerateInvalidation`. The `bumpEpoch` +
@@ -121,6 +134,12 @@ export function attachGenerateInvalidation(
     topbar.setSiliconeVolume(null);
     topbar.setResinVolume(null);
     generateButton.setError(null);
+    // Issue #64 — clear the post-generate hint states. A staleness signal
+    // (orientation commit, reset, new STL) invalidates any previous
+    // success, and the next render should fall through to the base
+    // "Ready to generate" / "Orient first" / "Load STL" selector.
+    if (generateButton.setGenerated) generateButton.setGenerated(false);
+    if (generateButton.setStale) generateButton.setStale(false);
     if (clearSilicone) clearSilicone();
     if (clearPrintableParts) clearPrintableParts();
   };

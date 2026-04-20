@@ -23,7 +23,9 @@ import {
   fixturePaths,
   loadFixture,
 } from '@fixtures/meshes/loader';
-import { isManifold, loadStl } from '@/geometry';
+import { initManifold, isManifold, loadStl, manifoldToBufferGeometry } from '@/geometry';
+import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
+import { Mesh, MeshBasicMaterial } from 'three';
 
 describe('loadStl — mini-figurine', () => {
   // mini-figurine is committed. Belt + braces: skip cleanly if an operator
@@ -75,4 +77,68 @@ describe('loadStl — mini-figurine', () => {
       }
     },
   );
+
+  // Issue #64 — `loadStl` surfaces a `repairedTriCount` so the UI layer
+  // can fire a notice-level toast when manifold-3d silently repairs
+  // non-manifold input. For the mini-figurine fixture the known delta
+  // (observed during the 2026-04-20 dogfood session) is 42 triangles.
+  // We assert `repairedTriCount > 0` rather than the exact count so a
+  // future fixture re-export (or a manifold-3d bump) that changes the
+  // delta doesn't break this test — the contract under test is
+  // "positive when repair happened", not the specific number.
+  test.skipIf(!fixtureExists('mini-figurine'))(
+    'surfaces a positive repairedTriCount for the non-manifold mini-figurine',
+    async () => {
+      const { stl } = fixturePaths('mini-figurine');
+      const buf = readFileSync(stl);
+      const ab = buf.buffer.slice(
+        buf.byteOffset,
+        buf.byteOffset + buf.byteLength,
+      );
+
+      const { manifold, repairedTriCount } = await loadStl(ab);
+      try {
+        expect(typeof repairedTriCount).toBe('number');
+        expect(Number.isFinite(repairedTriCount)).toBe(true);
+        expect(repairedTriCount).toBeGreaterThan(0);
+      } finally {
+        manifold.delete();
+      }
+    },
+  );
+});
+
+describe('loadStl — repairedTriCount == 0 for watertight input', () => {
+  // A manifold-3d-constructed cube re-exported to STL is guaranteed
+  // watertight by definition. Round-tripping through STL + loadStl must
+  // produce `repairedTriCount === 0` — no repair happens on already-
+  // manifold input. Guards against the AC "NO toast fires when the STL
+  // was already watertight (delta === 0)".
+  test('repairedTriCount is 0 when the input is already a valid 2-manifold', async () => {
+    const toplevel = await initManifold();
+    const cube = toplevel.Manifold.cube([10, 10, 10], true);
+    try {
+      const bg = await manifoldToBufferGeometry(cube);
+      // Synthesise a binary STL buffer from the Manifold-derived geometry
+      // so the adapter sees the exact same (vertex-deduped) mesh on the
+      // way back in — watertight by construction.
+      const exporter = new STLExporter();
+      const mesh = new Mesh(bg, new MeshBasicMaterial());
+      const stlString = exporter.parse(mesh, { binary: true }) as unknown as DataView;
+      const ab = stlString.buffer.slice(
+        stlString.byteOffset,
+        stlString.byteOffset + stlString.byteLength,
+      ) as ArrayBuffer;
+
+      const loaded = await loadStl(ab);
+      try {
+        expect(loaded.repairedTriCount).toBe(0);
+        expect(isManifold(loaded.manifold)).toBe(true);
+      } finally {
+        loaded.manifold.delete();
+      }
+    } finally {
+      cube.delete();
+    }
+  });
 });

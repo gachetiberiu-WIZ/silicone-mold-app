@@ -418,3 +418,115 @@ describe('generateButton — i18n', () => {
     expect(hint.textContent).toBe(i18next.t('generate.ready'));
   });
 });
+
+describe('generateButton — hint state machine (issue #64)', () => {
+  // Four-transition state machine covered here:
+  //   1. enabled-ready    →  generated      (after setGenerated(true))
+  //   2. generated        →  stale-params   (after setStale(true))
+  //   3. stale-params     →  busy           (setBusy(true) resets all flags)
+  //   4. busy             →  generated      (setBusy(false) + setGenerated(true))
+  // + a reset-via-invalidation path covered in generateInvalidation.test.ts.
+
+  function getHint(container: HTMLElement): HTMLElement {
+    return container.querySelector<HTMLElement>('[data-testid="generate-hint"]')!;
+  }
+
+  test('setGenerated(true) flips the hint from "ready" to "done"', () => {
+    const { container, api } = mount();
+    api.setHasMaster(true);
+    api.setEnabled(true);
+    expect(getHint(container).textContent).toBe(i18next.t('generate.ready'));
+    api.setGenerated(true);
+    expect(getHint(container).textContent).toBe(i18next.t('generate.done'));
+    // Still tinted accent — the post-generate state is the "affirmative"
+    // one, matching "Ready to generate"'s colouring.
+    expect(getHint(container).classList.contains('generate-block__hint--ready')).toBe(true);
+    expect(api.isGenerated()).toBe(true);
+  });
+
+  test('setStale(true) after setGenerated(true) swaps to "stale params" hint', () => {
+    const { container, api } = mount();
+    api.setHasMaster(true);
+    api.setEnabled(true);
+    api.setGenerated(true);
+    api.setStale(true);
+    expect(getHint(container).textContent).toBe(i18next.t('generate.staleParams'));
+    expect(api.isStale()).toBe(true);
+    expect(api.isGenerated()).toBe(true);
+  });
+
+  test('setStale(true) without prior generate is a no-op on the hint', () => {
+    // Before a successful generate, topbar volumes are null and the
+    // "Ready to generate" / "Orient first" selectors own the hint.
+    // Flipping `stale` in that window must not produce a misleading
+    // "Parameters changed" hint.
+    const { container, api } = mount();
+    api.setHasMaster(true);
+    api.setEnabled(true);
+    api.setStale(true);
+    expect(getHint(container).textContent).toBe(i18next.t('generate.ready'));
+  });
+
+  test('setBusy(true) resets both generated + stale flags', () => {
+    const { container, api } = mount();
+    api.setHasMaster(true);
+    api.setEnabled(true);
+    api.setGenerated(true);
+    api.setStale(true);
+    api.setBusy(true);
+    expect(api.isGenerated()).toBe(false);
+    expect(api.isStale()).toBe(false);
+    expect(getHint(container).textContent).not.toBe(i18next.t('generate.staleParams'));
+    expect(getHint(container).textContent).not.toBe(i18next.t('generate.done'));
+  });
+
+  test('setGenerated(true) after a re-run clears stale', () => {
+    const { container, api } = mount();
+    api.setHasMaster(true);
+    api.setEnabled(true);
+    api.setGenerated(true);
+    api.setStale(true);
+    // User clicks Generate → busy cycle clears both; the orchestrator's
+    // success hook flips generated back on at the end.
+    api.setBusy(true);
+    api.setBusy(false);
+    api.setGenerated(true);
+    expect(api.isStale()).toBe(false);
+    expect(api.isGenerated()).toBe(true);
+    expect(getHint(container).textContent).toBe(i18next.t('generate.done'));
+  });
+
+  test('error state wins over done/stale hints', () => {
+    const { container, api } = mount();
+    api.setHasMaster(true);
+    api.setEnabled(true);
+    api.setGenerated(true);
+    api.setError('wall too thin');
+    expect(getHint(container).textContent).toBe(
+      i18next.t('generate.error', { reason: 'wall too thin' }),
+    );
+    // Stale can arrive AFTER the error is showing; error still wins.
+    api.setStale(true);
+    expect(getHint(container).textContent).toBe(
+      i18next.t('generate.error', { reason: 'wall too thin' }),
+    );
+  });
+
+  test('setGenerated(false) after stale clears stale too (belt-and-braces)', () => {
+    // This path isn't driven by production today (the invalidation
+    // listener drives BOTH setGenerated + setStale), but the component's
+    // internal invariant is: "no generated → no stale can meaningfully
+    // render either". Verify that invariant holds.
+    const { container, api } = mount();
+    api.setHasMaster(true);
+    api.setEnabled(true);
+    api.setGenerated(true);
+    api.setStale(true);
+    api.setGenerated(false);
+    // Component does NOT auto-clear stale flag when generated flips off —
+    // we keep the flags orthogonal. But the hint renderer ignores stale
+    // unless generated is also true, so the user sees "Ready to generate"
+    // not "Parameters changed".
+    expect(getHint(container).textContent).toBe(i18next.t('generate.ready'));
+  });
+});

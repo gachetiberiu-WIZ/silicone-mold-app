@@ -33,7 +33,7 @@ import {
   type ParametersStore,
 } from './state/parameters';
 import { attachDropZone } from './ui/dropZone';
-import { clear as clearErrorToast, showError } from './ui/errorToast';
+import { clear as clearErrorToast, showError, showNotice } from './ui/errorToast';
 import { bumpGenerateEpoch } from './ui/generateEpoch';
 import {
   mountGenerateButton,
@@ -309,6 +309,36 @@ function mountParameters(): void {
           printablePartsToggle.setEnabled(true);
         }
       },
+      // Issue #64 — on every successful generate, flip the Generate
+      // button's hint to "Generated — click to re-run..." and clear
+      // the topbar stale-mute state. Both reset on the next staleness
+      // signal (orientation commit, reset, new STL) via the
+      // invalidation listener below, and on the next parameters-store
+      // change via the subscription further down.
+      onGenerateSuccess() {
+        btn.setGenerated(true);
+        tbar.setVolumesStale(false);
+      },
+    });
+  }
+
+  // Issue #64 — subscribe to the parameters store so a tweak AFTER a
+  // successful generate flips the topbar silicone/resin readouts to
+  // their muted "stale" state AND flips the Generate hint to
+  // "Parameters changed. Click Generate to update.". The gate on
+  // `isGenerated()` is essential: pre-first-generate tweaks are the
+  // common case and must NOT mute the "Click Generate" placeholder
+  // (the readouts are already null). The next successful generate
+  // resets both flags via `onGenerateSuccess` above; every staleness
+  // signal resets them via `attachGenerateInvalidation` below.
+  if (parametersStore && topbar && generateButton) {
+    const tbar = topbar;
+    const btn = generateButton;
+    parametersStore.subscribe(() => {
+      if (btn.isGenerated() && !btn.isBusy()) {
+        btn.setStale(true);
+        tbar.setVolumesStale(true);
+      }
     });
   }
 
@@ -328,6 +358,7 @@ function mountParameters(): void {
   // See `src/renderer/ui/generateInvalidation.ts` for the full semantics.
   if (topbar && generateButton && viewport) {
     const vp = viewport;
+    const tbar = topbar;
     attachGenerateInvalidation(topbar, generateButton, {
       clearSilicone: () => {
         vp.clearSilicone();
@@ -341,6 +372,12 @@ function mountParameters(): void {
         // Reset the UI-layer `explodedViewActive` mirror so the next
         // successful Generate starts from a known-collapsed state.
         explodedViewActive = false;
+        // Issue #64 — any staleness signal clears the muted "stale"
+        // state on the topbar readouts too. The invalidation listener
+        // has already nulled the silicone + resin numbers, so muting
+        // them would be wrong once they revert to the "Click Generate"
+        // placeholder.
+        tbar.setVolumesStale(false);
       },
       clearPrintableParts: () => {
         // Issue #62: printable-parts lifetime matches the silicone
@@ -451,6 +488,17 @@ async function loadMasterFromBuffer(buffer: ArrayBuffer): Promise<void> {
   // A successful load supersedes any lingering error banner (e.g. the
   // user hit "file too large" and then picked a valid file).
   clearErrorToast();
+  // Issue #64 — if manifold-3d silently repaired non-manifold input,
+  // surface the tri-count delta as a discreet notice-level toast. We
+  // fire AFTER `clearErrorToast()` so a prior error doesn't immediately
+  // get replaced by the notice (the clear nukes whatever was showing;
+  // `showNotice` then owns the slot for the usual auto-dismiss window).
+  // Zero delta → STL was already watertight → no toast.
+  if (result.repairedTriCount > 0) {
+    showNotice(
+      t('notice.masterRepaired', { removed: result.repairedTriCount }),
+    );
+  }
 }
 
 /**

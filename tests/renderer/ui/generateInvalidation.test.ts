@@ -244,6 +244,68 @@ describe('attachGenerateInvalidation — clearSilicone hook (issue #47)', () => 
   });
 });
 
+describe('attachGenerateInvalidation — generated/stale reset (issue #64)', () => {
+  // Staleness signals (orientation commit, reset, new STL load) must
+  // clear the Generate button's `generated` + `stale` flags so the hint
+  // falls back to the base "Ready to generate" / "Orient first" /
+  // "Load STL" selector. Without this, a "Generated — click to re-run..."
+  // hint could linger after the user committed a new face, which would
+  // confuse the state machine.
+  test('calls setGenerated(false) + setStale(false) on every valid commit event', () => {
+    const topbar = {
+      setSiliconeVolume: vi.fn<(v: number | null) => void>(),
+      setResinVolume: vi.fn<(v: number | null) => void>(),
+    };
+    const generateButton = {
+      setEnabled: vi.fn<(v: boolean) => void>(),
+      setError: vi.fn<(v: string | null) => void>(),
+      setGenerated: vi.fn<(v: boolean) => void>(),
+      setStale: vi.fn<(v: boolean) => void>(),
+    };
+    attachAndTrack(topbar, generateButton);
+
+    dispatchCommittedEvent(true);
+
+    expect(generateButton.setGenerated).toHaveBeenCalledWith(false);
+    expect(generateButton.setStale).toHaveBeenCalledWith(false);
+
+    dispatchCommittedEvent(false);
+
+    expect(generateButton.setGenerated).toHaveBeenCalledTimes(2);
+    expect(generateButton.setStale).toHaveBeenCalledTimes(2);
+  });
+
+  test('does NOT call setGenerated / setStale on non-boolean detail', () => {
+    const topbar = {
+      setSiliconeVolume: vi.fn<(v: number | null) => void>(),
+      setResinVolume: vi.fn<(v: number | null) => void>(),
+    };
+    const generateButton = {
+      setEnabled: vi.fn<(v: boolean) => void>(),
+      setError: vi.fn<(v: string | null) => void>(),
+      setGenerated: vi.fn<(v: boolean) => void>(),
+      setStale: vi.fn<(v: boolean) => void>(),
+    };
+    attachAndTrack(topbar, generateButton);
+
+    dispatchCommittedEvent('nope');
+    dispatchCommittedEvent(undefined);
+
+    expect(generateButton.setGenerated).not.toHaveBeenCalled();
+    expect(generateButton.setStale).not.toHaveBeenCalled();
+  });
+
+  test('setGenerated / setStale are optional — absence does not throw (legacy button mocks)', () => {
+    // Pre-#64 `InvalidationGenerateButton` implementations don't have
+    // these methods. The listener must guard-call them so existing
+    // unit tests (and any future call site that only stubs the minimal
+    // surface) don't blow up.
+    const { topbar, generateButton } = makeMocks();
+    attachAndTrack(topbar, generateButton);
+    expect(() => dispatchCommittedEvent(true)).not.toThrow();
+  });
+});
+
 describe('attachGenerateInvalidation — clearPrintableParts hook (issue #62)', () => {
   test('calls clearPrintableParts on every valid commit event', () => {
     const { topbar, generateButton } = makeMocks();

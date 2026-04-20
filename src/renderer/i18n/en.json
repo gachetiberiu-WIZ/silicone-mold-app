@@ -53,8 +53,13 @@
     "buttonBusy": "Generating…",
     "hint": "Orient the part on its base (use Place on face in the toolbar), then click Generate.",
     "ready": "Ready to generate",
+    "done": "Generated — click to re-run with current parameters.",
+    "staleParams": "Parameters changed. Click Generate to update.",
     "noMaster": "Load an STL to begin.",
     "error": "Could not generate mold: {{reason}}"
+  },
+  "notice": {
+    "masterRepaired": "Repaired non-manifold STL on load ({{removed}} triangles removed)."
   },
   "errors": {
     "stlOnly": "Only .stl files are supported",

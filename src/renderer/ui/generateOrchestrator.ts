@@ -143,6 +143,16 @@ export interface OrchestratorSceneSink {
   }): Promise<unknown>;
 }
 
+/**
+ * Callback fired on the happy path, after the topbar volumes have been
+ * pushed and the scene sinks (if present) have accepted the halves +
+ * printable parts. Issue #64 uses this to flip the Generate button's
+ * `generated` flag so the hint reads `generate.done` ("Generated — click
+ * to re-run..."). Not called on stale / error paths — a superseded or
+ * failed run did not produce a user-visible success.
+ */
+export type OrchestratorOnGenerateSuccess = () => void;
+
 /** Dependencies injected into the orchestrator factory. */
 export interface GenerateOrchestratorDeps {
   /**
@@ -191,6 +201,14 @@ export interface GenerateOrchestratorDeps {
    * happy, non-stale path so a superseded run can't jerk the camera.
    */
   onSiliconeInstalled?: (result: unknown) => void;
+  /**
+   * Optional hook fired at the END of the happy path (after silicone + any
+   * printable-parts hand-off) so the UI layer can flip the "generated"
+   * state on the Generate button (issue #64). Not invoked on stale / error
+   * paths — a superseded or failed run did not produce a user-visible
+   * success.
+   */
+  onGenerateSuccess?: OrchestratorOnGenerateSuccess;
   /**
    * Optional epoch hooks — default to the shared module-level counter.
    * Tests override to assert bump sequences or observe the stale-path.
@@ -247,6 +265,7 @@ export function createGenerateOrchestrator(
     button,
     scene,
     onSiliconeInstalled,
+    onGenerateSuccess,
     bumpEpoch = bumpGenerateEpoch,
     getEpoch = getGenerateEpoch,
     logger = console,
@@ -324,6 +343,12 @@ export function createGenerateOrchestrator(
           console.debug('[generate] warnings:', result.warnings);
         }
 
+        // Issue #64 — track sink failures so the post-run success hook
+        // (below) can skip firing when any downstream sink surfaced an
+        // error. Without this, `onGenerateSuccess` would overwrite the
+        // red error hint with the green "Generated" one on the very
+        // same tick.
+        let siliconeSinkFailed = false;
         if (scene) {
           // Happy path (issue #47): hand ownership of BOTH half-Manifolds
           // to the scene sink. `scene.setSilicone` is responsible for
@@ -354,6 +379,7 @@ export function createGenerateOrchestrator(
             const message = err instanceof Error ? err.message : String(err);
             logger.error('[generate] setSilicone failed:', err);
             button.setError(message);
+            siliconeSinkFailed = true;
           }
         } else {
           // No scene sink wired (legacy call sites, some tests) — fall
@@ -369,6 +395,7 @@ export function createGenerateOrchestrator(
         // must NOT `.delete()` the printable Manifolds. If the sink is
         // absent (legacy call sites, volume-only tests), fall back to
         // Wave-2 behaviour and dispose the parts immediately.
+        let printablePartsFailed = false;
         if (scene?.setPrintableParts) {
           try {
             await scene.setPrintableParts({
@@ -386,9 +413,24 @@ export function createGenerateOrchestrator(
             const message = err instanceof Error ? err.message : String(err);
             logger.error('[generate] setPrintableParts failed:', err);
             button.setError(message);
+            printablePartsFailed = true;
           }
         } else {
           disposePrintableParts(result);
+        }
+
+        // Issue #64 — fire the success hook last, guarded by:
+        //   - the run is still current (no mid-flight invalidation), AND
+        //   - no downstream sink surfaced an error. If setError was
+        //     called earlier, we don't want to immediately overwrite the
+        //     red error hint with a green "Generated" one.
+        if (
+          epoch === getEpoch() &&
+          !siliconeSinkFailed &&
+          !printablePartsFailed &&
+          onGenerateSuccess
+        ) {
+          onGenerateSuccess();
         }
       } catch (err) {
         // Stale rejection → user already moved on; no point alarming

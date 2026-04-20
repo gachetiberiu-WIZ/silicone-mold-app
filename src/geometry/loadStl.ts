@@ -8,21 +8,34 @@
 import type { BufferGeometry } from 'three';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import type { Manifold } from 'manifold-3d';
-import { bufferGeometryToManifold } from './adapters';
+import { bufferGeometryToManifoldWithRepair } from './adapters';
 
 /**
  * Result shape for `loadStl`. `geometry` is ready for Three rendering + BVH
  * construction; `manifold` is the compute representation for Boolean / offset
  * / volume. Callers must `.delete()` the manifold when done.
+ *
+ * `repairedTriCount` is the absolute tri-count delta between the input
+ * STL's triangle buffer (as seen by manifold-3d after vertex-dedup) and
+ * the resulting Manifold. Zero when the input was already a valid
+ * 2-manifold; positive when manifold-3d collapsed or dropped degenerate
+ * triangles during construction. Surfaced so the `loadMasterFromBuffer`
+ * path in `main.ts` can show a discreet notice-level toast (issue #64).
  */
 export interface LoadedStl {
   geometry: BufferGeometry;
   manifold: Manifold;
+  /**
+   * `|inputTriCount - outputTriCount|` around the manifold-3d construction
+   * call. Zero when the STL was already watertight; positive when the
+   * kernel silently repaired non-manifold input.
+   */
+  repairedTriCount: number;
 }
 
 /**
  * Parse a binary or ASCII STL buffer and produce a paired
- * `(BufferGeometry, Manifold)`.
+ * `(BufferGeometry, Manifold)` + a repair count.
  *
  * Behaviour:
  * - Uses three.js `STLLoader.parse` for the BufferGeometry side (handles both
@@ -30,9 +43,10 @@ export interface LoadedStl {
  * - Drops any normal attribute the loader attached — STL's stored face
  *   normals are historically unreliable — and re-derives smooth vertex
  *   normals from triangle winding via `computeVertexNormals()`.
- * - Delegates manifold construction to `bufferGeometryToManifold`, which
- *   ensures the single WASM instance is initialised and surfaces a tri-count
- *   delta warning if manifold-3d repairs non-manifold input.
+ * - Delegates manifold construction to `bufferGeometryToManifoldWithRepair`,
+ *   which ensures the single WASM instance is initialised and returns the
+ *   tri-count delta so the UI layer can surface a notice-level toast when
+ *   manifold-3d silently repairs non-manifold input (issue #64).
  *
  * @param buffer Binary or ASCII STL contents as an `ArrayBuffer`.
  * @throws If the STL fails to parse or contains no geometry.
@@ -52,6 +66,7 @@ export async function loadStl(buffer: ArrayBuffer): Promise<LoadedStl> {
     throw new Error('loadStl: parsed STL has no vertices');
   }
 
-  const manifold = await bufferGeometryToManifold(parsed);
-  return { geometry: parsed, manifold };
+  const { manifold, repairedTriCount } =
+    await bufferGeometryToManifoldWithRepair(parsed);
+  return { geometry: parsed, manifold, repairedTriCount };
 }

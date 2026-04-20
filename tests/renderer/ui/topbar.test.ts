@@ -225,6 +225,81 @@ describe('topbar — units flip updates all readouts', () => {
   });
 });
 
+describe('topbar — stale indicator (issue #64, Option A)', () => {
+  // `setVolumesStale(true)` marks the silicone + resin readouts with
+  // `is-stale` so the CSS rule in index.html can italicise + mute them.
+  // Master is never stale — it's invariant under parameter change.
+  test('setVolumesStale(true) adds is-stale to silicone + resin wraps, not master', () => {
+    const header = mount();
+    const api = mountTopbar(header);
+    api.setMasterVolume(1000);
+    api.setSiliconeVolume(2000);
+    api.setResinVolume(500);
+
+    api.setVolumesStale(true);
+
+    const masterWrap = header.querySelector<HTMLElement>(
+      '[data-testid="volume-readout"]',
+    );
+    const siliconeWrap = header.querySelector<HTMLElement>(
+      '[data-testid="silicone-volume-readout"]',
+    );
+    const resinWrap = header.querySelector<HTMLElement>(
+      '[data-testid="resin-volume-readout"]',
+    );
+
+    expect(masterWrap?.classList.contains('is-stale')).toBe(false);
+    expect(siliconeWrap?.classList.contains('is-stale')).toBe(true);
+    expect(resinWrap?.classList.contains('is-stale')).toBe(true);
+    expect(api.isVolumesStale()).toBe(true);
+  });
+
+  test('setVolumesStale(false) clears is-stale from silicone + resin wraps', () => {
+    const header = mount();
+    const api = mountTopbar(header);
+    api.setVolumesStale(true);
+    api.setVolumesStale(false);
+
+    const siliconeWrap = header.querySelector<HTMLElement>(
+      '[data-testid="silicone-volume-readout"]',
+    );
+    const resinWrap = header.querySelector<HTMLElement>(
+      '[data-testid="resin-volume-readout"]',
+    );
+    expect(siliconeWrap?.classList.contains('is-stale')).toBe(false);
+    expect(resinWrap?.classList.contains('is-stale')).toBe(false);
+    expect(api.isVolumesStale()).toBe(false);
+  });
+
+  test('idempotent setVolumesStale (same value twice is a no-op)', () => {
+    const header = mount();
+    const api = mountTopbar(header);
+    api.setVolumesStale(true);
+    api.setVolumesStale(true);
+    const siliconeWrap = header.querySelector<HTMLElement>(
+      '[data-testid="silicone-volume-readout"]',
+    );
+    // Class list has a single `is-stale` entry — not duplicated.
+    expect(siliconeWrap?.className.match(/is-stale/g)?.length).toBe(1);
+  });
+
+  test('stale state survives a subsequent setSiliconeVolume call', () => {
+    // The stale CSS class lives on the wrap, not the value span, so
+    // updating the text contents doesn't wipe the class. This test
+    // confirms that invariant: a stale-marked readout stays stale
+    // until explicitly un-muted.
+    const header = mount();
+    const api = mountTopbar(header);
+    api.setSiliconeVolume(1000);
+    api.setVolumesStale(true);
+    api.setSiliconeVolume(2000); // simulate a test-hook push
+    const siliconeWrap = header.querySelector<HTMLElement>(
+      '[data-testid="silicone-volume-readout"]',
+    );
+    expect(siliconeWrap?.classList.contains('is-stale')).toBe(true);
+  });
+});
+
 describe('topbar — back-compat setVolume alias', () => {
   test('setVolume updates only the master readout (silicone / resin untouched)', () => {
     const header = mount();

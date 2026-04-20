@@ -13,13 +13,23 @@
 //   </div>
 //
 // State machine (driven externally by `setEnabled`, `setHasMaster`,
-// `setBusy`, `setError`):
+// `setBusy`, `setError`, `setGenerated`, `setStale`):
 //
 //   disabled + no master       → button disabled, hint = "Load an STL to begin."
 //   disabled + master loaded   → button disabled, hint = "Orient the part on its base..."
 //   enabled  + master loaded   → button enabled (accent), hint = "Ready to generate"
 //   busy                       → button disabled, label = "Generating…"
+//   generated (after success)  → button enabled, hint = "Generated — click to re-run..."
+//   stale (params changed)     → button enabled, hint = "Parameters changed. Click Generate..."
 //   error                      → button re-enabled, hint = red error message
+//
+// Issue #64 adds the `generated` + `stale` hints so the user can tell the
+// pre- and post-generate enabled states apart, and so a parameter tweak
+// after a successful generate visibly flags that the preview is out of
+// date. Priority inside `renderHint`: error > stale > generated > ready >
+// orient-hint > no-master. Errors always win; stale beats generated (user
+// changed params, that's the signal that matters); generated beats ready
+// (most recent event wins — we know Generate ran).
 //
 // The caller (`main.ts`) decides which state applies. We keep state internal
 // so the component can re-render consistently on every change.
@@ -72,10 +82,31 @@ export interface GenerateButtonApi {
    * pairs `setBusy(false)` + `setError(msg)` so the user can retry.
    */
   setError(reason: string | null): void;
+  /**
+   * Flip the "generate has succeeded" flag (issue #64). When true, the
+   * hint reads `generate.done` ("Generated — click to re-run...") so the
+   * post-success state is distinguishable from the pre-click "Ready to
+   * generate" state. Any staleness signal or a new master load resets this
+   * to false. Cleared automatically when the user picks up Generate again
+   * (on the `setBusy(true)` transition).
+   */
+  setGenerated(generated: boolean): void;
+  /**
+   * Flip the "parameters changed since last generate" flag (issue #64).
+   * When true (AND a prior generate succeeded), the hint reads
+   * `generate.staleParams` so the user sees that the preview is out of
+   * date relative to the current parameters. Cleared on the next
+   * `setGenerated(true)` or `setHasMaster(true)`.
+   */
+  setStale(stale: boolean): void;
   /** Read the current enabled flag (useful for tests). */
   isEnabled(): boolean;
   /** Read the current busy flag (useful for tests). */
   isBusy(): boolean;
+  /** Read the current "generated" flag (useful for tests). */
+  isGenerated(): boolean;
+  /** Read the current "stale params" flag (useful for tests). */
+  isStale(): boolean;
   /** Detach from the DOM + release listeners. */
   destroy(): void;
 }
@@ -135,6 +166,12 @@ export function mountGenerateButton(
   let hasMaster = false;
   let busy = false;
   let errorReason: string | null = null;
+  // Issue #64: post-generate hint states. `generated` flips true on
+  // success, `stale` flips true on parameter change after a success.
+  // Both reset on new-master / staleness signals (orientation change, new
+  // STL) via the existing reset paths in main.ts.
+  let generated = false;
+  let stale = false;
 
   function renderButton(): void {
     // Busy always wins: user cannot re-click mid-generation even if a
@@ -146,9 +183,11 @@ export function mountGenerateButton(
   }
 
   function renderHint(): void {
-    // Error overrides everything else (including the ready tint) until
-    // cleared. We keep the ready-tint class off and apply an inline
-    // colour so we don't need a new CSS token.
+    // Priority (highest → lowest):
+    //   error > stale > generated > ready > orient > no-master
+    //
+    // Error overrides everything else until cleared. We keep the ready-tint
+    // class off and apply an inline colour so we don't need a new CSS token.
     if (errorReason !== null) {
       hint.classList.remove('generate-block__hint--ready');
       hint.classList.add('generate-block__hint--error');
@@ -156,7 +195,22 @@ export function mountGenerateButton(
       return;
     }
     hint.classList.remove('generate-block__hint--error');
-    // Three-state selector per the spec:
+    // Issue #64 — stale beats generated: a param tweak after success is
+    // the most recent user signal and the one the user needs to see.
+    if (stale && generated) {
+      hint.classList.add('generate-block__hint--ready');
+      hint.textContent = t('generate.staleParams');
+      return;
+    }
+    // Issue #64 — generated beats ready: Generate has run at least once
+    // since the last staleness signal; tell the user re-running is what
+    // the button does now.
+    if (generated) {
+      hint.classList.add('generate-block__hint--ready');
+      hint.textContent = t('generate.done');
+      return;
+    }
+    // Base three-state selector (pre-generate):
     //   enabled              → "Ready to generate" (accent colour)
     //   disabled + master    → "Orient the part on its base..."
     //   disabled + no master → "Load an STL to begin."
@@ -213,8 +267,15 @@ export function mountGenerateButton(
       if (busy === next) return;
       busy = next;
       // Starting a new generation implicitly clears any previous error so
-      // the user sees "Generating…" instead of a stale red message.
-      if (busy) errorReason = null;
+      // the user sees "Generating…" instead of a stale red message. Also
+      // clear the post-success `generated` + `stale` flags — this run will
+      // set `generated` back to true on completion via the orchestrator's
+      // `onGenerateSuccess` hook.
+      if (busy) {
+        errorReason = null;
+        generated = false;
+        stale = false;
+      }
       render();
     },
     setError(reason: string | null): void {
@@ -222,11 +283,30 @@ export function mountGenerateButton(
       errorReason = reason;
       render();
     },
+    setGenerated(next: boolean): void {
+      if (generated === next) return;
+      generated = next;
+      // A fresh successful generate supersedes the stale flag — the user's
+      // most recent parameters are now what's on screen.
+      if (generated) stale = false;
+      render();
+    },
+    setStale(next: boolean): void {
+      if (stale === next) return;
+      stale = next;
+      render();
+    },
     isEnabled(): boolean {
       return enabled;
     },
     isBusy(): boolean {
       return busy;
+    },
+    isGenerated(): boolean {
+      return generated;
+    },
+    isStale(): boolean {
+      return stale;
     },
     destroy(): void {
       button.removeEventListener('click', onClick);
