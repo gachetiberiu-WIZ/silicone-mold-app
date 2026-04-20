@@ -50,6 +50,17 @@ export interface TopbarApi {
    * Same staleness semantics as `setSiliconeVolume`.
    */
   setResinVolume(mm3: number | null): void;
+  /**
+   * Flip the "stale" muted-display state for the silicone + resin
+   * readouts (issue #64 — Option A). When true, both readouts render in
+   * italic + reduced opacity so the user sees that the displayed volumes
+   * are for a prior parameter set. Master volume is NOT muted — it is
+   * invariant under parameter change. Called by `main.ts` when the
+   * parameters store fires a change event after a successful generate.
+   */
+  setVolumesStale(stale: boolean): void;
+  /** Read the current "stale" flag for the volume readouts (useful for tests). */
+  isVolumesStale(): boolean;
   /** Programmatically flip the unit system. Mirrors the toggle buttons. */
   setUnits(unit: UnitSystem): void;
   /** Read current unit system. */
@@ -178,6 +189,21 @@ export function mountTopbar(
   let currentSilicone: number | null = null;
   let currentResin: number | null = null;
   let currentUnits: UnitSystem = getUnitSystem();
+  // Issue #64 — "stale" flag for silicone + resin. When true, both
+  // readouts carry `is-stale` (italic + 50 % opacity via CSS). Master
+  // readout is never stale — it's invariant under parameter change.
+  let volumesStale = false;
+
+  const STALE_CLASS = 'is-stale';
+  function applyStaleClass(): void {
+    if (volumesStale) {
+      silicone.wrap.classList.add(STALE_CLASS);
+      resin.wrap.classList.add(STALE_CLASS);
+    } else {
+      silicone.wrap.classList.remove(STALE_CLASS);
+      resin.wrap.classList.remove(STALE_CLASS);
+    }
+  }
 
   const toggle: UnitsToggleApi = mountUnitsToggle(togglePanel);
 
@@ -234,6 +260,14 @@ export function mountTopbar(
         currentUnits,
         'volume.notGenerated',
       );
+    },
+    setVolumesStale(next: boolean): void {
+      if (volumesStale === next) return;
+      volumesStale = next;
+      applyStaleClass();
+    },
+    isVolumesStale(): boolean {
+      return volumesStale;
     },
     setUnits(unit: UnitSystem): void {
       toggle.setUnits(unit);

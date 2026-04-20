@@ -151,6 +151,211 @@ describe('generateOrchestrator — happy path', () => {
   });
 });
 
+describe('generateOrchestrator — onGenerateSuccess hook (issue #64)', () => {
+  test('fires onGenerateSuccess on the happy path (volume-only, no scene sink)', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const onGenerateSuccess = vi.fn<() => void>();
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      onGenerateSuccess,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeResult());
+    await runPromise;
+
+    expect(onGenerateSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  test('fires onGenerateSuccess on the happy path (with scene sinks)', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const sceneSetSilicone = vi
+      .fn<(halves: { upper: Manifold; lower: Manifold }) => Promise<unknown>>()
+      .mockResolvedValue({ bbox: null });
+    const sceneSetPrintableParts = vi
+      .fn<
+        (parts: {
+          base: Manifold;
+          sides: readonly Manifold[];
+          topCap: Manifold;
+        }) => Promise<unknown>
+      >()
+      .mockResolvedValue({ bbox: null });
+    const onGenerateSuccess = vi.fn<() => void>();
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      scene: {
+        setSilicone: sceneSetSilicone,
+        setPrintableParts: sceneSetPrintableParts,
+      },
+      onGenerateSuccess,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeResult());
+    await runPromise;
+
+    expect(sceneSetSilicone).toHaveBeenCalledTimes(1);
+    expect(sceneSetPrintableParts).toHaveBeenCalledTimes(1);
+    expect(onGenerateSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  test('does NOT fire onGenerateSuccess on stale-drop', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const onGenerateSuccess = vi.fn<() => void>();
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      onGenerateSuccess,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    // Force staleness
+    const { bumpGenerateEpoch } = await import('@/renderer/ui/generateEpoch');
+    bumpGenerateEpoch();
+    d.resolve(makeResult());
+    await runPromise;
+
+    expect(onGenerateSuccess).not.toHaveBeenCalled();
+  });
+
+  test('does NOT fire onGenerateSuccess when generate rejects', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const onGenerateSuccess = vi.fn<() => void>();
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => Promise.reject(new Error('boom')),
+      topbar,
+      button,
+      onGenerateSuccess,
+      logger: { error: () => {} },
+    });
+
+    await orchestrator.run();
+
+    expect(onGenerateSuccess).not.toHaveBeenCalled();
+  });
+
+  test('does NOT fire onGenerateSuccess when silicone sink rejects', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const sceneSetSilicone = vi
+      .fn<(halves: { upper: Manifold; lower: Manifold }) => Promise<unknown>>()
+      .mockRejectedValue(new Error('silicone adapter boom'));
+    const onGenerateSuccess = vi.fn<() => void>();
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      scene: { setSilicone: sceneSetSilicone },
+      onGenerateSuccess,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeResult());
+    await runPromise;
+
+    expect(onGenerateSuccess).not.toHaveBeenCalled();
+    expect(button.setError).toHaveBeenLastCalledWith('silicone adapter boom');
+  });
+
+  test('does NOT fire onGenerateSuccess when printable-parts sink rejects', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const sceneSetSilicone = vi
+      .fn<(halves: { upper: Manifold; lower: Manifold }) => Promise<unknown>>()
+      .mockResolvedValue({ bbox: null });
+    const sceneSetPrintableParts = vi
+      .fn<
+        (parts: {
+          base: Manifold;
+          sides: readonly Manifold[];
+          topCap: Manifold;
+        }) => Promise<unknown>
+      >()
+      .mockRejectedValue(new Error('printable adapter boom'));
+    const onGenerateSuccess = vi.fn<() => void>();
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      scene: {
+        setSilicone: sceneSetSilicone,
+        setPrintableParts: sceneSetPrintableParts,
+      },
+      onGenerateSuccess,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeResult());
+    await runPromise;
+
+    expect(onGenerateSuccess).not.toHaveBeenCalled();
+    expect(button.setError).toHaveBeenLastCalledWith('printable adapter boom');
+  });
+
+  test('hook is optional — absence does not throw on the happy path', async () => {
+    // Regression guard: pre-#64 call sites don't wire the hook and must
+    // keep working. The orchestrator's own existing happy-path test
+    // already omits it, so this is belt-and-braces.
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeResult());
+    await expect(runPromise).resolves.toBeUndefined();
+  });
+});
+
 describe('generateOrchestrator — mid-flight LAY_FLAT_COMMITTED_EVENT race (QA blocker 2)', () => {
   test('invalidation bumps epoch; stale resolve drops result WITHOUT overwriting topbar', async () => {
     const { topbar, button } = makeMocks();
