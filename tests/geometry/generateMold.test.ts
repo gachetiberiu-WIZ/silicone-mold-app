@@ -561,48 +561,73 @@ describe('generateSiliconeShell — validation', () => {
 // ---------------------------------------------------------------------------
 
 describe('generateSiliconeShell — Wave 3 (keys, sprue, vents)', () => {
-  test('rejects cone key style pre-Manifold with InvalidParametersError', async () => {
+  // Issue #57: cone + keyhole key styles are now implemented — a happy-path
+  // full-generate per style confirms the dispatch wires through the
+  // generator. The fine-grained geometry coverage lives in the
+  // `registrationKeys.test.ts` suite.
+  test('generates a watertight mold with cone key style (issue #57)', async () => {
     const toplevel = await initManifold();
     const master = toplevel.Manifold.cube([4, 4, 4], true);
     try {
-      await expect(
-        generateSiliconeShell(
-          master,
-          params({ registrationKeyStyle: 'cone' }),
-          new Matrix4(),
-        ),
-      ).rejects.toThrow(/not implemented yet in v1/);
-      // Error class.
+      const result = await generateSiliconeShell(
+        master,
+        params({ registrationKeyStyle: 'cone', ventCount: 0 }),
+        new Matrix4(),
+      );
       try {
-        await generateSiliconeShell(
-          master,
-          params({ registrationKeyStyle: 'cone' }),
-          new Matrix4(),
-        );
-        throw new Error('expected rejection');
-      } catch (err) {
-        expect((err as Error).name).toBe('InvalidParametersError');
+        expect(isManifold(result.siliconeUpperHalf)).toBe(true);
+        expect(isManifold(result.siliconeLowerHalf)).toBe(true);
+        expect(isManifold(result.basePart)).toBe(true);
+        expect(isManifold(result.topCapPart)).toBe(true);
+        for (const s of result.sideParts) expect(isManifold(s)).toBe(true);
+
+        // Halves sum invariant (kernel-noise-level match).
+        const upperVol = result.siliconeUpperHalf.volume();
+        const lowerVol = result.siliconeLowerHalf.volume();
+        expect(upperVol + lowerVol).toBeCloseTo(result.siliconeVolume_mm3, 3);
+
+        // Resin + silicone volumes positive + finite.
+        expect(result.siliconeVolume_mm3).toBeGreaterThan(0);
+        expect(result.resinVolume_mm3).toBeGreaterThan(0);
+        expect(Number.isFinite(result.resinVolume_mm3)).toBe(true);
+      } finally {
+        disposeAll(result);
       }
     } finally {
       master.delete();
     }
-  });
+  }, 30_000);
 
-  test('rejects keyhole key style pre-Manifold with InvalidParametersError', async () => {
+  test('generates a watertight mold with keyhole key style (issue #57)', async () => {
     const toplevel = await initManifold();
     const master = toplevel.Manifold.cube([4, 4, 4], true);
     try {
-      await expect(
-        generateSiliconeShell(
-          master,
-          params({ registrationKeyStyle: 'keyhole' }),
-          new Matrix4(),
-        ),
-      ).rejects.toThrow(/not implemented yet in v1/);
+      const result = await generateSiliconeShell(
+        master,
+        params({ registrationKeyStyle: 'keyhole', ventCount: 0 }),
+        new Matrix4(),
+      );
+      try {
+        expect(isManifold(result.siliconeUpperHalf)).toBe(true);
+        expect(isManifold(result.siliconeLowerHalf)).toBe(true);
+        expect(isManifold(result.basePart)).toBe(true);
+        expect(isManifold(result.topCapPart)).toBe(true);
+        for (const s of result.sideParts) expect(isManifold(s)).toBe(true);
+
+        const upperVol = result.siliconeUpperHalf.volume();
+        const lowerVol = result.siliconeLowerHalf.volume();
+        expect(upperVol + lowerVol).toBeCloseTo(result.siliconeVolume_mm3, 3);
+
+        expect(result.siliconeVolume_mm3).toBeGreaterThan(0);
+        expect(result.resinVolume_mm3).toBeGreaterThan(0);
+        expect(Number.isFinite(result.resinVolume_mm3)).toBe(true);
+      } finally {
+        disposeAll(result);
+      }
     } finally {
       master.delete();
     }
-  });
+  }, 30_000);
 
   test('rejects ventDiameter >= sprueDiameter pre-Manifold', async () => {
     const toplevel = await initManifold();

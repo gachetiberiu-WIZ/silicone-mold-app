@@ -384,17 +384,11 @@ export async function generateSiliconeShell(
     );
   }
 
-  // Wave 3 (issue #55): validate key style + sprue/vent ordering + vent
-  // count range. All pre-Manifold so bad input costs zero WASM heap.
-  if (
-    parameters.registrationKeyStyle === 'cone' ||
-    parameters.registrationKeyStyle === 'keyhole'
-  ) {
-    throw new InvalidParametersError(
-      `generateSiliconeShell: registrationKeyStyle='${parameters.registrationKeyStyle}' ` +
-        `is not implemented yet in v1 — use 'asymmetric-hemi' (the default)`,
-    );
-  }
+  // Wave 3 (issue #55) + issue #57: all three registrationKeyStyle values
+  // (`asymmetric-hemi`, `cone`, `keyhole`) are now implemented — the
+  // dispatch is in `stampRegistrationKeys`. Validate sprue/vent ordering
+  // and vent count range here (pre-Manifold so bad input costs zero
+  // WASM heap).
   if (!sprueVentDiameterRatioIsValid(parameters)) {
     throw new InvalidParametersError(
       `generateSiliconeShell: sprueDiameter_mm=${parameters.sprueDiameter_mm} ` +
@@ -574,6 +568,7 @@ export async function generateSiliconeShell(
               shellBbox,
               partingY,
               parameters.wallThickness_mm,
+              parameters.registrationKeyStyle,
             );
             // Swap refs: old halves are no longer the "current" ones —
             // release them, then take ownership of the keyed ones.

@@ -1,8 +1,9 @@
 // src/geometry/registrationKeys.ts
 //
-// Registration-key stamping — Phase 3c Wave 3 (issue #55, step 3).
+// Registration-key stamping — Phase 3c Wave 3 (issue #55) + issue #57
+// (cone + keyhole key styles).
 //
-// Places three hemispherical "keys" along the parting plane (horizontal at
+// Places three registration "keys" along the parting plane (horizontal at
 // `shellBbox` mid-Y from Waves 1-2) that protrude from the lower silicone
 // half and recess into the upper silicone half. Two symmetric keys sit on
 // ±X in the XZ plane; a third asymmetric key sits on +Z alone. The
@@ -10,44 +11,76 @@
 // about Y moves the +Z key to −Z, where the lower half has no matching
 // protrusion, so the halves will not mate.
 //
-// Locked design decisions (from issue #55, do NOT re-litigate):
-//   - Only `asymmetric-hemi` style this wave; `cone` + `keyhole` throw
-//     `InvalidParametersError` upstream at the generator entry.
+// Locked design decisions (layout + sizing, from issue #55):
 //   - 3 keys: (-0.35·ringWidth_X, 0), (+0.35·ringWidth_X, 0), (0, +0.35·ringWidth_Z).
-//   - Hemisphere diameter = min(4.0, 0.3·wallThickness_mm).
+//   - Key diameter = min(4.0, 0.3·wallThickness_mm).
 //   - Inside-ring constraint: `|coord| < ringWidth/2 − radius − 1.0 mm`
 //     with 1 mm clearance to the silicone outer face.
 //   - Clamp inward if the default 0.35 multiplier overshoots the safe zone;
 //     throw `GeometryError` if no valid placement exists.
 //
-// Clamping formula (agent-chosen, documented here and in the PR body):
+// Key styles (issue #55 + #57):
 //
-//   For each axis we compute the maximum multiplier `m_max` such that the
-//   key stays inside the safe zone:
+//   - `asymmetric-hemi` (#55): a full sphere centred on the parting plane.
+//     Upper half subtracts the upper hemisphere (recess); lower half unions
+//     the upper hemisphere (protrusion). Mating surfaces are exactly the
+//     two hemispheres sharing the parting-plane great circle.
 //
-//     |m · ringWidth/2| <= ringWidth/2 − radius − 1.0
-//     → m_max = (ringWidth/2 − radius − 1.0) / (ringWidth/2)
+//   - `cone` (#57): a "double cone" (two cones base-to-base at the
+//     parting plane), centred on the parting plane. Same
+//     symmetric-about-parting invariant as the sphere → single shared tool
+//     for both halves. Upper half gets a conical recess (tip pointing
+//     UP, into the silicone); lower half gets a conical protrusion
+//     (tip pointing UP, out of the silicone). Cone height = diameter
+//     (rule of thumb — a cone of height < diameter keys too softly, a
+//     cone of height > diameter is harder to demould). Since the tool is
+//     diameter-tall (= radius each side of the parting plane), the below-
+//     parting-plane cone of the "double cone" is already inside the lower
+//     half's material — its union is a no-op on volume, exactly like the
+//     sphere case.
 //
-//   If `m_max <= 0` the ring is narrower than `2·radius + 2.0 mm` on that
-//   axis — we throw `GeometryError("silicone ring too thin...")`. Otherwise
-//   the actual key offset is `min(0.35, m_max) · ringWidth/2`. The default
-//   0.35 multiplier wins when the ring is wide enough; the clamp kicks in
-//   on narrow masters (e.g. the issue's 20×10×10 tall-skinny test case).
+//   - `keyhole` (#57): a radially-oriented keyhole cross-section —
+//     circle + rectangular slot extending outward — extruded
+//     symmetrically across the parting plane. Resists lateral shear
+//     (the rectangular slot locks the halves together against any
+//     sliding pull in the XZ plane). Height = diameter (half above /
+//     half below parting plane). Each of the 3 key positions gets its
+//     own radially-oriented tool: the ±X keys' slots extend outward
+//     along ±X; the +Z key's slot extends outward along +Z. This makes
+//     the keyhole inherently "radial-out" from the master centre, so
+//     the slot bodies of different keys never overlap each other in the
+//     silicone ring.
+//
+// Style tradeoffs summary (documented here + in the PR body):
+//
+//   hemi     : simplest CSG (1 sphere union per key); curves smooth; keys
+//              lightly — halves will slide sideways a bit before the
+//              hemispheres seat. Lowest demould risk.
+//   cone     : 2 cones per key (double-cone). Sharp tip means high
+//              contact pressure on mating → keys positively (hard to
+//              mis-align even by a fraction of a millimetre). Higher
+//              demould risk on a stiff silicone — the sharp tip can
+//              pull a slug on release. Best for users who want tight
+//              repeat alignment.
+//   keyhole  : most complex CSG (1 extrude of a polygon union per key,
+//              3 orientations). Slot geometry resists lateral shear as
+//              well as axial separation. Curved lobe + flat slot walls
+//              → demould comparable to hemi. Best for large masters
+//              where lateral registration is the failure mode.
 //
 // Manifold ownership
 // ------------------
 //
-// Every intermediate Manifold created by this module (hemisphere tools,
-// unions, per-key stamps) is `.delete()`-d inside a `try/finally` before
+// Every intermediate Manifold created by this module (key tools, unions,
+// per-key stamps) is `.delete()`-d inside a `try/finally` before
 // returning. The caller receives exactly TWO fresh Manifolds:
 //   - `updatedUpper` — the upper silicone half minus the key recesses
 //   - `updatedLower` — the lower silicone half plus the key protrusions
 // The ORIGINAL `upperHalf` + `lowerHalf` Manifolds passed in are NOT
 // consumed — the caller still owns them and must `.delete()` them
-// separately. This lets the orchestrator choose whether to replace its
-// half-references or keep the un-keyed versions for debugging.
+// separately.
 
-import type { Manifold, ManifoldToplevel } from 'manifold-3d';
+import type { Manifold, ManifoldToplevel, Polygons, Vec2 } from 'manifold-3d';
 
 import { isManifold } from './adapters';
 import { CIRCULAR_SEGMENTS } from './primitives';
@@ -65,6 +98,13 @@ export class GeometryError extends Error {
     this.name = 'GeometryError';
   }
 }
+
+/**
+ * Registration key styles. Mirrors `RegistrationKeyStyle` in
+ * `src/renderer/state/parameters.ts` — kept local to the geometry module
+ * so `stampRegistrationKeys` does not need to import UI state types.
+ */
+export type RegistrationKeyStyle = 'asymmetric-hemi' | 'cone' | 'keyhole';
 
 /**
  * The default multiplier for key offsets along each ring axis. The key
@@ -95,14 +135,32 @@ export const MAX_KEY_DIAMETER_MM = 4.0;
 export const KEY_DIAMETER_WALL_RATIO = 0.3;
 
 /**
+ * Keyhole rectangular-slot width as a fraction of the circular lobe's
+ * diameter. `0.5` per issue #57 ("slot width = diameter / 2"). Exposed as
+ * a constant so tests can pin the ratio and callers can read it for
+ * documentation.
+ */
+export const KEYHOLE_SLOT_WIDTH_RATIO = 0.5;
+
+/**
+ * Keyhole rectangular-slot length — how far the slot extends radially
+ * outward from the circle centre, as a fraction of the circular lobe's
+ * diameter. `1.0` per issue #57 ("slot length = diameter"). Measured
+ * FROM the circle centre so the slot's outer tip is `diameter` away
+ * from the circle centre; the slot's inner edge lives at `+radius` (it
+ * "docks" onto the circle's far side).
+ */
+export const KEYHOLE_SLOT_LENGTH_RATIO = 1.0;
+
+/**
  * Result of `stampRegistrationKeys`. Contains the two fresh silicone
  * half-Manifolds with keys applied. Caller owns both — `.delete()` each
  * when done.
  */
 export interface RegistrationKeysResult {
-  /** Upper silicone half with three hemispherical recesses. */
+  /** Upper silicone half with three key recesses. */
   readonly updatedUpper: Manifold;
-  /** Lower silicone half with three hemispherical protrusions. */
+  /** Lower silicone half with three key protrusions. */
   readonly updatedLower: Manifold;
 }
 
@@ -196,6 +254,221 @@ function buildKeySphere(toplevel: ManifoldToplevel, radius: number): Manifold {
 }
 
 /**
+ * Build a "double cone" Manifold — two cones joined base-to-base at the
+ * origin (bases on the XZ plane at Y=0, tips at Y=±radius). Axis is +Y.
+ *
+ * Uses the same full-shape-symmetric-about-parting-plane invariant that
+ * `buildKeySphere` relies on: the tool's upper-half cone carves the
+ * upper-silicone-half recess (subtract), and the same tool's upper-half
+ * cone is the lower-silicone-half protrusion (union). The lower-half
+ * cone of the tool lives inside the lower-silicone-half material
+ * (volume no-op on union) and outside the upper-silicone-half material
+ * (volume no-op on subtract) — exactly as the sphere case.
+ *
+ * Cone height — per issue #57 "rule of thumb", height equals diameter
+ * of the base. For a double-cone, each individual cone has
+ * height = diameter / 2 = radius, giving tip-to-tip = diameter = 2·radius.
+ *
+ * Implementation: manifold-3d's `Manifold.cylinder(h, rLow, rHigh, ...)`
+ * with `rHigh = 0` is a cone along +Z, apex UP at `z = h`. We build one
+ * upward cone (apex at +Z), rotate -90° about X so apex becomes +Y, then
+ * union with a mirrored copy (scale Y by −1) to produce a cone pointing
+ * down. The two share the parting-plane disc at Y=0.
+ *
+ * Caller owns the returned Manifold — `.delete()` when done.
+ */
+function buildConeTool(
+  toplevel: ManifoldToplevel,
+  radius: number,
+  segments: number = CIRCULAR_SEGMENTS,
+): Manifold {
+  // Each half of the double cone has height = radius (so the full
+  // double cone is 2·radius = diameter tall).
+  const halfHeight = radius;
+
+  // Build a Z-axis cone, base radius = radius, top radius = 0,
+  // from z=0 (base) up to z=halfHeight (apex). Then rotate -90° about X
+  // so the apex points in +Y and the base sits at Y=0.
+  const upZ = toplevel.Manifold.cylinder(halfHeight, radius, 0, segments, false);
+  let upperCone: Manifold | undefined;
+  let lowerCone: Manifold | undefined;
+  let doubled: Manifold | undefined;
+  try {
+    upperCone = upZ.rotate([-90, 0, 0]);
+    // Mirror through the XZ plane (y = 0) to get the downward-pointing
+    // cone. `scale([1, -1, 1])` inverts Y and flips winding, which
+    // manifold-3d handles correctly (it re-derives winding at output
+    // construction time).
+    lowerCone = upperCone.scale([1, -1, 1]);
+    doubled = toplevel.Manifold.union([upperCone, lowerCone]);
+    // Hand ownership of `doubled` to the caller; local holders drop
+    // theirs.
+    const out = doubled;
+    doubled = undefined;
+    return out;
+  } finally {
+    upZ.delete();
+    if (upperCone) upperCone.delete();
+    if (lowerCone) lowerCone.delete();
+    if (doubled) doubled.delete();
+  }
+}
+
+/**
+ * Radial direction for a keyhole tool's rectangular slot. The slot always
+ * points OUTWARD — away from the master centre — so three keys placed at
+ * (-0.35·ringWidth_X, 0), (+0.35·ringWidth_X, 0), (0, +0.35·ringWidth_Z)
+ * have their slots extending along −X, +X, +Z respectively.
+ */
+export type KeyholeRadialDirection = 'x-pos' | 'x-neg' | 'z-pos';
+
+/**
+ * Build a keyhole-shape Manifold — a circle + a rectangular slot extending
+ * radially outward — extruded symmetrically about the parting plane (Y=0).
+ *
+ * The 2D cross-section looks like a lollipop with the stick extending
+ * outward from one side of the circle:
+ *
+ *     ○────   (for 'x-pos': stick extends along +X from the circle's
+ *              +X side; the circle's centre is at the key's XZ position)
+ *
+ * Circle radius  = `radius` (half the key diameter).
+ * Slot width     = `KEYHOLE_SLOT_WIDTH_RATIO  · diameter = 0.5 · 2·radius = radius`.
+ * Slot length    = `KEYHOLE_SLOT_LENGTH_RATIO · diameter = 1.0 · 2·radius = 2·radius`,
+ *                  measured from the circle centre → the slot's outer
+ *                  tip is at `diameter` (= 2·radius) from the centre.
+ *                  The slot's inner end overlaps the circle's interior
+ *                  (starting at `−radius` from the centre along the
+ *                  radial axis), so the union is genuinely one connected
+ *                  keyhole polygon.
+ * Extrude height = `diameter = 2·radius`, centred on the parting plane
+ *                  → upper half gets radius depth of recess, lower half
+ *                  gets radius of protrusion.
+ *
+ * Implementation:
+ *
+ *   1. Build a 2D polygon with circle approximated by `segments`-gon,
+ *      plus a rectangle. We union them at the `Polygons` level (manifold
+ *      accepts overlapping input polygons and extrudes their union).
+ *   2. `Manifold.extrude(polygons, height, 0, 0, [1, 1], true)` produces
+ *      a Z-axis extrusion centred on Z=0.
+ *   3. Rotate -90° about X: +Z (extrude axis) → +Y, 2D XY plane → XZ plane.
+ *      After this rotation: the polygon originally in XY is now in XZ
+ *      (X unchanged; original +Y → +Z; original -Y → -Z) and extrudes
+ *      along ±Y by half-height. But wait — the sign depends on which
+ *      way we rotate. See code comments below for the working-out.
+ *   4. Rotate about Y to orient the radial slot along the requested axis:
+ *      'x-pos' → no rotation; 'x-neg' → 180° about Y; 'z-pos' → -90°
+ *      about Y.
+ *
+ * Caller owns the returned Manifold — `.delete()` when done.
+ */
+function buildKeyholeTool(
+  toplevel: ManifoldToplevel,
+  radius: number,
+  direction: KeyholeRadialDirection,
+  segments: number = CIRCULAR_SEGMENTS,
+): Manifold {
+  const diameter = 2 * radius;
+  // Step 1: build the 2D keyhole polygon in the XY plane. We place the
+  // circle at the 2D origin and the slot extending along +X. The slot
+  // rectangle:
+  //   - x from -radius (inside the circle) to +diameter (outer tip,
+  //     which is `2·radius` along +X from the circle centre);
+  //   - y from -slotHalfWidth to +slotHalfWidth.
+  // Having the rectangle's inner edge at x = -radius ensures the
+  // rectangle fully overlaps the circle's right half, so after
+  // union the keyhole silhouette is a clean lollipop without any
+  // zero-width seams.
+  const slotWidth = KEYHOLE_SLOT_WIDTH_RATIO * diameter; // = radius
+  const slotOuter = KEYHOLE_SLOT_LENGTH_RATIO * diameter; // = 2·radius
+  const slotInner = -radius; // push inside the circle
+
+  // Circle polygon (n-gon approximation). Wound CCW for manifold-3d's
+  // Positive fill rule to count this as a filled region.
+  const circlePts: Vec2[] = [];
+  for (let i = 0; i < segments; i++) {
+    const theta = (2 * Math.PI * i) / segments;
+    circlePts.push([radius * Math.cos(theta), radius * Math.sin(theta)]);
+  }
+
+  // Rectangle polygon (CCW winding).
+  const slotPts: Vec2[] = [
+    [slotInner, -slotWidth / 2],
+    [slotOuter, -slotWidth / 2],
+    [slotOuter, slotWidth / 2],
+    [slotInner, slotWidth / 2],
+  ];
+
+  // Polygons input: an array of SimplePolygons is interpreted with the
+  // Positive fill rule, which unions overlapping positive contours into
+  // a single filled region. This is exactly what we want for a
+  // circle + rectangle silhouette.
+  const polygons: Polygons = [circlePts, slotPts];
+
+  // Step 2 + 3 + 4: extrude, orient along Y, rotate to target direction.
+  const extruded = toplevel.Manifold.extrude(polygons, diameter, 0, 0, [1, 1], true);
+  let yAligned: Manifold | undefined;
+  let oriented: Manifold | undefined;
+  try {
+    // Extrude output: axis along +Z, cross-section in XY, centred on Z=0.
+    // Rotate so the extrusion axis becomes +Y AND the slot's outward
+    // direction (originally +X in the 2D polygon) remains +X in 3D.
+    //
+    // A +90° rotation about the X axis maps:
+    //   (x, y, z) → (x, -z, y)
+    // i.e. the cross-section's original +Y (tangent to the slot)
+    // becomes −Z in 3D, and the extrusion's original +Z becomes +Y.
+    // The slot's radial direction (originally +X) stays +X. Perfect —
+    // the keyhole now extrudes along ±Y by diameter/2, and its slot
+    // points along +X.
+    yAligned = extruded.rotate([90, 0, 0]);
+
+    // Step 4: rotate about Y to target the requested radial direction.
+    // yAligned's slot currently points along +X. We need:
+    //   'x-pos' → keep as-is (0°)
+    //   'x-neg' → rotate 180° about Y   → +X becomes −X
+    //   'z-pos' → rotate -90° about Y   → +X becomes +Z
+    //     (using manifold-3d's right-hand convention for rotate([_, ay, _])
+    //      which is an active rotation by `ay` degrees about +Y.
+    //      Active rotation of +90° about +Y takes +Z → +X, so −90° takes
+    //      +X → +Z, which is what we want.)
+    let aboutY: number;
+    switch (direction) {
+      case 'x-pos':
+        aboutY = 0;
+        break;
+      case 'x-neg':
+        aboutY = 180;
+        break;
+      case 'z-pos':
+        aboutY = -90;
+        break;
+      default: {
+        // Defensive — TypeScript's exhaustive-switch check covers the
+        // enum, but a caller passing a runtime string bypasses that.
+        const exhaustive: never = direction;
+        throw new Error(`buildKeyholeTool: unknown direction ${String(exhaustive)}`);
+      }
+    }
+    oriented = aboutY === 0 ? yAligned : yAligned.rotate([0, aboutY, 0]);
+
+    // If oriented === yAligned (the aboutY === 0 case), we didn't
+    // allocate a fresh Manifold — clearing `yAligned` would double-free.
+    const out = oriented;
+    oriented = undefined;
+    if (out === yAligned) {
+      yAligned = undefined;
+    }
+    return out;
+  } finally {
+    extruded.delete();
+    if (yAligned) yAligned.delete();
+    if (oriented) oriented.delete();
+  }
+}
+
+/**
  * Minimal validity check — we expect the silicone halves to be valid
  * manifolds on entry (they come straight from `splitByPlane`).
  */
@@ -267,6 +540,31 @@ export function computeKeyLayout(
 }
 
 /**
+ * Radial direction for a keyhole key at the given position index in the
+ * layout returned by `computeKeyLayout`. The positions array is ordered:
+ *   [0] −X key → slot extends along −X
+ *   [1] +X key → slot extends along +X
+ *   [2] +Z key → slot extends along +Z
+ *
+ * Exported for tests that want to verify the per-key orientation logic
+ * without instantiating any Manifold.
+ */
+export function keyholeDirectionForIndex(index: number): KeyholeRadialDirection {
+  switch (index) {
+    case 0:
+      return 'x-neg';
+    case 1:
+      return 'x-pos';
+    case 2:
+      return 'z-pos';
+    default:
+      throw new Error(
+        `keyholeDirectionForIndex: index ${index} is out of range; layout has exactly 3 positions`,
+      );
+  }
+}
+
+/**
  * Stamp three registration keys onto the silicone halves along the parting
  * plane at `partingY`. Returns fresh upper + lower Manifolds with the
  * recesses + protrusions applied.
@@ -275,8 +573,8 @@ export function computeKeyLayout(
  *  - Input `upperHalf` + `lowerHalf` are NOT consumed — caller still owns
  *    them and must `.delete()` them when done.
  *  - Output `updatedUpper` + `updatedLower` are FRESH — caller owns them.
- *  - Every intermediate Manifold (hemispheres, unions) is `.delete()`-d
- *    before returning via `try/finally` blocks.
+ *  - Every intermediate Manifold (tools, unions) is `.delete()`-d before
+ *    returning via `try/finally` blocks.
  *
  * @param toplevel Initialised Manifold toplevel handle.
  * @param upperHalf Upper silicone half from the Wave-1 split. Kept alive by
@@ -285,9 +583,10 @@ export function computeKeyLayout(
  *   by the caller.
  * @param shellBbox AABB of the silicone body (both halves combined) in
  *   the oriented frame. Used to compute ring widths for key positioning.
- * @param partingY Y coordinate of the parting plane — the hemispheres
- *   are positioned so their flat-side sits exactly on this plane.
+ * @param partingY Y coordinate of the parting plane — the tool is
+ *   positioned so its mid-plane sits exactly on this Y.
  * @param wallThickness_mm Silicone wall thickness, for key sizing.
+ * @param style Key shape. Defaults to `'asymmetric-hemi'`.
  * @returns Fresh Manifolds (upper with recesses, lower with protrusions).
  * @throws `GeometryError` if the ring is too thin for any key.
  * @throws `Error` if any CSG step produces a non-manifold result.
@@ -299,6 +598,7 @@ export function stampRegistrationKeys(
   shellBbox: { min: readonly number[]; max: readonly number[] },
   partingY: number,
   wallThickness_mm: number,
+  style: RegistrationKeyStyle = 'asymmetric-hemi',
 ): RegistrationKeysResult {
   assertValid(upperHalf, 'input upper half');
   assertValid(lowerHalf, 'input lower half');
@@ -308,39 +608,64 @@ export function stampRegistrationKeys(
   // Resource-tracking discipline: every Manifold we allocate goes into
   // one of these holders and gets `.delete()`-d by the outer finally.
   // The two OUTPUT Manifolds (updatedUpper / updatedLower) are nulled
-  // out of `outputs[]` once we're ready to hand them to the caller — a
-  // null is a no-op in the cleanup loop.
+  // out once we're ready to hand them to the caller — a null is a
+  // no-op in the cleanup loop.
   const tools: Manifold[] = [];
   let updatedUpper: Manifold | undefined;
   let updatedLower: Manifold | undefined;
   try {
-    // Build one origin-centred sphere "stamp", translate it to each key's
-    // XZ + partingY. Each translate produces a fresh Manifold; we delete
-    // the origin-centred source after all three translations land. The
-    // same tool geometry is used on both halves — the upper half's
-    // subtract carves the protrusion hemisphere, the lower half's union
-    // fills only the above-parting-plane hemisphere (the below-plane
-    // hemisphere is already inside lower-half material). See
-    // `buildKeySphere` JSDoc for why full spheres are preferable to
-    // two-tool hemispheres.
-    const keyOrigin = buildKeySphere(toplevel, layout.radius);
-    tools.push(keyOrigin);
+    // Dispatch on key style. Each branch produces a single `keyUnion`
+    // Manifold — the combined tool covering all 3 key positions — which
+    // we then subtract from the upper half and add to the lower half.
+    //
+    // For 'asymmetric-hemi' and 'cone': all 3 keys share ONE rotation-
+    // symmetric tool, which we translate to each position and union.
+    // For 'keyhole': each of the 3 keys has its own radial orientation,
+    // so we build 3 oriented tools and union them.
+    let keyUnion: Manifold;
 
-    const translated: Manifold[] = [];
-    for (const pos of layout.positions) {
-      const t = keyOrigin.translate([pos.x, partingY, pos.z]);
-      tools.push(t);
-      translated.push(t);
+    if (style === 'asymmetric-hemi' || style === 'cone') {
+      const origin: Manifold =
+        style === 'asymmetric-hemi'
+          ? buildKeySphere(toplevel, layout.radius)
+          : buildConeTool(toplevel, layout.radius);
+      tools.push(origin);
+
+      const translated: Manifold[] = [];
+      for (const pos of layout.positions) {
+        const t = origin.translate([pos.x, partingY, pos.z]);
+        tools.push(t);
+        translated.push(t);
+      }
+      keyUnion = toplevel.Manifold.union(translated);
+    } else if (style === 'keyhole') {
+      // Each position gets its own oriented tool. Build each at origin,
+      // translate to the layout XZ + partingY, push the translated
+      // handle onto `translated` for the final union.
+      const translated: Manifold[] = [];
+      for (let i = 0; i < layout.positions.length; i++) {
+        const pos = layout.positions[i]!;
+        const direction = keyholeDirectionForIndex(i);
+        const oriented = buildKeyholeTool(toplevel, layout.radius, direction);
+        tools.push(oriented);
+        const t = oriented.translate([pos.x, partingY, pos.z]);
+        tools.push(t);
+        translated.push(t);
+      }
+      keyUnion = toplevel.Manifold.union(translated);
+    } else {
+      // Exhaustiveness check — a runtime string bypasses the compile-
+      // time union check, so fail loudly here rather than silently
+      // producing empty keys.
+      const exhaustive: never = style;
+      throw new Error(
+        `stampRegistrationKeys: unknown style ${String(exhaustive)}`,
+      );
     }
-
-    // Union the per-key stamps into a single tool so each half only sees
-    // one boolean op. Single-op avoids per-key kernel noise accumulation
-    // on the mating surfaces.
-    const keyUnion = toplevel.Manifold.union(translated);
     tools.push(keyUnion);
-    assertValid(keyUnion, 'registration-key sphere union');
+    assertValid(keyUnion, `registration-key ${style} union`);
 
-    // Stamp: upper half -= key union (carves three recesses above the
+    // Stamp: upper half −= key union (carves three recesses above the
     // parting plane); lower half += key union (adds three protrusions
     // above the parting plane; the below-plane halves are absorbed).
     updatedUpper = upperHalf.subtract(keyUnion);
