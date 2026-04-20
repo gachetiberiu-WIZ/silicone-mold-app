@@ -23,10 +23,13 @@ export {
   GeometryError,
   computeKeyDiameter,
   computeKeyLayout,
+  keyholeDirectionForIndex,
   resolveKeyOffsets,
   stampRegistrationKeys,
-  type RegistrationKeysResult,
+  type KeyholeRadialDirection,
   type RegistrationKeyLayout,
+  type RegistrationKeysResult,
+  type RegistrationKeyStyle,
 } from './registrationKeys';
 export {
   MIN_VENT_SEPARATION_MM,
