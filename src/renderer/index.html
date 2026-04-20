@@ -7,6 +7,13 @@
       content="default-src 'self'; script-src 'self' 'unsafe-eval'; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Inline data-URL favicon (issue #64). Silences the browser's default
+      /favicon.ico fetch (which otherwise 404s on first load and pollutes the
+      console). Intentionally empty — visual identity is a separate Phase 4
+      concern; this is purely a dogfood-polish fix to keep DevTools clean.
+    -->
+    <link rel="icon" href="data:," />
     <title>Silicone Mold App</title>
     <style>
       :root {
@@ -365,6 +372,22 @@
       }
       #app-error-toast.is-visible {
         opacity: 1;
+      }
+      /* Issue #64 — notice-level variant (info, not error). Reuses the
+         accent blue so the user can tell an advisory apart from a hard
+         error at a glance. Same DOM + timer plumbing as the error toast. */
+      #app-error-toast.is-notice {
+        background: var(--accent);
+        color: #0b0d10;
+      }
+      /* Issue #64 — stale indicator: mute silicone + resin readouts when
+         parameters changed after a successful generate. CSS-only so
+         toggling the topbar API's state flag just toggles the class.
+         Italic + reduced opacity → discoverable without visual noise. */
+      .topbar__volume.is-stale .topbar__volume-value,
+      .topbar__volume.is-stale .topbar__volume-label {
+        opacity: 0.5;
+        font-style: italic;
       }
     </style>
   </head>
