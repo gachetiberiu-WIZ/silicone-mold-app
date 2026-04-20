@@ -69,6 +69,18 @@ export function createScene(): Scene {
   silicone.userData['tag'] = 'silicone';
   scene.add(silicone);
 
+  // Printable-parts preview group (issue #62). Populated by
+  // `scene/printableParts.ts` after a successful generator run — carries
+  // the base + sides + top cap Manifolds. Starts visible=false; the
+  // toolbar "Show printable parts" toggle flips it on when the user
+  // opts in. Like silicone, the parts render at world origin because
+  // `generateSiliconeShell` bakes the viewport transform into the
+  // Manifolds before returning them.
+  const printableParts = new Group();
+  printableParts.userData['tag'] = 'printableParts';
+  printableParts.visible = false;
+  scene.add(printableParts);
+
   const mold = new Group();
   mold.userData['tag'] = 'mold';
   mold.visible = false;

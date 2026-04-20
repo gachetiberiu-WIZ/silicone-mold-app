@@ -42,6 +42,16 @@ import {
   setSilicone as sceneSetSilicone,
   type SiliconeResult,
 } from './silicone';
+import {
+  arePrintablePartsVisible as sceneArePrintablePartsVisible,
+  clearPrintableParts as sceneClearPrintableParts,
+  hasPrintableParts as sceneHasPrintableParts,
+  isPrintableExplodedIdle as sceneIsPrintableExplodedIdle,
+  setPrintableParts as sceneSetPrintableParts,
+  setPrintablePartsExplodedView as sceneSetPrintablePartsExplodedView,
+  setPrintablePartsVisible as sceneSetPrintablePartsVisible,
+  type PrintablePartsResult,
+} from './printableParts';
 
 function hasTestQueryFlag(): boolean {
   if (typeof window === 'undefined') return false;
@@ -119,6 +129,42 @@ export interface MountedViewport {
    * Read-only and safe to poll from `page.waitForFunction`.
    */
   isExplodedViewIdle: () => boolean;
+  /**
+   * Install a freshly-generated printable-parts set (issue #62). Transfers
+   * ownership of all Manifolds to the scene — caller must NOT `.delete()`
+   * them after this call. After installing, re-frames the camera to the
+   * union of master + silicone + printable bboxes.
+   */
+  setPrintableParts: (parts: {
+    base: Manifold;
+    sides: readonly Manifold[];
+    topCap: Manifold;
+  }) => Promise<PrintablePartsResult>;
+  /**
+   * Tear down any printable parts currently in the scene and release
+   * paired Manifolds. Idempotent.
+   */
+  clearPrintableParts: () => void;
+  /** Flip the printable-parts group visibility. No-op when no parts. */
+  setPrintablePartsVisible: (visible: boolean) => void;
+  /** Toggle printable-parts exploded-view animation. No-op when no parts. */
+  setPrintablePartsExplodedView: (exploded: boolean) => void;
+  /**
+   * Whether the printable-parts group is currently visible. Used by
+   * Playwright E2E specs as `viewport.arePrintablePartsVisible()` per
+   * issue #62.
+   */
+  arePrintablePartsVisible: () => boolean;
+  /**
+   * Whether the printable-parts tween is idle. Mirror of
+   * `isExplodedViewIdle` for the printable-parts module — same
+   * Playwright-page.clock rationale. Used by visual-regression specs
+   * alongside `isExplodedViewIdle` to wait for BOTH modules' tweens
+   * to converge before screenshot (issue #62 visual-golden AC).
+   */
+  isPrintableExplodedIdle: () => boolean;
+  /** Whether a printable-parts set is currently installed. */
+  hasPrintableParts: () => boolean;
   /** Stop RAF, detach listeners, dispose GPU resources, remove the canvas. */
   dispose: () => void;
 }
@@ -269,6 +315,47 @@ export function mount(container: HTMLElement): MountedViewport {
     return installed;
   };
 
+  /**
+   * Install a freshly-generated printable-parts set (issue #62). Transfers
+   * ownership of every Manifold (base + N sides + topCap) to the scene
+   * module. After the adapter finishes, re-frames the camera to the
+   * union of the master + silicone + printable bboxes so the whole
+   * assembly is visible.
+   *
+   * On throw: `scene/printableParts.ts::setPrintableParts` disposes every
+   * input Manifold before re-throwing, so the error branch preserves the
+   * lifetime contract without a second dispose here.
+   */
+  const setPrintableParts = async (
+    parts: { base: Manifold; sides: readonly Manifold[]; topCap: Manifold },
+  ): Promise<PrintablePartsResult> => {
+    const installed = await sceneSetPrintableParts(scene, parts);
+
+    // Union with master + silicone bboxes for camera framing. Same
+    // traversal pattern as `setSilicone` above.
+    const union = installed.bbox.clone();
+    const masterGroup = scene.children.find(
+      (c) => c.userData['tag'] === 'master',
+    );
+    if (masterGroup) {
+      const masterBbox = new Box3().setFromObject(masterGroup);
+      if (!masterBbox.isEmpty()) union.union(masterBbox);
+    }
+    const siliconeGroup = scene.children.find(
+      (c) => c.userData['tag'] === 'silicone',
+    );
+    if (siliconeGroup) {
+      const siliconeBbox = new Box3().setFromObject(siliconeGroup);
+      if (!siliconeBbox.isEmpty()) union.union(siliconeBbox);
+    }
+
+    if (!union.isEmpty()) {
+      frameToBox3(camera, controls, union);
+    }
+
+    return installed;
+  };
+
   const setMaster = async (buffer: ArrayBuffer): Promise<MasterResult> => {
     // Exit any active lay-flat session before swapping the master — the old
     // mesh (and its BVH) is about to be disposed, and stale cursor listeners
@@ -341,6 +428,9 @@ export function mount(container: HTMLElement): MountedViewport {
     // Mirror for silicone: `clearSilicone` releases the cached half-
     // Manifolds + GPU resources. Idempotent on an empty scene.
     sceneClearSilicone(scene);
+    // Mirror for printable parts (issue #62): release cached Manifolds
+    // + GPU resources. Idempotent on an empty scene.
+    sceneClearPrintableParts(scene);
     controls.dispose();
     renderer.dispose();
     if (canvas.parentElement === container) {
@@ -364,6 +454,15 @@ export function mount(container: HTMLElement): MountedViewport {
     clearSilicone: () => sceneClearSilicone(scene),
     setExplodedView: (exploded: boolean) => sceneSetExplodedView(scene, exploded),
     isExplodedViewIdle: () => sceneIsExplodedViewIdle(scene),
+    setPrintableParts,
+    clearPrintableParts: () => sceneClearPrintableParts(scene),
+    setPrintablePartsVisible: (visible: boolean) =>
+      sceneSetPrintablePartsVisible(scene, visible),
+    setPrintablePartsExplodedView: (exploded: boolean) =>
+      sceneSetPrintablePartsExplodedView(scene, exploded),
+    arePrintablePartsVisible: () => sceneArePrintablePartsVisible(scene),
+    isPrintableExplodedIdle: () => sceneIsPrintableExplodedIdle(scene),
+    hasPrintableParts: () => sceneHasPrintableParts(scene),
     dispose,
   };
 
