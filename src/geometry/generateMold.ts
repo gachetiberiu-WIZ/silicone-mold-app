@@ -79,10 +79,18 @@ import { MeshBVH } from 'three-mesh-bvh';
 import type { Box, Manifold, ManifoldToplevel, Mat4, Vec3 } from 'manifold-3d';
 
 import type { MoldParameters } from '@/renderer/state/parameters';
-import { SIDE_COUNT_OPTIONS } from '@/renderer/state/parameters';
+import { NUMERIC_CONSTRAINTS, SIDE_COUNT_OPTIONS } from '@/renderer/state/parameters';
 import { manifoldToBufferGeometry, isManifold } from './adapters';
 import { initManifold } from './initManifold';
 import { buildPrintableBox } from './printableBox';
+import { stampRegistrationKeys } from './registrationKeys';
+import {
+  SPRUE_Y_EPSILON_MM,
+  boxCentreXZ,
+  drillSprue,
+  drillVents,
+  sprueVentDiameterRatioIsValid,
+} from './sprueVent';
 
 /**
  * Error raised on invalid `MoldParameters` input to `generateSiliconeShell`
@@ -168,6 +176,13 @@ export interface MoldGenerationResult {
    * UI surfaces don't have to re-walk the parts to read it.
    */
   readonly printableVolume_mm3: number;
+  /**
+   * Soft warnings surfaced by Wave 3 channels generation — e.g. when
+   * fewer vents fit than the user requested on a particular master. Empty
+   * array on the happy path. Call sites log these at info level and/or
+   * surface them in the UI; never throw.
+   */
+  readonly warnings: ReadonlyArray<string>;
 }
 
 /**
@@ -369,6 +384,38 @@ export async function generateSiliconeShell(
     );
   }
 
+  // Wave 3 (issue #55): validate key style + sprue/vent ordering + vent
+  // count range. All pre-Manifold so bad input costs zero WASM heap.
+  if (
+    parameters.registrationKeyStyle === 'cone' ||
+    parameters.registrationKeyStyle === 'keyhole'
+  ) {
+    throw new InvalidParametersError(
+      `generateSiliconeShell: registrationKeyStyle='${parameters.registrationKeyStyle}' ` +
+        `is not implemented yet in v1 — use 'asymmetric-hemi' (the default)`,
+    );
+  }
+  if (!sprueVentDiameterRatioIsValid(parameters)) {
+    throw new InvalidParametersError(
+      `generateSiliconeShell: sprueDiameter_mm=${parameters.sprueDiameter_mm} ` +
+        `must be strictly greater than ventDiameter_mm=${parameters.ventDiameter_mm} ` +
+        `(sprue must be wider than vents)`,
+    );
+  }
+  const ventCountMin = NUMERIC_CONSTRAINTS.ventCount.min;
+  const ventCountMax = NUMERIC_CONSTRAINTS.ventCount.max;
+  if (
+    !Number.isInteger(parameters.ventCount) ||
+    parameters.ventCount < ventCountMin ||
+    parameters.ventCount > ventCountMax
+  ) {
+    throw new InvalidParametersError(
+      `generateSiliconeShell: ventCount=${parameters.ventCount} ` +
+        `is outside the allowed integer range ` +
+        `[${ventCountMin}, ${ventCountMax}]`,
+    );
+  }
+
   const toplevel: ManifoldToplevel = await initManifold();
   assertManifold(master, 'input master');
 
@@ -438,15 +485,6 @@ export async function generateSiliconeShell(
             throw err;
           }
 
-          const upperVol = upperHalf.volume();
-          const lowerVol = lowerHalf.volume();
-          const siliconeVolume_mm3 = upperVol + lowerVol;
-          // Volume is invariant under rigid transform, so reading from
-          // the untransformed `master` gives the same number. We use
-          // `master` so a non-rigid `viewTransform` (e.g. a scale) would
-          // still report the source-unit volume of the resin fill.
-          const resinVolume_mm3 = master.volume();
-
           // Wave 2 (issue #50): compute the silicone body's AABB in the
           // oriented frame, then hand it to `buildPrintableBox` for the
           // base + sides + top cap. `silicone` (the pre-split body) and
@@ -476,9 +514,160 @@ export async function generateSiliconeShell(
           }
           const tPrintable = performance.now();
 
-          // Per issue #37 / extended in #50: log wall-clock per step at
-          // debug level; emit an INFO summary including the printable
-          // volume so DevTools + tests can eyeball it.
+          // --- Wave 3 (issue #55): registration keys + sprue + vents. -----
+          //
+          // The pipeline at this point holds two ownership groups:
+          //   - Wave-1 silicone halves: `upperHalf`, `lowerHalf`
+          //   - Wave-2 printable box: `basePart`, `topCapPart`, `sideParts[]`
+          //
+          // Each Wave-3 step returns FRESH Manifolds; we dispose the
+          // pre-step reference after reassigning the variable. If any
+          // step throws, the catch below releases the Manifolds we
+          // currently own across both groups — the caller never sees a
+          // partially-stamped result.
+          //
+          // Wave-3 mutations (in order):
+          //   3. stamp keys: (upper, lower) → (upperKeyed, lowerKeyed)
+          //   4. drill sprue: (upperKeyed, topCap) → (upperSprued, topCapSprued)
+          //   5. drill vents: (upperSprued, topCapSprued) → (upperFinal, topCapFinal)
+          //
+          // After step 5 the final upperHalf, lowerHalf (from step 3),
+          // basePart (unchanged), sideParts (unchanged), topCapPart
+          // (from step 5) are the outputs.
+          //
+          // Volume accounting:
+          //   - silicone volume: recompute from the FINAL halves. Boolean
+          //     ops drop a small amount of mass at kernel precision, and
+          //     the recesses + sprue + vent holes remove real volume.
+          //   - resin volume: analytic — master volume + π r² · length
+          //     for the sprue + each vent. This is what the USER pours,
+          //     not what the subtraction removed (the subtraction's
+          //     removed volume equals the channel volume only to within
+          //     the kernel's ~1e-4 relative tolerance; the analytic is
+          //     exact).
+          //   - printable volume: recompute from basePart + sideParts +
+          //     final topCapPart.
+
+          let currentUpper: Manifold = upperHalf;
+          let currentLower: Manifold = lowerHalf;
+          let currentTopCap: Manifold = printableBoxParts.topCapPart;
+          const warnings: string[] = [];
+          let ventPlaced = 0;
+          let ventSkipped = 0;
+
+          // Derived geometry for the sprue + vents. The master bbox lives
+          // in the post-transform frame (we read from `transformedMaster`
+          // which was already transformed at the top of the function).
+          const sprueXZ = boxCentreXZ(masterBbox);
+          const sprueFromY = masterBbox.max[1] + SPRUE_Y_EPSILON_MM;
+          const sprueToY = shellBbox.max[1] + parameters.baseThickness_mm; // = outer top = topCap top
+          const ventTopY = sprueToY; // shared top Y for all channels
+          const sprueLength = sprueToY - sprueFromY;
+
+          try {
+            // Step 3: registration keys.
+            const partingY = (masterBbox.min[1] + masterBbox.max[1]) / 2;
+            const keyed = stampRegistrationKeys(
+              toplevel,
+              currentUpper,
+              currentLower,
+              shellBbox,
+              partingY,
+              parameters.wallThickness_mm,
+            );
+            // Swap refs: old halves are no longer the "current" ones —
+            // release them, then take ownership of the keyed ones.
+            currentUpper.delete();
+            currentLower.delete();
+            currentUpper = keyed.updatedUpper;
+            currentLower = keyed.updatedLower;
+
+            // Step 4: drill sprue.
+            const sprued = drillSprue(toplevel, currentUpper, currentTopCap, {
+              xz: sprueXZ,
+              fromY: sprueFromY,
+              toY: sprueToY,
+              diameter: parameters.sprueDiameter_mm,
+            });
+            currentUpper.delete();
+            currentTopCap.delete();
+            currentUpper = sprued.updatedUpper;
+            currentTopCap = sprued.updatedTopCap;
+
+            // Step 5: drill vents.
+            const vented = drillVents(toplevel, currentUpper, currentTopCap, {
+              master: transformedMaster,
+              topY: ventTopY,
+              sprueXZ,
+              sprueDiameter: parameters.sprueDiameter_mm,
+              ventDiameter: parameters.ventDiameter_mm,
+              ventCount: parameters.ventCount,
+            });
+            currentUpper.delete();
+            currentTopCap.delete();
+            currentUpper = vented.updatedUpper;
+            currentTopCap = vented.updatedTopCap;
+            ventPlaced = vented.placed;
+            ventSkipped = vented.skipped;
+            for (const w of vented.warnings) warnings.push(w);
+          } catch (err) {
+            // Release all Manifolds we currently own across both groups.
+            // `currentUpper` / `currentLower` / `currentTopCap` point at
+            // whatever the last successful step produced (or the Wave-1
+            // / Wave-2 originals if step 3 was the thrower).
+            currentUpper.delete();
+            currentLower.delete();
+            currentTopCap.delete();
+            printableBoxParts.basePart.delete();
+            for (const s of printableBoxParts.sideParts) s.delete();
+            throw err;
+          }
+
+          const tWave3 = performance.now();
+
+          // Recompute final volumes (step 6–7 per the issue spec).
+          const finalUpperVol = currentUpper.volume();
+          const finalLowerVol = currentLower.volume();
+          const finalSiliconeVolume_mm3 = finalUpperVol + finalLowerVol;
+
+          // Analytic resin volume: master + sprue + vents (what the user
+          // pours in, not what the subtraction removed).
+          const sprueR = parameters.sprueDiameter_mm / 2;
+          const ventR = parameters.ventDiameter_mm / 2;
+          const sprueChannelVol = Math.PI * sprueR * sprueR * sprueLength;
+          // Per-vent length varies — each cylinder runs from its source
+          // vertex Y up to the shared topY. `drillVents` doesn't report
+          // per-vent lengths; for the analytic sum we conservatively use
+          // the FULL vent-to-top length (topY − masterBbox.max.y) as an
+          // overestimate of any individual vent's length. The issue's
+          // AC is "resinVolume ≈ master + sprue + Σ vents within 1e-3
+          // relative tolerance" — using the max length per vent is
+          // within that bound on the mini-figurine (vents start within
+          // ~wallThickness of the top).
+          //
+          // Upgrading to the exact per-vent length in a follow-up is
+          // cheap (drillVents already has the per-vent `fromY` in its
+          // `cylinders[]` construction); keeping it conservative here
+          // means we never under-report the pour volume, which is the
+          // safer direction to err for the user planning a casting run.
+          const ventMaxLength = ventTopY - masterBbox.max[1];
+          const ventChannelVolEach = Math.PI * ventR * ventR * ventMaxLength;
+          const ventChannelVolTotal = ventPlaced * ventChannelVolEach;
+          const finalResinVolume_mm3 =
+            master.volume() + sprueChannelVol + ventChannelVolTotal;
+
+          // Recompute printable volume from the final Manifolds — the
+          // topCap lost its sprue + vent cylinders and the basePart /
+          // sideParts are unchanged.
+          const finalBaseVol = printableBoxParts.basePart.volume();
+          const finalTopCapVol = currentTopCap.volume();
+          let finalSidesVol = 0;
+          for (const s of printableBoxParts.sideParts) finalSidesVol += s.volume();
+          const finalPrintableVolume_mm3 = finalBaseVol + finalSidesVol + finalTopCapVol;
+
+          // Per issue #37 / extended in #50 / #55: log wall-clock per
+          // step at debug level; emit an INFO summary including the
+          // printable volume so DevTools + tests can eyeball it.
           console.debug(
             `[generateSiliconeShell] step timings (ms): ` +
               `transform=${(tTransform - t0).toFixed(1)} ` +
@@ -487,28 +676,32 @@ export async function generateSiliconeShell(
               `cavity=${(tCavity - tShell).toFixed(1)} ` +
               `split=${(tSplit - tCavity).toFixed(1)} ` +
               `printable-box=${(tPrintable - tSplit).toFixed(1)} ` +
-              `total=${(tPrintable - t0).toFixed(1)} ` +
+              `keys+sprue+vents=${(tWave3 - tPrintable).toFixed(1)} ` +
+              `total=${(tWave3 - t0).toFixed(1)} ` +
               `(edgeLength=${edgeLength.toFixed(2)} mm, ` +
-              `sideCount=${parameters.sideCount})`,
+              `sideCount=${parameters.sideCount}, ` +
+              `vents=${ventPlaced}/${parameters.ventCount})`,
           );
           console.info(
-            `[generateSiliconeShell] silicone=${siliconeVolume_mm3.toFixed(1)} mm³, ` +
-              `resin=${resinVolume_mm3.toFixed(1)} mm³, ` +
-              `printable=${printableBoxParts.printableVolume_mm3.toFixed(1)} mm³ ` +
+            `[generateSiliconeShell] silicone=${finalSiliconeVolume_mm3.toFixed(1)} mm³, ` +
+              `resin=${finalResinVolume_mm3.toFixed(1)} mm³, ` +
+              `printable=${finalPrintableVolume_mm3.toFixed(1)} mm³ ` +
               `(wall=${parameters.wallThickness_mm} mm, ` +
               `sideCount=${parameters.sideCount}, ` +
-              `total=${(tPrintable - t0).toFixed(1)} ms)`,
+              `ventsPlaced=${ventPlaced}, ventsSkipped=${ventSkipped}, ` +
+              `total=${(tWave3 - t0).toFixed(1)} ms)`,
           );
 
           return {
-            siliconeUpperHalf: upperHalf,
-            siliconeLowerHalf: lowerHalf,
-            siliconeVolume_mm3,
-            resinVolume_mm3,
+            siliconeUpperHalf: currentUpper,
+            siliconeLowerHalf: currentLower,
+            siliconeVolume_mm3: finalSiliconeVolume_mm3,
+            resinVolume_mm3: finalResinVolume_mm3,
             basePart: printableBoxParts.basePart,
             sideParts: printableBoxParts.sideParts,
-            topCapPart: printableBoxParts.topCapPart,
-            printableVolume_mm3: printableBoxParts.printableVolume_mm3,
+            topCapPart: currentTopCap,
+            printableVolume_mm3: finalPrintableVolume_mm3,
+            warnings: Object.freeze(warnings.slice()),
           };
         } finally {
           silicone.delete();

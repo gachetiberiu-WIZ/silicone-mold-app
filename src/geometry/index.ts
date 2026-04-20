@@ -19,3 +19,21 @@ export {
   type MoldGenerationResult,
 } from './generateMold';
 export { buildPrintableBox, SIDE_CUT_ANGLES, type PrintableBoxParts } from './printableBox';
+export {
+  GeometryError,
+  computeKeyDiameter,
+  computeKeyLayout,
+  resolveKeyOffsets,
+  stampRegistrationKeys,
+  type RegistrationKeysResult,
+  type RegistrationKeyLayout,
+} from './registrationKeys';
+export {
+  MIN_VENT_SEPARATION_MM,
+  SPRUE_Y_EPSILON_MM,
+  drillSprue,
+  drillVents,
+  selectVentCandidates,
+  type DrillSprueResult,
+  type DrillVentsResult,
+} from './sprueVent';

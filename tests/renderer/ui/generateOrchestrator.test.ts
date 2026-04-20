@@ -106,6 +106,7 @@ function makeResult(): MoldGenerationResult {
     sideParts: [fakeManifold(), fakeManifold(), fakeManifold(), fakeManifold()],
     topCapPart: fakeManifold(),
     printableVolume_mm3: STALE_PRINTABLE_MM3,
+    warnings: [],
   };
 }
 
@@ -588,6 +589,7 @@ describe('generateOrchestrator — printable-box disposal (Wave 2, issue #50)', 
       sideParts: [side1, side2],
       topCapPart: topCap,
       printableVolume_mm3: STALE_PRINTABLE_MM3,
+      warnings: [],
     };
 
     const runPromise = orchestrator.run();
