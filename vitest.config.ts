@@ -17,6 +17,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': r('./src'),
+      '@shared': r('./shared'),
       '@fixtures': r('./tests/fixtures'),
     },
   },

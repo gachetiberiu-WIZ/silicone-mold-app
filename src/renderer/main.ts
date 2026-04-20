@@ -27,11 +27,13 @@ import { generateSiliconeShell } from '@/geometry/generateMold';
 import { LAY_FLAT_ACTIVE_EVENT } from './scene/layFlatController';
 import { getMasterManifold } from './scene/master';
 import { mount, type MountedViewport } from './scene/viewport';
-import { initI18n } from './i18n';
+import { initI18n, t } from './i18n';
 import {
   createParametersStore,
   type ParametersStore,
 } from './state/parameters';
+import { attachDropZone } from './ui/dropZone';
+import { clear as clearErrorToast, showError } from './ui/errorToast';
 import { bumpGenerateEpoch } from './ui/generateEpoch';
 import {
   mountGenerateButton,
@@ -239,10 +241,71 @@ function mountParameters(): void {
 }
 
 /**
+ * Shared post-load plumbing used by both the Open-STL dialog flow and the
+ * drag-drop-STL flow (issue #27). Given a raw STL `ArrayBuffer`, hands it
+ * to the viewport and then runs the identical stale-invalidation sweep:
+ *
+ *   - bumps the generate-epoch (drops any in-flight generate result),
+ *   - pushes the new master volume + nulls silicone / resin readouts,
+ *   - clears any residual generate-error + busy state,
+ *   - re-enables + resets the Place-on-face toggle,
+ *   - flips the Generate-block hint to "orient first".
+ *
+ * Errors bubble up — callers decide whether to surface them via the
+ * shared error-toast channel (`showError`) or swallow them.
+ */
+async function loadMasterFromBuffer(buffer: ArrayBuffer): Promise<void> {
+  if (!viewport) {
+    throw new Error('viewport not mounted yet');
+  }
+  const result = await viewport.setMaster(buffer);
+  // Bump the shared generate-epoch so any in-flight run against the
+  // previous master drops its result on resolve. `notifyMasterReset`
+  // only fires a committed-event when a commit was previously live, so
+  // the invalidation listener covers only the "had-commit → new-STL"
+  // path. Bumping here covers the first-load / no-prior-commit path too.
+  bumpGenerateEpoch();
+  if (topbar) {
+    topbar.setMasterVolume(result.volume_mm3);
+    // Any previously-populated silicone + resin values are for the OLD
+    // master and must be cleared. The lay-flat controller's
+    // `notifyMasterReset` will also fire a committed-event that clears
+    // them, but only when a commit was previously live — belt-and-
+    // braces here covers the first-load case and any defensive UI state.
+    topbar.setSiliconeVolume(null);
+    topbar.setResinVolume(null);
+  }
+  // Clear any residual error from a previous generate attempt.
+  if (generateButton) {
+    generateButton.setError(null);
+    generateButton.setBusy(false);
+  }
+  // Enable the lay-flat controls now that a master is in the scene.
+  // `setMaster` resets the master group to identity rotation, so the
+  // toggle must read "not active" regardless of its previous state.
+  if (placeOnFace) {
+    placeOnFace.setEnabled(true);
+    placeOnFace.setActive(false);
+  }
+  // Flip the Generate-block's hint from "Load an STL to begin." to
+  // "Orient the part on its base...". The button stays disabled — the
+  // LAY_FLAT_COMMITTED_EVENT subscription in `mountParameters()` will
+  // re-enable it after a commit. `viewport.setMaster` already called
+  // `layFlat.notifyMasterReset()`, which fires committed=false, so any
+  // stale enabled state from a previous master is cleared.
+  if (generateButton) {
+    generateButton.setHasMaster(true);
+  }
+  // A successful load supersedes any lingering error banner (e.g. the
+  // user hit "file too large" and then picked a valid file).
+  clearErrorToast();
+}
+
+/**
  * Open the native STL file dialog, stream the bytes back over IPC, and
- * hand the buffer to the viewport. Updates the topbar volume readout on
- * success. Logs errors to console — a user-visible toast is later work
- * (see issue #16 scope).
+ * hand the buffer to the shared post-load path. User-visible errors are
+ * surfaced via the consolidated error-toast channel (shared with the
+ * drag-drop flow, issue #27).
  *
  * Re-entrancy: while an open is in flight, the Open STL button is
  * disabled so a double-click doesn't stack two loads. Once the flow
@@ -261,16 +324,19 @@ async function handleOpenStl(button: HTMLButtonElement): Promise<void> {
       return;
     }
     if ('error' in response) {
-      // Typed error variant from the main process. Only `file-too-large`
-      // exists at the moment; switch handles future additions exhaustively.
+      // Typed error variant from the main process. Route each through the
+      // shared error-toast channel; the switch stays exhaustive so future
+      // variants will surface a compile error here until localised.
       switch (response.error) {
         case 'file-too-large':
           console.error(
             '[open-stl] selected STL exceeds the 500 MB size limit',
           );
+          showError(t('errors.fileTooLarge'));
           break;
         case 'read-failed':
           console.error('[open-stl] failed to read selected STL file');
+          showError(t('errors.readFailed'));
           break;
         default: {
           const exhaustive: never = response.error;
@@ -281,53 +347,50 @@ async function handleOpenStl(button: HTMLButtonElement): Promise<void> {
     }
 
     // Success path — `response.buffer` is an ArrayBuffer of the STL bytes
-    // (see shared/ipc-contracts.ts, structured-cloned across IPC). Hand it
-    // to the viewport; that module owns STL parsing, scene-swap, and
-    // camera framing. The returned volume_mm3 is the watertight manifold
-    // volume; feed it straight to the topbar.
-    const result = await viewport.setMaster(response.buffer);
-    // Bump the shared generate-epoch so any in-flight run against the
-    // previous master drops its result on resolve. `notifyMasterReset`
-    // only fires a committed-event when a commit was previously live, so
-    // the invalidation listener covers only the "had-commit → new-STL"
-    // path. Bumping here covers the first-load / no-prior-commit path too.
-    bumpGenerateEpoch();
-    if (topbar) {
-      topbar.setMasterVolume(result.volume_mm3);
-      // Any previously-populated silicone + resin values are for the OLD
-      // master and must be cleared. The lay-flat controller's
-      // `notifyMasterReset` will also fire a committed-event that clears
-      // them, but only when a commit was previously live — belt-and-
-      // braces here covers the first-load case and any defensive UI state.
-      topbar.setSiliconeVolume(null);
-      topbar.setResinVolume(null);
-    }
-    // Clear any residual error from a previous generate attempt.
-    if (generateButton) {
-      generateButton.setError(null);
-      generateButton.setBusy(false);
-    }
-    // Enable the lay-flat controls now that a master is in the scene.
-    // `setMaster` resets the master group to identity rotation, so the
-    // toggle must read "not active" regardless of its previous state.
-    if (placeOnFace) {
-      placeOnFace.setEnabled(true);
-      placeOnFace.setActive(false);
-    }
-    // Flip the Generate-block's hint from "Load an STL to begin." to
-    // "Orient the part on its base...". The button stays disabled — the
-    // LAY_FLAT_COMMITTED_EVENT subscription in `mountParameters()` will
-    // re-enable it after a commit. `viewport.setMaster` already called
-    // `layFlat.notifyMasterReset()`, which fires committed=false, so any
-    // stale enabled state from a previous master is cleared.
-    if (generateButton) {
-      generateButton.setHasMaster(true);
-    }
+    // (see shared/ipc-contracts.ts, structured-cloned across IPC). Hand
+    // it to the shared post-load path so Open-STL and drag-drop stay in
+    // lock-step on state resets.
+    await loadMasterFromBuffer(response.buffer);
   } catch (err) {
     console.error('[open-stl] unexpected error during load:', err);
+    showError(t('errors.readFailed'));
   } finally {
     button.disabled = false;
   }
+}
+
+/**
+ * Wire the window-scoped drag-and-drop handler (issue #27). The target is
+ * the top-level `<div id="app">` wrapper so a drop anywhere inside the
+ * window is caught (viewport, sidebar, topbar). The handler goes through
+ * the HTML5 `File.arrayBuffer()` API — NOT `file.path` or any Node fs
+ * API — so the renderer's `contextIsolation` + `sandbox` boundary is
+ * preserved.
+ *
+ * Successful drops hit the same `loadMasterFromBuffer` path as the Open
+ * STL dialog, guaranteeing identical post-load state (epoch bump, stale
+ * invalidation, orientation reset, hint flip). Validation failures
+ * surface via the shared error toast.
+ */
+function wireDropZone(): void {
+  const app = document.getElementById('app');
+  if (!app) {
+    console.error('wireDropZone: #app container not found in DOM');
+    return;
+  }
+  attachDropZone(app, {
+    async onDrop(buffer) {
+      try {
+        await loadMasterFromBuffer(buffer);
+      } catch (err) {
+        console.error('[drop-stl] failed to load dropped STL:', err);
+        showError(t('errors.readFailed'));
+      }
+    },
+    onError(_code, message) {
+      showError(message);
+    },
+  });
 }
 
 /**
@@ -355,5 +418,6 @@ document.addEventListener('DOMContentLoaded', () => {
   mountViewport();
   mountParameters();
   wireOpenStlButton();
+  wireDropZone();
   void hydrateVersion();
 });
