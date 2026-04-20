@@ -182,9 +182,21 @@ export function mountTopbar(
   const toggle: UnitsToggleApi = mountUnitsToggle(togglePanel);
 
   function renderAll(): void {
+    // Master uses the default "No master loaded" placeholder — a null value
+    // genuinely means no STL is open. Silicone + resin use "Click Generate"
+    // because they are null whenever the user hasn't run Generate yet,
+    // regardless of master state (loaded or not).
     master.valueEl.textContent = formatVolume(currentMaster, currentUnits);
-    silicone.valueEl.textContent = formatVolume(currentSilicone, currentUnits);
-    resin.valueEl.textContent = formatVolume(currentResin, currentUnits);
+    silicone.valueEl.textContent = formatVolume(
+      currentSilicone,
+      currentUnits,
+      'volume.notGenerated',
+    );
+    resin.valueEl.textContent = formatVolume(
+      currentResin,
+      currentUnits,
+      'volume.notGenerated',
+    );
   }
 
   // Listen for unit changes fired by the toggle (or by another component)
@@ -212,11 +224,16 @@ export function mountTopbar(
       silicone.valueEl.textContent = formatVolume(
         currentSilicone,
         currentUnits,
+        'volume.notGenerated',
       );
     },
     setResinVolume(mm3: number | null): void {
       currentResin = mm3;
-      resin.valueEl.textContent = formatVolume(currentResin, currentUnits);
+      resin.valueEl.textContent = formatVolume(
+        currentResin,
+        currentUnits,
+        'volume.notGenerated',
+      );
     },
     setUnits(unit: UnitSystem): void {
       toggle.setUnits(unit);

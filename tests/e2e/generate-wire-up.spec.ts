@@ -179,9 +179,9 @@ test('generate wire-up: click → volumes populate → re-commit → volumes sta
 
     // Precondition: silicone + resin readouts exist and show the placeholder.
     await expect(page.locator('[data-testid="silicone-volume-value"]'))
-      .toHaveText('No master loaded');
+      .toHaveText('Click Generate');
     await expect(page.locator('[data-testid="resin-volume-value"]'))
-      .toHaveText('No master loaded');
+      .toHaveText('Click Generate');
 
     const openBtn = page.locator('[data-testid="open-stl-btn"]');
     await expect(openBtn).toBeVisible();
@@ -209,9 +209,9 @@ test('generate wire-up: click → volumes populate → re-commit → volumes sta
     await expect(page.locator('[data-testid="volume-value"]'))
       .not.toHaveText('No master loaded');
     await expect(page.locator('[data-testid="silicone-volume-value"]'))
-      .toHaveText('No master loaded');
+      .toHaveText('Click Generate');
     await expect(page.locator('[data-testid="resin-volume-value"]'))
-      .toHaveText('No master loaded');
+      .toHaveText('Click Generate');
 
     // Commit a face → Generate button enables.
     await commitTopFace(page);
@@ -317,9 +317,9 @@ test('generate wire-up: click → volumes populate → re-commit → volumes sta
     // transform so it stays populated.
     await commitSideFace(page);
     await expect(page.locator('[data-testid="silicone-volume-value"]'))
-      .toHaveText('No master loaded');
+      .toHaveText('Click Generate');
     await expect(page.locator('[data-testid="resin-volume-value"]'))
-      .toHaveText('No master loaded');
+      .toHaveText('Click Generate');
     await expect(page.locator('[data-testid="volume-value"]'))
       .not.toHaveText('No master loaded');
 

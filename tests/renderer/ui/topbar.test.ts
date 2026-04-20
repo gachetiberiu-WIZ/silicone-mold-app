@@ -67,11 +67,15 @@ describe('topbar — three volume readouts', () => {
     );
   });
 
-  test('initial state: all three readouts show the "no master loaded" placeholder', () => {
+  test('initial state: master shows "no master loaded"; silicone + resin show "click generate"', () => {
+    // Silicone + resin use a different empty-state ("Click Generate") from
+    // master because a null value means "master loaded but not generated
+    // yet" — which is distinct from "no STL open".
     const header = mount();
     mountTopbar(header);
 
-    const placeholder = i18next.t('volume.none');
+    const noMaster = i18next.t('volume.none');
+    const notGenerated = i18next.t('volume.notGenerated');
     const master = header.querySelector<HTMLElement>(
       '[data-testid="volume-value"]',
     );
@@ -81,9 +85,9 @@ describe('topbar — three volume readouts', () => {
     const resin = header.querySelector<HTMLElement>(
       '[data-testid="resin-volume-value"]',
     );
-    expect(master?.textContent).toBe(placeholder);
-    expect(silicone?.textContent).toBe(placeholder);
-    expect(resin?.textContent).toBe(placeholder);
+    expect(master?.textContent).toBe(noMaster);
+    expect(silicone?.textContent).toBe(notGenerated);
+    expect(resin?.textContent).toBe(notGenerated);
   });
 });
 
@@ -100,7 +104,7 @@ describe('topbar — setSiliconeVolume / setResinVolume', () => {
     expect(silicone?.textContent).toBe('100,000 mm\u00B3');
   });
 
-  test('setSiliconeVolume(null) reverts to placeholder', () => {
+  test('setSiliconeVolume(null) reverts to "click generate" placeholder', () => {
     const header = mount();
     const api = mountTopbar(header);
     api.setUnits('mm');
@@ -110,7 +114,7 @@ describe('topbar — setSiliconeVolume / setResinVolume', () => {
     const silicone = header.querySelector<HTMLElement>(
       '[data-testid="silicone-volume-value"]',
     );
-    expect(silicone?.textContent).toBe(i18next.t('volume.none'));
+    expect(silicone?.textContent).toBe(i18next.t('volume.notGenerated'));
   });
 
   test('setResinVolume(127_451.6) renders "127,452 mm³" (rounded)', () => {
@@ -125,7 +129,7 @@ describe('topbar — setSiliconeVolume / setResinVolume', () => {
     expect(resin?.textContent).toBe('127,452 mm\u00B3');
   });
 
-  test('setResinVolume(null) reverts to placeholder', () => {
+  test('setResinVolume(null) reverts to "click generate" placeholder', () => {
     const header = mount();
     const api = mountTopbar(header);
     api.setResinVolume(5000);
@@ -134,7 +138,7 @@ describe('topbar — setSiliconeVolume / setResinVolume', () => {
     const resin = header.querySelector<HTMLElement>(
       '[data-testid="resin-volume-value"]',
     );
-    expect(resin?.textContent).toBe(i18next.t('volume.none'));
+    expect(resin?.textContent).toBe(i18next.t('volume.notGenerated'));
   });
 
   test('the three setters are independent (setting one does not clobber the others)', () => {
