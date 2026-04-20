@@ -459,3 +459,24 @@ export function hasSilicone(scene: Scene): boolean {
   if (!group) return false;
   return getState(group) !== null;
 }
+
+/**
+ * Whether the exploded-view tween is currently idle (no RAF in flight).
+ * Returns `true` when no silicone is installed at all, or when the installed
+ * pair's tween has completed (or never started).
+ *
+ * Used by visual-regression tests to gate `toHaveScreenshot` on a stable
+ * scene — the tween runs off real-wall-clock `performance.now()` and
+ * `requestAnimationFrame`, neither of which Playwright's `page.clock` fake
+ * intercepts, so tests can't fast-forward it. Reading this hook lets a spec
+ * `waitForFunction` until the scene has fully converged before snapshotting.
+ *
+ * Read-only: this function never mutates scene state. It's safe to poll.
+ */
+export function isExplodedViewIdle(scene: Scene): boolean {
+  const group = findSiliconeGroup(scene);
+  if (!group) return true;
+  const state = getState(group);
+  if (!state) return true;
+  return state.rafId === 0 && state.tweenStart_ms === null;
+}
