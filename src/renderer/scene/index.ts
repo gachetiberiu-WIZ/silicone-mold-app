@@ -8,7 +8,10 @@
 //   │   └── origin-gizmos (Group)
 //   │       ├── GridHelper (tag: 'grid-major' + 'grid-minor' child)
 //   │       └── AxesHelper (tag: 'world-axes')
-//   ├── Master (Group, tag: 'master')   ← populated by later PRs
+//   ├── Master (Group, tag: 'master')   ← populated by `scene/master.ts`
+//   ├── Silicone (Group, tag: 'silicone')   ← populated by `scene/silicone.ts`
+//   │   ├── Mesh (tag: 'silicone-upper', translucent blue)
+//   │   └── Mesh (tag: 'silicone-lower', translucent blue)
 //   ├── Mold   (Group, tag: 'mold', visible=false)   ← populated later
 //   └── Widgets (Group, tag: 'widgets')   ← populated later
 //
@@ -56,6 +59,15 @@ export function createScene(): Scene {
   const master = new Group();
   master.userData['tag'] = 'master';
   scene.add(master);
+
+  // Silicone halves preview group (issue #47). Populated by
+  // `scene/silicone.ts` after a successful `generateSiliconeShell` run.
+  // The halves render at world origin because the generator applies the
+  // view transform internally — no group-level rotation/translation
+  // compounded here.
+  const silicone = new Group();
+  silicone.userData['tag'] = 'silicone';
+  scene.add(silicone);
 
   const mold = new Group();
   mold.userData['tag'] = 'mold';

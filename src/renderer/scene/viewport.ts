@@ -16,7 +16,8 @@
 //      spec. Does NOT enable test-hook exposure.
 
 import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import type { Mesh, PerspectiveCamera, Scene, WebGLRenderer } from 'three';
+import { Box3, type Mesh, type PerspectiveCamera, type Scene, type WebGLRenderer } from 'three';
+import type { Manifold } from 'manifold-3d';
 
 import { createCamera, computeAspect, frameToBox3 } from './camera';
 import { createControls } from './controls';
@@ -34,6 +35,12 @@ import {
   setMaster as sceneSetMaster,
   type MasterResult,
 } from './master';
+import {
+  clearSilicone as sceneClearSilicone,
+  setExplodedView as sceneSetExplodedView,
+  setSilicone as sceneSetSilicone,
+  type SiliconeResult,
+} from './silicone';
 
 function hasTestQueryFlag(): boolean {
   if (typeof window === 'undefined') return false;
@@ -85,6 +92,22 @@ export interface MountedViewport {
    * `document` over polling this on every frame.
    */
   isOrientationCommitted: () => boolean;
+  /**
+   * Install a freshly-generated pair of silicone halves (issue #47).
+   * Transfers ownership of the Manifolds to the scene — caller must NOT
+   * `.delete()` them after this call. After installing, re-frames the
+   * camera to the union of the master + silicone bbox so the full
+   * result is visible.
+   */
+  setSilicone: (halves: { upper: Manifold; lower: Manifold }) => Promise<SiliconeResult>;
+  /**
+   * Tear down any silicone currently in the scene and release the paired
+   * Manifolds. Idempotent. Wired to every staleness signal (commit,
+   * reset, new-STL) via the generate-invalidation listener.
+   */
+  clearSilicone: () => void;
+  /** Toggle the exploded-view animation on/off. No-op when no silicone. */
+  setExplodedView: (exploded: boolean) => void;
   /** Stop RAF, detach listeners, dispose GPU resources, remove the canvas. */
   dispose: () => void;
 }
@@ -195,6 +218,46 @@ export function mount(container: HTMLElement): MountedViewport {
     masterLoadedResolve = resolve;
   });
 
+  /**
+   * Install a fresh pair of silicone half-Manifolds into the scene. After
+   * the scene-side adapter finishes, re-frame the camera to the union of
+   * the master group's bbox and the silicone bbox — so the user sees the
+   * whole result without a manual zoom-out (issue #47 AC).
+   *
+   * Ownership: transfers both Manifolds to the scene module. The caller
+   * (orchestrator happy-path) must NOT `.delete()` them after this
+   * resolves. On a throw, `scene/silicone.ts::setSilicone` disposes both
+   * halves before re-throwing, so the error branch preserves the
+   * lifetime contract without a second dispose here.
+   */
+  const setSilicone = async (
+    halves: { upper: Manifold; lower: Manifold },
+  ): Promise<SiliconeResult> => {
+    const installed = await sceneSetSilicone(scene, halves);
+
+    // Union the silicone bbox with the master group's world-space bbox.
+    // `Box3.setFromObject(masterGroup)` is fine here because the master
+    // group's world matrix is maintained current by every transform path
+    // (setMaster, lay-flat commit, reset) — no stale matrix risk.
+    const masterGroup = scene.children.find(
+      (c) => c.userData['tag'] === 'master',
+    );
+    const union = installed.bbox.clone();
+    if (masterGroup) {
+      const masterBbox = new Box3().setFromObject(masterGroup);
+      if (!masterBbox.isEmpty()) union.union(masterBbox);
+    }
+
+    // Defence-in-depth: only frame if the union is non-empty. The
+    // silicone bbox is non-empty by construction (two halves always have
+    // vertices), but a fully-degenerate scene shouldn't crash the framer.
+    if (!union.isEmpty()) {
+      frameToBox3(camera, controls, union);
+    }
+
+    return installed;
+  };
+
   const setMaster = async (buffer: ArrayBuffer): Promise<MasterResult> => {
     // Exit any active lay-flat session before swapping the master — the old
     // mesh (and its BVH) is about to be disposed, and stale cursor listeners
@@ -264,6 +327,9 @@ export function mount(container: HTMLElement): MountedViewport {
     // automatically when the viewport's JS state is dropped. Idempotent and
     // safe on a scene that never loaded a master.
     sceneDisposeMaster(scene);
+    // Mirror for silicone: `clearSilicone` releases the cached half-
+    // Manifolds + GPU resources. Idempotent on an empty scene.
+    sceneClearSilicone(scene);
     controls.dispose();
     renderer.dispose();
     if (canvas.parentElement === container) {
@@ -283,6 +349,9 @@ export function mount(container: HTMLElement): MountedViewport {
     isFacePickingActive: () => layFlat.isActive(),
     resetOrientation: () => layFlat.reset(),
     isOrientationCommitted: () => layFlat.isCommitted(),
+    setSilicone,
+    clearSilicone: () => sceneClearSilicone(scene),
+    setExplodedView: (exploded: boolean) => sceneSetExplodedView(scene, exploded),
     dispose,
   };
 
