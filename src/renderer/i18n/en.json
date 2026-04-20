@@ -40,6 +40,10 @@
     "reset": "Reset orientation",
     "resetHint": "Restore the mesh to its original STL orientation"
   },
+  "explodedView": {
+    "toggle": "Exploded view",
+    "toggleHint": "Show the two silicone halves moved apart so the cavity is visible"
+  },
   "generate": {
     "button": "Generate mold",
     "buttonBusy": "Generating…",

@@ -208,3 +208,38 @@ describe('attachGenerateInvalidation — epoch bump (QA blocker 2)', () => {
     expect(getGenerateEpoch()).toBe(startEpoch);
   });
 });
+
+describe('attachGenerateInvalidation — clearSilicone hook (issue #47)', () => {
+  test('calls clearSilicone on every valid commit event', () => {
+    const { topbar, generateButton } = makeMocks();
+    const clearSilicone = vi.fn<() => void>();
+    attachAndTrack(topbar, generateButton, { clearSilicone });
+
+    dispatchCommittedEvent(true);
+    expect(clearSilicone).toHaveBeenCalledTimes(1);
+
+    dispatchCommittedEvent(false);
+    expect(clearSilicone).toHaveBeenCalledTimes(2);
+
+    dispatchCommittedEvent(true);
+    expect(clearSilicone).toHaveBeenCalledTimes(3);
+  });
+
+  test('does NOT call clearSilicone on non-boolean detail', () => {
+    const { topbar, generateButton } = makeMocks();
+    const clearSilicone = vi.fn<() => void>();
+    attachAndTrack(topbar, generateButton, { clearSilicone });
+
+    dispatchCommittedEvent('nope');
+    dispatchCommittedEvent(undefined);
+    dispatchCommittedEvent({ bogus: true });
+
+    expect(clearSilicone).not.toHaveBeenCalled();
+  });
+
+  test('clearSilicone is optional — absence does not throw', () => {
+    const { topbar, generateButton } = makeMocks();
+    attachAndTrack(topbar, generateButton);
+    expect(() => dispatchCommittedEvent(true)).not.toThrow();
+  });
+});
