@@ -1,6 +1,8 @@
 name: update linux visual goldens
 
 on:
+  push:
+    branches: [chore/commit-linux-visual-goldens]
   workflow_dispatch:
 
 # One-shot chore: regenerate `tests/__screenshots__/linux-ci/` on the Linux
