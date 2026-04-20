@@ -243,3 +243,49 @@ describe('attachGenerateInvalidation — clearSilicone hook (issue #47)', () => 
     expect(() => dispatchCommittedEvent(true)).not.toThrow();
   });
 });
+
+describe('attachGenerateInvalidation — clearPrintableParts hook (issue #62)', () => {
+  test('calls clearPrintableParts on every valid commit event', () => {
+    const { topbar, generateButton } = makeMocks();
+    const clearPrintableParts = vi.fn<() => void>();
+    attachAndTrack(topbar, generateButton, { clearPrintableParts });
+
+    dispatchCommittedEvent(true);
+    expect(clearPrintableParts).toHaveBeenCalledTimes(1);
+
+    dispatchCommittedEvent(false);
+    expect(clearPrintableParts).toHaveBeenCalledTimes(2);
+  });
+
+  test('does NOT call clearPrintableParts on non-boolean detail', () => {
+    const { topbar, generateButton } = makeMocks();
+    const clearPrintableParts = vi.fn<() => void>();
+    attachAndTrack(topbar, generateButton, { clearPrintableParts });
+
+    dispatchCommittedEvent('nope');
+    expect(clearPrintableParts).not.toHaveBeenCalled();
+  });
+
+  test('clearPrintableParts is called alongside clearSilicone when both supplied', () => {
+    // Verifies the issue #62 AC that the two cleanup paths fire as a
+    // single atomic step from the invalidation listener's perspective.
+    const { topbar, generateButton } = makeMocks();
+    const clearSilicone = vi.fn<() => void>();
+    const clearPrintableParts = vi.fn<() => void>();
+    attachAndTrack(topbar, generateButton, {
+      clearSilicone,
+      clearPrintableParts,
+    });
+
+    dispatchCommittedEvent(true);
+
+    expect(clearSilicone).toHaveBeenCalledTimes(1);
+    expect(clearPrintableParts).toHaveBeenCalledTimes(1);
+  });
+
+  test('clearPrintableParts is optional — absence does not throw', () => {
+    const { topbar, generateButton } = makeMocks();
+    attachAndTrack(topbar, generateButton);
+    expect(() => dispatchCommittedEvent(true)).not.toThrow();
+  });
+});
