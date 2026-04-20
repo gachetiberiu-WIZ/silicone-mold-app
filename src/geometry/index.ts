@@ -10,14 +10,13 @@
 // at startup (ADR-002 §"WASM packaging").
 
 export { initManifold } from './initManifold';
-export {
-  bufferGeometryToManifold,
-  manifoldToBufferGeometry,
-  isManifold,
-} from './adapters';
+export { bufferGeometryToManifold, manifoldToBufferGeometry, isManifold } from './adapters';
 export { loadStl, type LoadedStl } from './loadStl';
 export { meshVolume } from './volume';
 export {
   generateSiliconeShell,
+  InvalidParametersError,
+  type MoldGenerationResult,
   type SiliconeShellResult,
 } from './generateMold';
+export { buildPrintableBox, SIDE_CUT_ANGLES, type PrintableBoxParts } from './printableBox';

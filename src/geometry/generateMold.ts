@@ -1,9 +1,9 @@
 // src/geometry/generateMold.ts
 //
-// Silicone-shell generator — Phase 3c wave 1 (issue #37).
+// Mold generator — Phase 3c Wave 1 (issue #37) + Wave 2 (issue #50).
 //
-// Implements steps 1–4 + 9 of the `.claude/skills/mold-generator/SKILL.md`
-// algorithm:
+// Wave 1 (issue #37) implemented steps 1–4 + 9 of
+// `.claude/skills/mold-generator/SKILL.md`:
 //
 //   1. apply the viewport transform to the master (so the parting plane
 //      operates in the oriented frame the user sees),
@@ -16,9 +16,17 @@
 //      volume (master volume only at this wave — sprue/vent channels are
 //      Phase 3d/e).
 //
-// Out of scope for this wave (per the issue): printable base / sides /
-// cap / sprue / vents / registration keys, user-picked parting plane,
-// visual preview in the viewport, STL export.
+// Wave 2 (issue #50) extends the pipeline to produce the raw printable-box
+// parts: base + `sideCount` sides + top cap. These are built from the
+// silicone body's AABB in the oriented frame (no air gap to silicone in
+// v1) expanded by `baseThickness_mm` on all six sides. The radial-split
+// algorithm lives in `./printableBox.ts`; see that module for the
+// load-bearing side-cut-angles table and wedge-trim algorithm.
+//
+// Out of scope (still — carried forward from the issues): registration
+// keys, sprue + vent channels through the top cap, user-picked parting
+// plane, draft angles on the inner cavity, viewport preview of the
+// printable parts, STL export.
 //
 // Offset algorithm — `Manifold.levelSet` over a BVH-driven SDF:
 //
@@ -68,29 +76,51 @@
 import { DoubleSide, Ray, Vector3 } from 'three';
 import type { BufferGeometry, Matrix4 } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
-import type {
-  Box,
-  Manifold,
-  ManifoldToplevel,
-  Mat4,
-  Vec3,
-} from 'manifold-3d';
+import type { Box, Manifold, ManifoldToplevel, Mat4, Vec3 } from 'manifold-3d';
 
 import type { MoldParameters } from '@/renderer/state/parameters';
+import { SIDE_COUNT_OPTIONS } from '@/renderer/state/parameters';
 import { manifoldToBufferGeometry, isManifold } from './adapters';
 import { initManifold } from './initManifold';
+import { buildPrintableBox } from './printableBox';
 
 /**
- * Result of a single Phase-3c silicone-shell generation pass.
- *
- * Ownership: every `Manifold` returned here is a FRESH handle owned by the
- * caller. The caller MUST `.delete()` both `siliconeUpperHalf` and
- * `siliconeLowerHalf` when done to release WASM heap memory. The input
- * `master` Manifold is NOT consumed — its lifetime remains with whoever
- * owns it (typically the Master group's userData; see
- * `src/renderer/scene/master.ts`).
+ * Error raised on invalid `MoldParameters` input to `generateSiliconeShell`
+ * BEFORE any Manifold allocation. Separate class so callers (and tests)
+ * can distinguish parameter-validation failures from downstream kernel
+ * errors without string-matching. See issue #50 "Validation" —
+ * defence-in-depth against UI constraints being bypassed by tests or
+ * future non-UI call paths.
  */
-export interface SiliconeShellResult {
+export class InvalidParametersError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidParametersError';
+  }
+}
+
+/**
+ * Result of a single silicone + printable-box generation pass.
+ *
+ * Ownership — every `Manifold` returned here is a FRESH handle owned by
+ * the caller. The caller MUST `.delete()` each of:
+ *
+ *   - `siliconeUpperHalf`, `siliconeLowerHalf`
+ *   - `basePart`, `topCapPart`
+ *   - every element of `sideParts`
+ *
+ * to release WASM heap memory. The input `master` Manifold is NOT
+ * consumed — its lifetime remains with whoever owns it (typically the
+ * Master group's userData; see `src/renderer/scene/master.ts`).
+ *
+ * The orchestrator (`src/renderer/ui/generateOrchestrator.ts`) owns this
+ * contract on the renderer side. In Wave 2 (issue #50) the printable-box
+ * parts are not yet rendered, so the orchestrator `.delete()`s them
+ * immediately after reading `printableVolume_mm3`. Wave 4 will introduce
+ * a viewport preview that takes over printable-parts ownership — the
+ * silicone-halves hand-off (issue #47) is the template.
+ */
+export interface MoldGenerationResult {
   /**
    * Silicone above the parting plane. For preview + volume compute only in
    * v1 — not printed. Caller owns; call `.delete()` when done.
@@ -112,7 +142,44 @@ export interface SiliconeShellResult {
    * Phase 3d/e when those channels are generated.
    */
   readonly resinVolume_mm3: number;
+  /**
+   * Printable base plate — rectangular slab sitting entirely below the
+   * silicone bbox. Watertight (genus 0). Caller owns; `.delete()` when
+   * done.
+   */
+  readonly basePart: Manifold;
+  /**
+   * Printable side walls — `length === parameters.sideCount` wedges
+   * covering the ring frame around the silicone bbox at
+   * Y ∈ [shellBbox.min.y, shellBbox.max.y]. Each wedge is watertight
+   * (genus 0). Caller owns each Manifold; `.delete()` each when done.
+   * Pairwise overlap is zero within kernel tolerance.
+   */
+  readonly sideParts: readonly Manifold[];
+  /**
+   * Printable top cap — rectangular slab sitting entirely above the
+   * silicone bbox. Watertight (genus 0). Caller owns; `.delete()` when
+   * done.
+   */
+  readonly topCapPart: Manifold;
+  /**
+   * Sum of `basePart.volume() + Σ sideParts[i].volume() +
+   * topCapPart.volume()`, in mm³. Pre-computed so downstream topbar /
+   * UI surfaces don't have to re-walk the parts to read it.
+   */
+  readonly printableVolume_mm3: number;
 }
+
+/**
+ * @deprecated Renamed to `MoldGenerationResult` in Wave 2 (issue #50)
+ * once the return shape started carrying printable-box parts alongside
+ * the silicone halves. The old name misrepresented the contents; this
+ * alias remains temporarily so existing call sites (and tests that
+ * explicitly typed against `SiliconeShellResult`) keep compiling during
+ * the transition window. Remove in a follow-up once the renderer /
+ * orchestrator have migrated.
+ */
+export type SiliconeShellResult = MoldGenerationResult;
 
 /**
  * Hard lower bound on the silicone wall thickness the generator will
@@ -158,10 +225,22 @@ function threeMatrixToManifoldMat4(m: Matrix4): Mat4 {
     );
   }
   return [
-    e[0] as number, e[1] as number, e[2] as number, e[3] as number,
-    e[4] as number, e[5] as number, e[6] as number, e[7] as number,
-    e[8] as number, e[9] as number, e[10] as number, e[11] as number,
-    e[12] as number, e[13] as number, e[14] as number, e[15] as number,
+    e[0] as number,
+    e[1] as number,
+    e[2] as number,
+    e[3] as number,
+    e[4] as number,
+    e[5] as number,
+    e[6] as number,
+    e[7] as number,
+    e[8] as number,
+    e[9] as number,
+    e[10] as number,
+    e[11] as number,
+    e[12] as number,
+    e[13] as number,
+    e[14] as number,
+    e[15] as number,
   ];
 }
 
@@ -203,9 +282,7 @@ function assertManifold(m: Manifold, label: string): void {
  *
  * Caller must `.dispose()` the returned `bvh`-owning geometry when done.
  */
-async function buildMasterSdf(
-  master: Manifold,
-): Promise<{
+async function buildMasterSdf(master: Manifold): Promise<{
   sdf: (p: Vec3) => number;
   geometry: BufferGeometry;
   bvh: MeshBVH;
@@ -277,12 +354,29 @@ export async function generateSiliconeShell(
   master: Manifold,
   parameters: MoldParameters,
   viewTransform: Matrix4,
-): Promise<SiliconeShellResult> {
+): Promise<MoldGenerationResult> {
+  // Defence-in-depth validation. The UI's parameters panel already
+  // clamps to legal ranges, but this function is reachable from tests
+  // and any future non-UI caller, so the kernel validates its own
+  // inputs. Every check here runs BEFORE the first Manifold allocation
+  // so a rejection costs zero WASM heap.
   if (parameters.wallThickness_mm < MIN_WALL_THICKNESS_MM) {
-    throw new Error(
+    throw new InvalidParametersError(
       `generateSiliconeShell: wallThickness_mm=${parameters.wallThickness_mm} ` +
         `is below the minimum of ${MIN_WALL_THICKNESS_MM} mm ` +
         `(silicone would tear on demould)`,
+    );
+  }
+  if (!SIDE_COUNT_OPTIONS.includes(parameters.sideCount)) {
+    throw new InvalidParametersError(
+      `generateSiliconeShell: sideCount=${String(parameters.sideCount)} ` +
+        `is not supported (must be one of ${SIDE_COUNT_OPTIONS.join(', ')})`,
+    );
+  }
+  if (!(parameters.baseThickness_mm > 0) || !Number.isFinite(parameters.baseThickness_mm)) {
+    throw new InvalidParametersError(
+      `generateSiliconeShell: baseThickness_mm=${parameters.baseThickness_mm} ` +
+        `must be a positive finite number`,
     );
   }
 
@@ -296,9 +390,7 @@ export async function generateSiliconeShell(
   // `Manifold.transform` returns a fresh Manifold — the original input is
   // never mutated. That matters because the caller owns the master and we
   // must not impose lifetime effects on it.
-  const transformedMaster = master.transform(
-    threeMatrixToManifoldMat4(viewTransform),
-  );
+  const transformedMaster = master.transform(threeMatrixToManifoldMat4(viewTransform));
   const tTransform = performance.now();
   try {
     assertManifold(transformedMaster, 'transformed master');
@@ -317,16 +409,8 @@ export async function generateSiliconeShell(
       const masterBbox = transformedMaster.boundingBox();
       const pad = parameters.wallThickness_mm + 2 * edgeLength;
       const bounds: Box = {
-        min: [
-          masterBbox.min[0] - pad,
-          masterBbox.min[1] - pad,
-          masterBbox.min[2] - pad,
-        ],
-        max: [
-          masterBbox.max[0] + pad,
-          masterBbox.max[1] + pad,
-          masterBbox.max[2] + pad,
-        ],
+        min: [masterBbox.min[0] - pad, masterBbox.min[1] - pad, masterBbox.min[2] - pad],
+        max: [masterBbox.max[0] + pad, masterBbox.max[1] + pad, masterBbox.max[2] + pad],
       };
 
       // Step 2c: outer silicone shell via levelSet. `level = -wallThickness`
@@ -343,10 +427,7 @@ export async function generateSiliconeShell(
 
         // Step 3: carve the cavity. `difference` is guaranteed-manifold
         // on two manifold inputs (ADR-002).
-        const silicone = toplevel.Manifold.difference([
-          shell,
-          transformedMaster,
-        ]);
+        const silicone = toplevel.Manifold.difference([shell, transformedMaster]);
         const tCavity = performance.now();
         try {
           assertManifold(silicone, 'silicone body (shell − master)');
@@ -356,10 +437,7 @@ export async function generateSiliconeShell(
           // "above" is in the direction of the supplied normal.
           const midY = (masterBbox.min[1] + masterBbox.max[1]) / 2;
           const planeNormal: Vec3 = [0, 1, 0];
-          const [upperHalf, lowerHalf] = silicone.splitByPlane(
-            planeNormal,
-            midY,
-          );
+          const [upperHalf, lowerHalf] = silicone.splitByPlane(planeNormal, midY);
           const tSplit = performance.now();
 
           try {
@@ -380,11 +458,38 @@ export async function generateSiliconeShell(
           // still report the source-unit volume of the resin fill.
           const resinVolume_mm3 = master.volume();
 
-          const tTotal = performance.now();
+          // Wave 2 (issue #50): compute the silicone body's AABB in the
+          // oriented frame, then hand it to `buildPrintableBox` for the
+          // base + sides + top cap. `silicone` (the pre-split body) and
+          // `transformedMaster` have identical XZ extents post-levelSet
+          // inside the grid — the exterior of the silicone body is the
+          // outside of `shell`, whose bbox we read here. We read from
+          // the still-alive `silicone` Manifold rather than recomputing
+          // from the halves (fewer boundingBox() calls, one source of
+          // truth, and the halves may have floating-point-smaller
+          // bboxes after the splitByPlane).
+          const shellBbox = silicone.boundingBox();
 
-          // Per issue #37: log wall-clock per step at debug level; emit
-          // an INFO summary so the frontend Generate button's DevTools
-          // eyeballing works until topbar volume wiring lands.
+          // buildPrintableBox is synchronous (no WASM init, no await —
+          // `toplevel` is already warm at this point). It throws
+          // `InvalidParametersError` (for bad sideCount; already
+          // validated above but defence-in-depth) or a generic Error
+          // with a "printableBox: ..." prefix on a watertightness
+          // failure. Any throw must release the silicone halves
+          // because the caller never sees them.
+          let printableBoxParts;
+          try {
+            printableBoxParts = buildPrintableBox(toplevel, shellBbox, parameters);
+          } catch (err) {
+            upperHalf.delete();
+            lowerHalf.delete();
+            throw err;
+          }
+          const tPrintable = performance.now();
+
+          // Per issue #37 / extended in #50: log wall-clock per step at
+          // debug level; emit an INFO summary including the printable
+          // volume so DevTools + tests can eyeball it.
           console.debug(
             `[generateSiliconeShell] step timings (ms): ` +
               `transform=${(tTransform - t0).toFixed(1)} ` +
@@ -392,15 +497,18 @@ export async function generateSiliconeShell(
               `levelset=${(tShell - tSdf).toFixed(1)} ` +
               `cavity=${(tCavity - tShell).toFixed(1)} ` +
               `split=${(tSplit - tCavity).toFixed(1)} ` +
-              `volumes=${(tTotal - tSplit).toFixed(1)} ` +
-              `total=${(tTotal - t0).toFixed(1)} ` +
-              `(edgeLength=${edgeLength.toFixed(2)} mm)`,
+              `printable-box=${(tPrintable - tSplit).toFixed(1)} ` +
+              `total=${(tPrintable - t0).toFixed(1)} ` +
+              `(edgeLength=${edgeLength.toFixed(2)} mm, ` +
+              `sideCount=${parameters.sideCount})`,
           );
           console.info(
             `[generateSiliconeShell] silicone=${siliconeVolume_mm3.toFixed(1)} mm³, ` +
-              `resin=${resinVolume_mm3.toFixed(1)} mm³ ` +
+              `resin=${resinVolume_mm3.toFixed(1)} mm³, ` +
+              `printable=${printableBoxParts.printableVolume_mm3.toFixed(1)} mm³ ` +
               `(wall=${parameters.wallThickness_mm} mm, ` +
-              `total=${(tTotal - t0).toFixed(1)} ms)`,
+              `sideCount=${parameters.sideCount}, ` +
+              `total=${(tPrintable - t0).toFixed(1)} ms)`,
           );
 
           return {
@@ -408,6 +516,10 @@ export async function generateSiliconeShell(
             siliconeLowerHalf: lowerHalf,
             siliconeVolume_mm3,
             resinVolume_mm3,
+            basePart: printableBoxParts.basePart,
+            sideParts: printableBoxParts.sideParts,
+            topCapPart: printableBoxParts.topCapPart,
+            printableVolume_mm3: printableBoxParts.printableVolume_mm3,
           };
         } finally {
           silicone.delete();
@@ -428,4 +540,3 @@ export async function generateSiliconeShell(
     transformedMaster.delete();
   }
 }
-
