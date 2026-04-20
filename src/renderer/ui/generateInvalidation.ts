@@ -45,9 +45,10 @@ export type InvalidationGenerateButton = Pick<
 >;
 
 /**
- * Options for `attachGenerateInvalidation`. The `bumpEpoch` hook is
- * injectable so tests can observe the bump directly; in production it
- * defaults to the shared module-level counter in `generateEpoch.ts`.
+ * Options for `attachGenerateInvalidation`. The `bumpEpoch` + `clearSilicone`
+ * hooks are injectable so tests can observe them directly; in production
+ * `bumpEpoch` defaults to the shared module-level counter and `clearSilicone`
+ * is supplied by `main.ts` from the silicone scene module.
  */
 export interface GenerateInvalidationOptions {
   /**
@@ -55,6 +56,19 @@ export interface GenerateInvalidationOptions {
    * Defaults to `bumpGenerateEpoch` — override only in tests.
    */
   bumpEpoch?: () => number;
+  /**
+   * Tear down any silicone meshes currently in the scene and `.delete()`
+   * their paired Manifolds. Optional because pre-#47 call sites (and most
+   * unit tests) don't need it — in production `main.ts` passes the real
+   * `clearSilicone(scene)` binding from `scene/silicone.ts`.
+   *
+   * Called AFTER the epoch bump + volume-null so the silicone group is
+   * torn down in the same synchronous tick as the topbar reset. A
+   * resolving in-flight generation's `setSilicone` call sees the stale
+   * epoch and drops its halves via the orchestrator's staleness guard,
+   * so we never race the stale-drop against this clear.
+   */
+  clearSilicone?: () => void;
 }
 
 /**
@@ -65,7 +79,10 @@ export interface GenerateInvalidationOptions {
  *   - clears any pending error on the button,
  *   - bumps the shared generate-epoch counter so any in-flight
  *     `generateSiliconeShell` promise resolves into a stale-branch and
- *     drops its result (see `generateEpoch.ts` for the full rationale).
+ *     drops its result (see `generateEpoch.ts` for the full rationale),
+ *   - if `options.clearSilicone` is supplied, tears down any silicone
+ *     meshes currently in the scene (issue #47 — silicone preview
+ *     lifetime must match the topbar volumes' lifetime).
  *
  * Returns an unsubscribe function so tests (and future app teardown) can
  * detach the listener cleanly.
@@ -76,6 +93,7 @@ export function attachGenerateInvalidation(
   options: GenerateInvalidationOptions = {},
 ): () => void {
   const bump = options.bumpEpoch ?? bumpGenerateEpoch;
+  const clearSilicone = options.clearSilicone;
   const handler = (ev: Event): void => {
     const detail = (ev as CustomEvent<boolean>).detail;
     if (typeof detail !== 'boolean') return;
@@ -89,6 +107,7 @@ export function attachGenerateInvalidation(
     topbar.setSiliconeVolume(null);
     topbar.setResinVolume(null);
     generateButton.setError(null);
+    if (clearSilicone) clearSilicone();
   };
   document.addEventListener(LAY_FLAT_COMMITTED_EVENT, handler);
   return () => {
