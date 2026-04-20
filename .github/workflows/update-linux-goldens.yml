@@ -1,0 +1,74 @@
+name: update linux visual goldens
+
+on:
+  push:
+    branches: [fix/visual-silicone-exploded-stability]
+  workflow_dispatch:
+
+# One-shot chore: regenerate the `silicone-exploded.png` baseline under
+# `tests/__screenshots__/linux-ci/visual/silicone-exploded.spec.ts-snapshots/`
+# on the Linux runner (matching the visual-regression CI's SwiftShader
+# environment) and commit it back to this branch. Scoped with the `if:`
+# guard below so it can only fire on this feature branch — it cannot run
+# against main. Removed in the last commit of this same PR (issue #53).
+#
+# Pattern copied from PR #52 (which populated the first 18/19 baselines
+# the same way). Uses `continue-on-error: true` on the generate step so a
+# still-flaky run doesn't skip the commit + upload.
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-linux-goldens-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PNPM_VERSION: "10.33.0"
+  NODE_VERSION: "22"
+
+jobs:
+  regen:
+    if: github.ref == 'refs/heads/fix/visual-silicone-exploded-stability'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          ref: fix/visual-silicone-exploded-stability
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Generate silicone-exploded baseline (--update-snapshots)
+        continue-on-error: true
+        run: pnpm test:visual --update-snapshots -- tests/visual/silicone-exploded.spec.ts
+      - name: List new goldens
+        run: |
+          echo "silicone-exploded snapshot dir:"
+          find tests/__screenshots__/linux-ci/visual/silicone-exploded.spec.ts-snapshots -type f 2>/dev/null | sort
+          echo "total silicone-exploded PNGs: $(find tests/__screenshots__/linux-ci/visual/silicone-exploded.spec.ts-snapshots -type f -name '*.png' 2>/dev/null | wc -l)"
+      - name: Commit baseline back to branch
+        run: |
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add tests/__screenshots__/linux-ci
+          if git diff --cached --quiet; then
+            echo "No golden changes to commit."
+            exit 0
+          fi
+          git commit -m "chore(test): generate silicone-exploded Linux CI baseline"
+          git push origin fix/visual-silicone-exploded-stability
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 3
