@@ -169,8 +169,8 @@ async function readUpperMeshWorldY(page: Page): Promise<number> {
   return page.evaluate(() => {
     type Obj = {
       userData?: Record<string, unknown>;
-      getWorldPosition?: (v: { y: number }) => { y: number };
-      position?: { y: number };
+      matrixWorld?: { elements: ArrayLike<number> };
+      updateWorldMatrix?: (updateParents: boolean, updateChildren: boolean) => void;
     };
     type SceneHook = {
       scene?: { traverse: (cb: (obj: Obj) => void) => void };
@@ -181,15 +181,16 @@ async function readUpperMeshWorldY(page: Page): Promise<number> {
     let worldY = Number.NaN;
     hooks.scene.traverse((obj) => {
       if (obj.userData?.['tag'] === 'silicone-upper') {
-        // `getWorldPosition` walks the parent chain — silicone group is
-        // at identity, so world Y === mesh.position.y. We use
-        // `getWorldPosition` anyway so a future group transform would
-        // still produce the right reading.
-        if (typeof obj.getWorldPosition === 'function') {
-          const p = obj.getWorldPosition({ y: 0 });
-          worldY = p.y;
-        } else if (obj.position) {
-          worldY = obj.position.y;
+        // Read world Y directly from the 4x4 matrixWorld — element[13]
+        // is the translation.y. We can't use `getWorldPosition(v)` here
+        // because it mutates `v` via `setFromMatrixPosition`, which is
+        // a THREE.Vector3 prototype method; a plain `{y:0}` object
+        // doesn't have it and the call throws. Reading the matrix
+        // directly is equivalent AND works regardless of any future
+        // parent-group transform (mW folds the ancestor chain in).
+        if (obj.updateWorldMatrix) obj.updateWorldMatrix(true, false);
+        if (obj.matrixWorld) {
+          worldY = obj.matrixWorld.elements[13]!;
         }
       }
     });
