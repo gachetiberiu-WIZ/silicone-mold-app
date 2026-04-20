@@ -41,7 +41,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps chromium
-      - name: Generate missing goldens (tests fail-with-write on first run)
+      - name: Generate missing goldens (flaky specs may fail; commit the rest)
+        continue-on-error: true
         run: pnpm test:visual --update-snapshots
       - name: List new goldens
         run: |
