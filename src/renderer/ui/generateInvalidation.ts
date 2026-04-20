@@ -45,10 +45,11 @@ export type InvalidationGenerateButton = Pick<
 >;
 
 /**
- * Options for `attachGenerateInvalidation`. The `bumpEpoch` + `clearSilicone`
- * hooks are injectable so tests can observe them directly; in production
- * `bumpEpoch` defaults to the shared module-level counter and `clearSilicone`
- * is supplied by `main.ts` from the silicone scene module.
+ * Options for `attachGenerateInvalidation`. The `bumpEpoch` +
+ * `clearSilicone` + `clearPrintableParts` hooks are injectable so tests
+ * can observe them directly; in production `bumpEpoch` defaults to the
+ * shared module-level counter and the `clear*` hooks are supplied by
+ * `main.ts` from the corresponding scene modules.
  */
 export interface GenerateInvalidationOptions {
   /**
@@ -69,6 +70,18 @@ export interface GenerateInvalidationOptions {
    * so we never race the stale-drop against this clear.
    */
   clearSilicone?: () => void;
+  /**
+   * Tear down any printable-parts meshes currently in the scene and
+   * `.delete()` their cached Manifolds (issue #62). Optional for the
+   * same reason `clearSilicone` is — legacy unit tests that don't care
+   * about the preview scene don't have to stub it.
+   *
+   * Called in the same tick as `clearSilicone`, right after the epoch
+   * bump + volume-null. The orchestrator's staleness guard drops any
+   * in-flight `setPrintableParts` result on resolve, so the clear-vs-
+   * stale-drop race is closed the same way silicone's is.
+   */
+  clearPrintableParts?: () => void;
 }
 
 /**
@@ -94,6 +107,7 @@ export function attachGenerateInvalidation(
 ): () => void {
   const bump = options.bumpEpoch ?? bumpGenerateEpoch;
   const clearSilicone = options.clearSilicone;
+  const clearPrintableParts = options.clearPrintableParts;
   const handler = (ev: Event): void => {
     const detail = (ev as CustomEvent<boolean>).detail;
     if (typeof detail !== 'boolean') return;
@@ -108,6 +122,7 @@ export function attachGenerateInvalidation(
     topbar.setResinVolume(null);
     generateButton.setError(null);
     if (clearSilicone) clearSilicone();
+    if (clearPrintableParts) clearPrintableParts();
   };
   document.addEventListener(LAY_FLAT_COMMITTED_EVENT, handler);
   return () => {
