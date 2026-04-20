@@ -275,6 +275,123 @@ describe('generateOrchestrator — mid-flight LAY_FLAT_COMMITTED_EVENT race (QA 
   });
 });
 
+describe('generateOrchestrator — scene hand-off (issue #47)', () => {
+  test('happy path with scene sink: halves are handed off, orchestrator does NOT .delete()', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<SiliconeShellResult>();
+    const sceneSetSilicone = vi.fn<
+      (halves: { upper: Manifold; lower: Manifold }) => Promise<{ bbox: unknown }>
+    >().mockResolvedValue({ bbox: { min: [0, 0, 0], max: [1, 1, 1] } });
+    const onSiliconeInstalled = vi.fn<(result: unknown) => void>();
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      scene: { setSilicone: sceneSetSilicone },
+      onSiliconeInstalled,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    const result = makeResult();
+    d.resolve(result);
+    await runPromise;
+
+    // Scene sink was handed both Manifolds.
+    expect(sceneSetSilicone).toHaveBeenCalledTimes(1);
+    expect(sceneSetSilicone).toHaveBeenCalledWith({
+      upper: result.siliconeUpperHalf,
+      lower: result.siliconeLowerHalf,
+    });
+    // Ownership transferred → orchestrator does NOT .delete().
+    expect(result.siliconeUpperHalf.delete).not.toHaveBeenCalled();
+    expect(result.siliconeLowerHalf.delete).not.toHaveBeenCalled();
+    // Camera re-frame hook fired once with the setSilicone result.
+    expect(onSiliconeInstalled).toHaveBeenCalledTimes(1);
+    expect(onSiliconeInstalled).toHaveBeenCalledWith({
+      bbox: { min: [0, 0, 0], max: [1, 1, 1] },
+    });
+    // Volumes still push to the topbar on the happy path.
+    expect(topbar.setSiliconeVolume).toHaveBeenCalledWith(STALE_SILICONE_MM3);
+    expect(topbar.setResinVolume).toHaveBeenCalledWith(STALE_RESIN_MM3);
+  });
+
+  test('stale drop still .delete()s the halves even with scene sink wired', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<SiliconeShellResult>();
+    const sceneSetSilicone = vi.fn<
+      (halves: { upper: Manifold; lower: Manifold }) => Promise<unknown>
+    >();
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      scene: { setSilicone: sceneSetSilicone },
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+
+    // Force staleness by bumping the shared epoch externally — same
+    // technique `attachGenerateInvalidation` uses in production.
+    const { bumpGenerateEpoch } = await import(
+      '@/renderer/ui/generateEpoch'
+    );
+    bumpGenerateEpoch();
+
+    const result = makeResult();
+    d.resolve(result);
+    await runPromise;
+
+    // Staleness drop: halves were .delete()'d and the scene sink was
+    // never called (ownership never transferred).
+    expect(result.siliconeUpperHalf.delete).toHaveBeenCalledTimes(1);
+    expect(result.siliconeLowerHalf.delete).toHaveBeenCalledTimes(1);
+    expect(sceneSetSilicone).not.toHaveBeenCalled();
+  });
+
+  test('scene.setSilicone rejection surfaces via button.setError', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<SiliconeShellResult>();
+    // Scene sink REJECTS (geometry-adapter failure). Per the ownership
+    // contract, the sink is responsible for having already disposed
+    // both half-Manifolds before throwing.
+    const sceneSetSilicone = vi.fn<
+      (halves: { upper: Manifold; lower: Manifold }) => Promise<unknown>
+    >().mockRejectedValue(new Error('adapter boom'));
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      scene: { setSilicone: sceneSetSilicone },
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeResult());
+    await runPromise;
+
+    expect(button.setError).toHaveBeenLastCalledWith('adapter boom');
+    // Busy cleared on the finally-block.
+    expect(button.setBusy).toHaveBeenLastCalledWith(false);
+  });
+});
+
 describe('generateOrchestrator — pre-flight failures', () => {
   test('missing master surfaces an error without raising busy', async () => {
     const { topbar, button } = makeMocks();
