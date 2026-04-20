@@ -559,6 +559,155 @@ describe('generateOrchestrator — printable-box disposal (Wave 2, issue #50)', 
     }
   });
 
+  test('happy path with scene sink AND setPrintableParts hands off ownership (Wave 4, issue #62)', async () => {
+    // Wave 4 extends the scene sink with `setPrintableParts`. When the
+    // sink supplies both hooks, the orchestrator hands BOTH groups of
+    // Manifolds off — silicone halves AND printable-box parts — and
+    // must NOT `.delete()` any of them.
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const sceneSetSilicone = vi
+      .fn<(halves: { upper: Manifold; lower: Manifold }) => Promise<unknown>>()
+      .mockResolvedValue({ bbox: { min: [0, 0, 0], max: [1, 1, 1] } });
+    const sceneSetPrintableParts = vi
+      .fn<
+        (parts: {
+          base: Manifold;
+          sides: readonly Manifold[];
+          topCap: Manifold;
+        }) => Promise<unknown>
+      >()
+      .mockResolvedValue({ bbox: { min: [0, 0, 0], max: [1, 1, 1] } });
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      scene: {
+        setSilicone: sceneSetSilicone,
+        setPrintableParts: sceneSetPrintableParts,
+      },
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    const result = makeResult();
+    d.resolve(result);
+    await runPromise;
+
+    // Silicone hand-off unchanged.
+    expect(sceneSetSilicone).toHaveBeenCalledTimes(1);
+    expect(result.siliconeUpperHalf.delete).not.toHaveBeenCalled();
+    expect(result.siliconeLowerHalf.delete).not.toHaveBeenCalled();
+
+    // Printable-parts hand-off: all Manifolds passed to the sink.
+    expect(sceneSetPrintableParts).toHaveBeenCalledTimes(1);
+    expect(sceneSetPrintableParts).toHaveBeenCalledWith({
+      base: result.basePart,
+      sides: result.sideParts,
+      topCap: result.topCapPart,
+    });
+    // NONE of the printable parts are `.delete()`'d by the orchestrator —
+    // the scene owns their lifetime now.
+    expect(result.basePart.delete).not.toHaveBeenCalled();
+    expect(result.topCapPart.delete).not.toHaveBeenCalled();
+    for (const s of result.sideParts) {
+      expect(s.delete).not.toHaveBeenCalled();
+    }
+  });
+
+  test('printable-parts sink rejection surfaces via button.setError; silicone stays installed', async () => {
+    // When `setPrintableParts` rejects, the sink is contracted to
+    // dispose every input Manifold. The orchestrator surfaces the
+    // error but does NOT tear down the already-installed silicone —
+    // UX degrades gracefully (silicone visible, printable preview
+    // skipped) rather than wiping the just-handed-off silicone.
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const sceneSetSilicone = vi
+      .fn<(halves: { upper: Manifold; lower: Manifold }) => Promise<unknown>>()
+      .mockResolvedValue({ bbox: { min: [0, 0, 0], max: [1, 1, 1] } });
+    const sceneSetPrintableParts = vi
+      .fn<
+        (parts: {
+          base: Manifold;
+          sides: readonly Manifold[];
+          topCap: Manifold;
+        }) => Promise<unknown>
+      >()
+      .mockRejectedValue(new Error('printable adapter boom'));
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      scene: {
+        setSilicone: sceneSetSilicone,
+        setPrintableParts: sceneSetPrintableParts,
+      },
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeResult());
+    await runPromise;
+
+    // Silicone was installed successfully.
+    expect(sceneSetSilicone).toHaveBeenCalledTimes(1);
+    // Printable-parts sink was called and rejected.
+    expect(sceneSetPrintableParts).toHaveBeenCalledTimes(1);
+    // Error surfaced through the button.
+    expect(button.setError).toHaveBeenLastCalledWith('printable adapter boom');
+    // Busy cleared on the finally-block.
+    expect(button.setBusy).toHaveBeenLastCalledWith(false);
+  });
+
+  test('scene sink with setSilicone but NO setPrintableParts falls back to disposing parts (legacy)', async () => {
+    // Wave-2 call sites (and tests that only wire `setSilicone`) must
+    // keep working: if `setPrintableParts` is absent from the sink,
+    // the orchestrator reverts to the Wave-2 behaviour of disposing
+    // printable parts immediately after reading `printableVolume_mm3`.
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const sceneSetSilicone = vi
+      .fn<(halves: { upper: Manifold; lower: Manifold }) => Promise<unknown>>()
+      .mockResolvedValue({ bbox: { min: [0, 0, 0], max: [1, 1, 1] } });
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      scene: { setSilicone: sceneSetSilicone },
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    const result = makeResult();
+    d.resolve(result);
+    await runPromise;
+
+    // Silicone handed off → not disposed.
+    expect(result.siliconeUpperHalf.delete).not.toHaveBeenCalled();
+    // Printable parts NOT handed off → disposed (Wave-2 fallback).
+    expect(result.basePart.delete).toHaveBeenCalledTimes(1);
+    expect(result.topCapPart.delete).toHaveBeenCalledTimes(1);
+    for (const s of result.sideParts) {
+      expect(s.delete).toHaveBeenCalledTimes(1);
+    }
+  });
+
   test('sideCount=2 result disposes both sides', async () => {
     // Confirms the disposal loop doesn't hard-code length 4. A
     // sideCount=2 generator would return `sideParts.length === 2`; we

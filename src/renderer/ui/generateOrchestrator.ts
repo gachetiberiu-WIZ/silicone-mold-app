@@ -117,12 +117,30 @@ export interface OrchestratorButton {
  * assert the hand-off without needing a real WebGL context.
  *
  * Contract: from the moment `setSilicone` resolves, the sink owns the
- * Manifolds' lifetimes. The orchestrator MUST NOT `.delete()` them on
- * the happy path. The stale-drop / error paths predate this ownership
- * transfer — they still `.delete()`.
+ * silicone Manifolds' lifetimes. From the moment `setPrintableParts`
+ * resolves (if supplied), the sink owns the printable-box Manifolds too.
+ * The orchestrator MUST NOT `.delete()` them on the happy path. The
+ * stale-drop / error paths predate this ownership transfer — they
+ * still `.delete()` everything.
  */
 export interface OrchestratorSceneSink {
   setSilicone(halves: { upper: Manifold; lower: Manifold }): Promise<unknown>;
+  /**
+   * Hand the printable-box parts (base + N sides + top cap) to the
+   * scene. Optional so legacy call sites / pre-#62 tests can still only
+   * wire `setSilicone` and fall back to disposing printable parts
+   * immediately (the Wave-2 behaviour).
+   *
+   * Contract: same as `setSilicone` — from the moment this resolves,
+   * the sink owns every Manifold in `parts`. The orchestrator MUST NOT
+   * `.delete()` them. On rejection the sink is responsible for having
+   * disposed every input Manifold before throwing.
+   */
+  setPrintableParts?(parts: {
+    base: Manifold;
+    sides: readonly Manifold[];
+    topCap: Manifold;
+  }): Promise<unknown>;
 }
 
 /** Dependencies injected into the orchestrator factory. */
@@ -345,14 +363,33 @@ export function createGenerateOrchestrator(
           result.siliconeLowerHalf.delete();
         }
 
-        // Wave 2 (issue #50) — printable-box parts. No scene preview
-        // for them in this wave, so the orchestrator disposes them
-        // immediately after reading `printableVolume_mm3`. Runs on the
-        // happy path regardless of whether the silicone scene sink is
-        // wired. Wave 4 will introduce a viewport preview that takes
-        // over printable-parts ownership (same pattern as issue #47
-        // for the silicone halves).
-        disposePrintableParts(result);
+        // Wave 4 (issue #62) — printable-box parts hand-off. Mirror of
+        // the silicone hand-off above: if the scene sink supplies
+        // `setPrintableParts`, ownership transfers; the orchestrator
+        // must NOT `.delete()` the printable Manifolds. If the sink is
+        // absent (legacy call sites, volume-only tests), fall back to
+        // Wave-2 behaviour and dispose the parts immediately.
+        if (scene?.setPrintableParts) {
+          try {
+            await scene.setPrintableParts({
+              base: result.basePart,
+              sides: result.sideParts,
+              topCap: result.topCapPart,
+            });
+          } catch (err) {
+            // The printable-parts sink is contracted to dispose every
+            // input Manifold on its error branch before re-throwing —
+            // same as `setSilicone`. We surface the error; the silicone
+            // hand-off above has already succeeded, and the user has
+            // seen the volumes, so the UX degrades gracefully (silicone
+            // visible, printable preview skipped).
+            const message = err instanceof Error ? err.message : String(err);
+            logger.error('[generate] setPrintableParts failed:', err);
+            button.setError(message);
+          }
+        } else {
+          disposePrintableParts(result);
+        }
       } catch (err) {
         // Stale rejection → user already moved on; no point alarming
         // them with an error from a superseded run.

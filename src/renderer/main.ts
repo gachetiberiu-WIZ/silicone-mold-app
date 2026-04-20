@@ -57,6 +57,10 @@ import {
   mountExplodedViewToggle,
   type ExplodedViewToggleApi,
 } from './ui/explodedViewToggle';
+import {
+  mountPrintablePartsToggle,
+  type PrintablePartsToggleApi,
+} from './ui/printablePartsToggle';
 
 let topbar: TopbarApi | null = null;
 let viewport: MountedViewport | null = null;
@@ -64,8 +68,18 @@ let parametersStore: ParametersStore | null = null;
 let parameterPanel: ParameterPanelApi | null = null;
 let placeOnFace: PlaceOnFaceToggleApi | null = null;
 let explodedView: ExplodedViewToggleApi | null = null;
+let printablePartsToggle: PrintablePartsToggleApi | null = null;
 let generateButton: GenerateButtonApi | null = null;
 let generateOrchestrator: GenerateOrchestratorApi | null = null;
+
+/**
+ * Canonical "is the exploded view currently ON" flag at the UI layer
+ * (issue #62). Used to apply the exploded state to printable parts at
+ * the moment the user toggles their visibility ON — `scene/printableParts.ts`
+ * short-circuits its tween while hidden, so when the group becomes
+ * visible we replay the current exploded state to catch parts up.
+ */
+let explodedViewActive = false;
 
 async function hydrateVersion(): Promise<void> {
   // The topbar owns the `[data-testid="app-version"]` element now; keep
@@ -106,17 +120,48 @@ function mountUi(): void {
       },
     });
 
-    // Exploded-view toggle (issue #47). Sits next to Place-on-face. Stays
-    // disabled until `generateOrchestrator` successfully installs
-    // silicone into the scene — we flip enabled=true inside the
-    // orchestrator's `onSiliconeInstalled` hook (wired in
-    // `mountParameters`). Every staleness transition also flips
-    // enabled=false (wired in `attachGenerateInvalidation` + the
+    // Exploded-view toggle (issue #47, extended in #62). Sits next to
+    // Place-on-face. Stays disabled until `generateOrchestrator`
+    // successfully installs silicone into the scene — we flip
+    // enabled=true inside the orchestrator's `onSiliconeInstalled` hook
+    // (wired in `mountParameters`). Every staleness transition also
+    // flips enabled=false (wired in `attachGenerateInvalidation` + the
     // loadMasterFromBuffer path).
+    //
+    // Issue #62 — fan-out: the toggle now animates BOTH scene modules
+    // (silicone + printable). Each module owns its own tween (per-
+    // module design choice; see PR body). When parts aren't currently
+    // visible, `setPrintablePartsExplodedView` short-circuits — no
+    // wasted RAF work.
     explodedView = mountExplodedViewToggle(center, {
       onToggle(active) {
         if (!viewport) return;
+        explodedViewActive = active;
         viewport.setExplodedView(active);
+        viewport.setPrintablePartsExplodedView(active);
+      },
+    });
+
+    // Show-printable-parts toggle (issue #62). Sits next to the
+    // exploded-view toggle. Default OFF — user opts in to see parts.
+    // Flipping ON applies the CURRENT exploded-view state so if the
+    // user has already exploded silicone and then flips printable-parts
+    // on, the parts enter the scene at their exploded positions (not
+    // collapsed at origin) — matches the "same assembly, decoupled
+    // visibility" UX the issue describes.
+    printablePartsToggle = mountPrintablePartsToggle(center, {
+      onToggle(active) {
+        if (!viewport) return;
+        viewport.setPrintablePartsVisible(active);
+        if (active) {
+          // Replay the current exploded state for the newly-visible
+          // parts. When hidden, the scene module snaps positions to
+          // the targetFraction on every explodedView flip, so by the
+          // time the group turns visible it's already at the right
+          // place — calling this again is a no-op tween but stays
+          // defensive in case a future change alters that invariant.
+          viewport.setPrintablePartsExplodedView(explodedViewActive);
+        }
       },
     });
 
@@ -141,6 +186,7 @@ function mountUi(): void {
     hooks['topbar'] = topbar;
     if (placeOnFace) hooks['placeOnFace'] = placeOnFace;
     if (explodedView) hooks['explodedView'] = explodedView;
+    if (printablePartsToggle) hooks['printablePartsToggle'] = printablePartsToggle;
     w.__testHooks = hooks;
   }
 }
@@ -233,17 +279,34 @@ function mountParameters(): void {
       // viewport's `setSilicone` also re-frames the camera to the
       // master+silicone union, so the user sees the full result
       // without a manual zoom-out.
+      //
+      // Issue #62: also hand the printable-box parts to the scene's
+      // printable-parts module. Ownership transfers on success; the
+      // orchestrator's stale-drop + error paths still `.delete()` them
+      // because the scene never received them in those cases.
       scene: {
         setSilicone: (halves) => vp.setSilicone(halves),
+        setPrintableParts: (parts) => vp.setPrintableParts(parts),
       },
       onSiliconeInstalled() {
         // Silicone is in the scene → the exploded-view toggle can be
         // used. Start collapsed (setActive(false)) because every fresh
         // generate resets the state — the scene module installs halves
-        // with currentFraction = 0.
+        // with currentFraction = 0. The UI-layer `explodedViewActive`
+        // flag also resets: a new generate cycle starts collapsed.
+        explodedViewActive = false;
         if (explodedView) {
           explodedView.setActive(false);
           explodedView.setEnabled(true);
+        }
+        // Printable-parts are installed too (the orchestrator hands
+        // them off after the silicone hand-off completes — see
+        // `setPrintableParts` in the scene deps above). The scene
+        // module starts the group hidden, so the toolbar toggle
+        // enables + starts OFF. User must click to reveal.
+        if (printablePartsToggle) {
+          printablePartsToggle.setActive(false);
+          printablePartsToggle.setEnabled(true);
         }
       },
     });
@@ -274,6 +337,19 @@ function mountParameters(): void {
         // generate cycle.
         if (explodedView) {
           explodedView.setEnabled(false);
+        }
+        // Reset the UI-layer `explodedViewActive` mirror so the next
+        // successful Generate starts from a known-collapsed state.
+        explodedViewActive = false;
+      },
+      clearPrintableParts: () => {
+        // Issue #62: printable-parts lifetime matches the silicone
+        // lifetime. Every staleness signal that clears silicone also
+        // clears printable parts, and the toolbar toggle reverts to
+        // disabled + off.
+        vp.clearPrintableParts();
+        if (printablePartsToggle) {
+          printablePartsToggle.setEnabled(false);
         }
       },
     });
@@ -326,6 +402,12 @@ async function loadMasterFromBuffer(buffer: ArrayBuffer): Promise<void> {
   // paths here makes first-load-with-stale-silicone-from-prior-master
   // safe as well.
   viewport.clearSilicone();
+  // Issue #62 parallel of the above: any printable-parts preview
+  // attached to the PREVIOUS master is stale. Same idempotent safety.
+  viewport.clearPrintableParts();
+  // Reset the exploded-view UI mirror on every new master load — the
+  // fresh master starts collapsed.
+  explodedViewActive = false;
   if (topbar) {
     topbar.setMasterVolume(result.volume_mm3);
     // Any previously-populated silicone + resin values are for the OLD
@@ -351,6 +433,11 @@ async function loadMasterFromBuffer(buffer: ArrayBuffer): Promise<void> {
   // Silicone is gone → exploded-view toggle goes back to disabled + off.
   if (explodedView) {
     explodedView.setEnabled(false);
+  }
+  // Printable parts are gone too → same disabled + off state for the
+  // show-printable-parts toggle.
+  if (printablePartsToggle) {
+    printablePartsToggle.setEnabled(false);
   }
   // Flip the Generate-block's hint from "Load an STL to begin." to
   // "Orient the part on its base...". The button stays disabled — the

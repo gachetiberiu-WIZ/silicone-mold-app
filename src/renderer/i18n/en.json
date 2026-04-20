@@ -44,6 +44,10 @@
     "toggle": "Exploded view",
     "toggleHint": "Show the two silicone halves moved apart so the cavity is visible"
   },
+  "printableParts": {
+    "toggle": "Show printable parts",
+    "toggleHint": "Show the printable 3D-print parts (base, sides, top cap) around the silicone"
+  },
   "generate": {
     "button": "Generate mold",
     "buttonBusy": "Generating…",
