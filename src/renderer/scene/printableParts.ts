@@ -40,10 +40,12 @@
 //
 // Visibility:
 //
-//   The printable-parts group starts HIDDEN on every install
-//   (`group.visible = false`). The toolbar toggle flips `visible` via
-//   `setPrintablePartsVisible`. This is the issue-specified "default OFF"
-//   — silicone + master is the easier-to-understand-at-a-glance default.
+//   The printable-parts group starts VISIBLE on every install
+//   (`group.visible = true`). This is the issue #67 "default ON" fix:
+//   users click "Generate mold" and expect to see the mold; hiding it
+//   behind an off-by-default toggle broke the dogfood flow (users
+//   reported "no base was created" because they never flipped it).
+//   The toolbar toggle flips `visible` via `setPrintablePartsVisible`.
 //
 // Exploded view:
 //
@@ -410,11 +412,11 @@ function startTween(state: PrintableState, targetFraction: number): void {
  * scene owns every Manifold. The caller MUST NOT `.delete()` them. The
  * next `setPrintableParts` call (or `clearPrintableParts`) evicts them.
  *
- * Visibility: the new group starts HIDDEN (`group.visible = false`)
- * regardless of the previous visibility state — fresh Generate, fresh
- * "user opts in to see it" toggle. Callers flip visibility via
- * `setPrintablePartsVisible(scene, true)` once the toolbar toggle is
- * flipped on.
+ * Visibility (issue #67): the new group starts VISIBLE
+ * (`group.visible = true`) regardless of the previous visibility state —
+ * fresh Generate, fresh "user sees the mold immediately" default. The
+ * toolbar toggle starts pressed; users flip it off via
+ * `setPrintablePartsVisible(scene, false)` if they want silicone-only.
  *
  * Failure mode: if any BufferGeometry adapter throws, we dispose any
  * partially-built geometries AND `.delete()` every input Manifold so
@@ -484,8 +486,11 @@ export async function setPrintableParts(
   disposeCachedSideManifolds(group);
   setState(group, null);
 
-  // Fresh install starts hidden (issue #62 AC: default OFF).
-  group.visible = false;
+  // Fresh install starts VISIBLE (issue #67: flip from Wave-4's
+  // default-OFF to default-ON. Users click Generate mold and expect
+  // the mold box to appear; the previous default caused confusion
+  // and support reports of "no base was created").
+  group.visible = true;
 
   // One shared material for the whole set.
   const material = createPrintableMaterial();

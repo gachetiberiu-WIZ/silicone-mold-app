@@ -277,22 +277,22 @@ test('printable-parts preview: toggle reveals → exploded drops base below Y=-2
     await expect(page.locator('[data-testid="silicone-volume-value"]'))
       .not.toHaveText('Click Generate', { timeout: 5_000 });
 
-    // Both toggles should now be enabled + not-pressed.
+    // Issue #67 — printable-parts toggle should now be enabled AND
+    // pressed (default ON after Generate). Exploded-view stays
+    // enabled + not-pressed (unchanged by this PR).
     await expect(printableToggle).toBeEnabled();
-    await expect(printableToggle).toHaveAttribute('aria-pressed', 'false');
+    await expect(printableToggle).toHaveAttribute('aria-pressed', 'true');
     await expect(explodedToggle).toBeEnabled();
     await expect(explodedToggle).toHaveAttribute('aria-pressed', 'false');
 
-    // Printable parts are installed but hidden. Traversing the scene
-    // graph finds them regardless of `group.visible` — Three's
-    // `traverse` walks all children.
+    // Printable parts are installed AND visible (default ON per #67).
     const counts = await countPrintableMeshes(page);
     expect(counts.base).toBe(1);
     expect(counts.sides).toBe(4); // default sideCount
     expect(counts.topCap).toBe(1);
 
-    // But the scene-level visibility flag is false.
-    const visibleBeforeToggle = await page.evaluate(() => {
+    // Scene-level visibility flag is true without any user click.
+    const visibleAfterGenerate = await page.evaluate(() => {
       type Hook = {
         viewport?: { arePrintablePartsVisible: () => boolean };
       };
@@ -301,9 +301,26 @@ test('printable-parts preview: toggle reveals → exploded drops base below Y=-2
           ?.arePrintablePartsVisible() ?? null
       );
     });
-    expect(visibleBeforeToggle).toBe(false);
+    expect(visibleAfterGenerate).toBe(true);
 
-    // Toggle printable parts ON.
+    // Clicking the toggle (already pressed) flips it OFF — the user's
+    // "hide the mold to focus on silicone" path stays back-compat.
+    await printableToggle.click();
+    await expect(printableToggle).toHaveAttribute('aria-pressed', 'false');
+    const visibleAfterHideClick = await page.evaluate(() => {
+      type Hook = {
+        viewport?: { arePrintablePartsVisible: () => boolean };
+      };
+      return (
+        (window as unknown as { __testHooks?: Hook }).__testHooks?.viewport
+          ?.arePrintablePartsVisible() ?? null
+      );
+    });
+    expect(visibleAfterHideClick).toBe(false);
+
+    // Flip back ON so the remainder of the spec exercises the visible
+    // + exploded path (same behaviour as before this PR, just reached
+    // from the other direction).
     await printableToggle.click();
     await expect(printableToggle).toHaveAttribute('aria-pressed', 'true');
     const visibleAfterToggle = await page.evaluate(() => {

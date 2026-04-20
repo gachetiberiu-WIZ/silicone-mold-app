@@ -115,8 +115,8 @@ test.describe('visual — printable parts preview + exploded view', () => {
     );
 
     // Wait for BOTH silicone AND printable-parts meshes to be live in
-    // the scene. Printable parts install at `group.visible=false`
-    // initially, but `scene.traverse` walks them regardless.
+    // the scene. Issue #67 flipped the install default to
+    // `group.visible=true`; `scene.traverse` would walk them either way.
     await page.waitForFunction(
       () => {
         type Obj = { userData?: Record<string, unknown> };
