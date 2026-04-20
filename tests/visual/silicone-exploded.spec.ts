@@ -179,11 +179,19 @@ test.describe('visual — silicone preview + exploded view', () => {
       { timeout: 2_000 },
     );
 
+    // `timeout: 30_000` overrides the Playwright 5 s default for
+    // `toHaveScreenshot`'s internal stability loop (back-to-back snapshots
+    // until two match pixel-exactly). Empirical: even with the tween
+    // idle-gate above, SwiftShader's first-frame raster of the translucent
+    // `DoubleSide + depthWrite: false` silicone material takes
+    // several seconds to converge on ubuntu-latest (issue #53 hypothesis
+    // #2). 30 s is well under the 90 s outer `setTimeout` above.
     await expect(page).toHaveScreenshot('silicone-exploded.png', {
       maxDiffPixelRatio: 0.01,
       threshold: 0.15,
       animations: 'disabled',
       fullPage: false,
+      timeout: 30_000,
     });
   });
 });
