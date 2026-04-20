@@ -300,6 +300,54 @@
         opacity: 0.5;
         cursor: not-allowed;
       }
+      /* ---- Drag-and-drop STL overlay (issue #27) ------------------------ */
+      /*
+       * Drawn as an inset outline on #app while a drag-with-files is live.
+       * `box-shadow: inset` sidesteps layout thrash (no border added, no
+       * reflow); the accent ring sits inside the window edge. The drop zone
+       * covers the entire app surface, so the highlight has to flow through
+       * the root wrapper — applying it to the viewport alone would miss
+       * drops over the sidebar / topbar.
+       */
+      #app.dropzone--active {
+        box-shadow: inset 0 0 0 3px var(--accent);
+      }
+      #app.dropzone--active #viewport::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        /* Subtle accent tint over the WebGL canvas so the user sees the
+           viewport acknowledging the drop target even when their cursor is
+           over the canvas rather than the chrome. */
+        background: rgba(74, 158, 255, 0.06);
+      }
+      /* ---- Error toast (issue #27 consolidates user-visible errors) ----- */
+      #app-error-toast {
+        position: fixed;
+        left: 50%;
+        bottom: 24px;
+        transform: translateX(-50%);
+        /* Reuse the parameter-form error red. Kept inline — promoting to a
+           --error-color token is the same trade-off called out in the
+           generate-block hint rules above: only a couple of sites. */
+        background: #e06c75;
+        color: #0b0d10;
+        padding: 8px 16px;
+        border-radius: 6px;
+        font-size: 13px;
+        font-weight: 500;
+        max-width: 480px;
+        text-align: center;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        opacity: 0;
+        pointer-events: none;
+        z-index: 1000;
+        transition: opacity 0.15s ease-out;
+      }
+      #app-error-toast.is-visible {
+        opacity: 1;
+      }
     </style>
   </head>
   <body>

@@ -47,5 +47,11 @@
     "ready": "Ready to generate",
     "noMaster": "Load an STL to begin.",
     "error": "Could not generate mold: {{reason}}"
+  },
+  "errors": {
+    "stlOnly": "Only .stl files are supported",
+    "singleFile": "Drop one file at a time",
+    "fileTooLarge": "File too large",
+    "readFailed": "Could not read file"
   }
 }
