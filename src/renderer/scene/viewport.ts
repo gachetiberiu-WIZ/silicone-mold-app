@@ -165,6 +165,15 @@ export interface MountedViewport {
   isPrintableExplodedIdle: () => boolean;
   /** Whether a printable-parts set is currently installed. */
   hasPrintableParts: () => boolean;
+  /**
+   * Issue #67 — whether the face-pick hover overlay is currently visible.
+   * Exposed as a test-hook read so E2E specs can assert the hover feedback
+   * without reaching through the lay-flat controller's internals. Returns
+   * `false` when picking mode is inactive or the cursor is off the master
+   * mesh; `true` when the cursor is over a triangle and the coplanar
+   * overlay has been populated.
+   */
+  isFaceHoverOverlayVisible: () => boolean;
   /** Stop RAF, detach listeners, dispose GPU resources, remove the canvas. */
   dispose: () => void;
 }
@@ -463,6 +472,7 @@ export function mount(container: HTMLElement): MountedViewport {
     arePrintablePartsVisible: () => sceneArePrintablePartsVisible(scene),
     isPrintableExplodedIdle: () => sceneIsPrintableExplodedIdle(scene),
     hasPrintableParts: () => sceneHasPrintableParts(scene),
+    isFaceHoverOverlayVisible: () => layFlat.getHoverOverlay().visible,
     dispose,
   };
 

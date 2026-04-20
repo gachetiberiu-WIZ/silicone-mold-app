@@ -301,12 +301,15 @@ function mountParameters(): void {
         }
         // Printable-parts are installed too (the orchestrator hands
         // them off after the silicone hand-off completes — see
-        // `setPrintableParts` in the scene deps above). The scene
-        // module starts the group hidden, so the toolbar toggle
-        // enables + starts OFF. User must click to reveal.
+        // `setPrintableParts` in the scene deps above). Issue #67 —
+        // the scene module now starts the group VISIBLE by default
+        // (Wave-4's default-OFF caused dogfood confusion: users
+        // clicked "Generate mold" and the mold box stayed hidden).
+        // So the toolbar toggle enables AND starts PRESSED, mirroring
+        // the scene's default-ON visibility state.
         if (printablePartsToggle) {
-          printablePartsToggle.setActive(false);
           printablePartsToggle.setEnabled(true);
+          printablePartsToggle.setActive(true);
         }
       },
       // Issue #64 — on every successful generate, flip the Generate

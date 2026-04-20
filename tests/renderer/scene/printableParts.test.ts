@@ -146,17 +146,19 @@ describe('setPrintableParts — basic install', () => {
     }
   });
 
-  test('group starts hidden (visible=false, default OFF per issue #62)', async () => {
+  test('group starts VISIBLE after install (issue #67: default ON)', async () => {
     const scene = createScene();
     const group = getGroup(scene);
 
-    // Pre-install: the scene factory sets visible=false.
+    // Pre-install: the scene factory sets visible=false (no parts yet).
     expect(group.visible).toBe(false);
 
     await setPrintableParts(scene, makePrintableSet(4));
-    // Post-install: still hidden.
-    expect(group.visible).toBe(false);
-    expect(arePrintablePartsVisible(scene)).toBe(false);
+    // Post-install (issue #67): default ON — users who click "Generate
+    // mold" see the mold. Reverses Wave-4's default-OFF which caused
+    // dogfood confusion ("no base was created").
+    expect(group.visible).toBe(true);
+    expect(arePrintablePartsVisible(scene)).toBe(true);
   });
 
   test('caches every input Manifold on the group userData', async () => {
@@ -250,15 +252,18 @@ describe('setPrintableParts — replacement (no accumulation)', () => {
     }
   });
 
-  test('replacement resets visibility to false even if prior set was shown', async () => {
+  test('replacement resets visibility to true (default ON, issue #67)', async () => {
     const scene = createScene();
     await setPrintableParts(scene, makePrintableSet(4));
-    setPrintablePartsVisible(scene, true);
-    expect(arePrintablePartsVisible(scene)).toBe(true);
+    // User flipped the toggle off in-between.
+    setPrintablePartsVisible(scene, false);
+    expect(arePrintablePartsVisible(scene)).toBe(false);
 
     await setPrintableParts(scene, makePrintableSet(4));
-    // Fresh install re-hides.
-    expect(arePrintablePartsVisible(scene)).toBe(false);
+    // Fresh install re-shows — the default-ON semantic applies to every
+    // install, not just the first one. A second Generate must produce
+    // the same "user sees the mold" experience as the first.
+    expect(arePrintablePartsVisible(scene)).toBe(true);
   });
 });
 
@@ -402,7 +407,10 @@ describe('setPrintablePartsExplodedView — tween', () => {
   test('while hidden, exploded state is applied WITHOUT starting a tween (perf)', async () => {
     const scene = createScene();
     await setPrintableParts(scene, makePrintableSet(4));
-    // Group stays hidden (we don't call setPrintablePartsVisible(true)).
+    // Issue #67 flipped the default to visible=true. Force hide here so
+    // we're exercising the "exploded-while-hidden perf short-circuit"
+    // code path rather than the tween-while-visible path.
+    setPrintablePartsVisible(scene, false);
 
     setPrintablePartsExplodedView(scene, true);
 
@@ -498,7 +506,10 @@ describe('isPrintableExplodedIdle — state machine', () => {
   test('returns true when group is hidden even if target fraction is 1', async () => {
     const scene = createScene();
     await setPrintableParts(scene, makePrintableSet(4));
-    // Never show. Still "idle" from the tween's perspective.
+    // Issue #67 default is visible=true. Force hide so the next
+    // setPrintablePartsExplodedView hits the "short-circuit while
+    // hidden" branch (no tween scheduled → still idle).
+    setPrintablePartsVisible(scene, false);
     setPrintablePartsExplodedView(scene, true);
     expect(isPrintableExplodedIdle(scene)).toBe(true);
   });

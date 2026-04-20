@@ -168,6 +168,19 @@
         background: var(--bg);
         /* The WebGL canvas inherits 100%/100% from its own inline styles. */
       }
+      /* Issue #67 — cursor becomes crosshair over the ENTIRE viewport
+         while face-picking is active. The lay-flat controller toggles
+         `.is-picking` on the viewport container when picking mode is
+         entered / exited. Redundant with the `canvas.style.cursor`
+         inline style the controller also sets (kept for back-compat
+         with existing tests), but this rule ensures the crosshair also
+         paints over the axes-gizmo scissor region in the corner. */
+      #viewport.is-picking {
+        cursor: crosshair;
+      }
+      #viewport.is-picking canvas {
+        cursor: crosshair;
+      }
 
       /* ---- Right sidebar: mold parameters ------------------------------- */
       #sidebar {
