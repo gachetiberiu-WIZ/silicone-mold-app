@@ -37,6 +37,7 @@ import {
 } from './master';
 import {
   clearSilicone as sceneClearSilicone,
+  isExplodedViewIdle as sceneIsExplodedViewIdle,
   setExplodedView as sceneSetExplodedView,
   setSilicone as sceneSetSilicone,
   type SiliconeResult,
@@ -108,6 +109,16 @@ export interface MountedViewport {
   clearSilicone: () => void;
   /** Toggle the exploded-view animation on/off. No-op when no silicone. */
   setExplodedView: (exploded: boolean) => void;
+  /**
+   * Whether the exploded-view RAF tween has settled. `true` when no
+   * silicone is installed, or the tween has completed / never started.
+   *
+   * Exists so visual-regression tests can gate `toHaveScreenshot` on a
+   * converged scene — the tween uses real `performance.now()` + `requestAnimationFrame`,
+   * which Playwright's `page.clock` fake doesn't intercept (issue #53).
+   * Read-only and safe to poll from `page.waitForFunction`.
+   */
+  isExplodedViewIdle: () => boolean;
   /** Stop RAF, detach listeners, dispose GPU resources, remove the canvas. */
   dispose: () => void;
 }
@@ -352,6 +363,7 @@ export function mount(container: HTMLElement): MountedViewport {
     setSilicone,
     clearSilicone: () => sceneClearSilicone(scene),
     setExplodedView: (exploded: boolean) => sceneSetExplodedView(scene, exploded),
+    isExplodedViewIdle: () => sceneIsExplodedViewIdle(scene),
     dispose,
   };
 

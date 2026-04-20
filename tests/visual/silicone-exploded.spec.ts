@@ -137,7 +137,16 @@ test.describe('visual — silicone preview + exploded view', () => {
     );
 
     // Flip exploded view on via the UI toggle + wait for the tween to
-    // complete (250 ms + slop).
+    // fully complete. The tween runs off real `performance.now()` +
+    // `requestAnimationFrame`, neither of which Playwright's `page.clock`
+    // fake intercepts (issue #53 root cause: `page.clock.runFor(400)`
+    // below doesn't advance the scene's wall-clock RAF loop at all).
+    // Instead, we gate on the viewport's `isExplodedViewIdle()` hook —
+    // which reads the silicone module's `state.rafId === 0 && state.tweenStart_ms === null`
+    // — so the screenshot only fires once the halves have settled at
+    // their fraction=1 resting positions. `page.clock.runFor` still runs
+    // to flush any fake-clock-bound CSS transition the rest of the UI
+    // has in flight.
     await page.evaluate(() => {
       type Hooks = {
         explodedView?: { setEnabled: (v: boolean) => void };
@@ -155,11 +164,34 @@ test.describe('visual — silicone preview + exploded view', () => {
     });
     await page.clock.runFor(400);
 
+    // Wait for the RAF tween to converge. 2 s is ~8x the 250 ms tween
+    // duration — generous slop for a cold SwiftShader.
+    await page.waitForFunction(
+      () => {
+        type IdleHook = {
+          viewport?: { isExplodedViewIdle: () => boolean };
+        };
+        const hooks = (window as unknown as { __testHooks?: IdleHook })
+          .__testHooks;
+        return hooks?.viewport?.isExplodedViewIdle?.() === true;
+      },
+      undefined,
+      { timeout: 2_000 },
+    );
+
+    // `timeout: 30_000` overrides the Playwright 5 s default for
+    // `toHaveScreenshot`'s internal stability loop (back-to-back snapshots
+    // until two match pixel-exactly). Empirical: even with the tween
+    // idle-gate above, SwiftShader's first-frame raster of the translucent
+    // `DoubleSide + depthWrite: false` silicone material takes
+    // several seconds to converge on ubuntu-latest (issue #53 hypothesis
+    // #2). 30 s is well under the 90 s outer `setTimeout` above.
     await expect(page).toHaveScreenshot('silicone-exploded.png', {
       maxDiffPixelRatio: 0.01,
       threshold: 0.15,
       animations: 'disabled',
       fullPage: false,
+      timeout: 30_000,
     });
   });
 });
