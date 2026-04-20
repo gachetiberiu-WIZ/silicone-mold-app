@@ -1,0 +1,65 @@
+name: update linux visual goldens
+
+on:
+  workflow_dispatch:
+
+# One-shot chore: regenerate `tests/__screenshots__/linux-ci/` on the Linux
+# runner and commit it back to this branch. Runs ONLY on the
+# `chore/commit-linux-visual-goldens` branch so it cannot fire against
+# main. Delete this workflow in the same PR that merges the goldens.
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-linux-goldens-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PNPM_VERSION: "10.33.0"
+  NODE_VERSION: "22"
+
+jobs:
+  regen:
+    if: github.ref == 'refs/heads/chore/commit-linux-visual-goldens'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          ref: chore/commit-linux-visual-goldens
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Generate missing goldens (tests fail-with-write on first run)
+        run: pnpm test:visual --update-snapshots
+      - name: List new goldens
+        run: |
+          echo "linux-ci tree:"
+          find tests/__screenshots__/linux-ci -type f 2>/dev/null | sort
+          echo "total new PNGs: $(find tests/__screenshots__/linux-ci -type f -name '*.png' 2>/dev/null | wc -l)"
+      - name: Commit goldens back to branch
+        run: |
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add tests/__screenshots__/linux-ci
+          if git diff --cached --quiet; then
+            echo "No golden changes to commit."
+            exit 0
+          fi
+          git commit -m "chore(test): generate Linux CI visual-regression goldens"
+          git push origin chore/commit-linux-visual-goldens
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 3
