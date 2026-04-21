@@ -1,31 +1,34 @@
 // src/renderer/scene/silicone.ts
 //
-// Scene module owning the two silicone-half meshes produced by the
-// `generateSiliconeShell` generator (Phase 3d wave 1, issue #47). This
-// mirrors the `scene/master.ts` lifecycle pattern:
+// Scene module owning the silicone Manifold produced by the
+// `generateSiliconeShell` generator. Post-Wave-A (issue #69) the silicone
+// is a SINGLE mesh — the horizontal split + mating registration keys from
+// the pre-#69 two-halves-in-box pipeline are gone. This mirrors the
+// `scene/master.ts` + `scene/printableParts.ts` lifecycle pattern:
 //
-//   - one silicone-half pair live at a time,
-//   - `setSilicone(scene, halves)` disposes the previous pair (geometry,
-//     material, and Manifold `.delete()`) before installing the new one,
+//   - one silicone mesh live at a time,
+//   - `setSilicone(scene, {silicone})` disposes the previous mesh
+//     (geometry, material, and Manifold `.delete()`) before installing
+//     the new one,
 //   - `clearSilicone(scene)` is idempotent and safe on an empty group
 //     (used by every staleness signal: commit, reset, new-STL).
 //
 // Ownership handoff:
 //
 //   The caller (`generateOrchestrator.ts` on the happy path) passes in
-//   two freshly-generated Manifolds. From the moment `setSilicone` returns,
-//   THIS MODULE owns their lifetime — the caller must NOT `.delete()` them
-//   again. Eviction happens on the next `setSilicone` call, on any
-//   `clearSilicone` call, and on viewport teardown (future hook).
+//   one freshly-generated Manifold. From the moment `setSilicone`
+//   returns, THIS MODULE owns its lifetime — the caller must NOT
+//   `.delete()` it again. Eviction happens on the next `setSilicone`
+//   call, on any `clearSilicone` call, and on viewport teardown.
 //
-// Frame alignment (the non-obvious bit):
+// Frame alignment:
 //
-//   `generateSiliconeShell` applies the Master group's world matrix to the
-//   master Manifold INSIDE the generator, so the half-Manifolds it returns
-//   are ALREADY in the world frame. That means we render them at world
-//   origin with no group transform — no rotation, no translation. If we
-//   composed the Master group's transform on top, we'd double-apply it and
-//   the halves would drift away from the visible master.
+//   `generateSiliconeShell` applies the Master group's world matrix to
+//   the master Manifold INSIDE the generator, so the silicone Manifold
+//   it returns is ALREADY in the world frame. That means we render it at
+//   world origin with no group transform — no rotation, no translation.
+//   If we composed the Master group's transform on top, we'd double-
+//   apply it and the silicone would drift away from the visible master.
 //
 // Material:
 //
@@ -34,25 +37,21 @@
 //                           depthWrite: false, roughness: 0.6,
 //                           metalness: 0.0 })`
 //
-//   `0x4a9eff` matches the CSS `--accent` token — silicone reads as
-//   "app-blue translucent". `depthWrite: false` is the standard
-//   translucent-mesh dance: it avoids self-z-fighting between a pair of
-//   overlapping translucent bodies' front and back faces. No new colour
-//   tokens introduced.
-//
 // Exploded view:
 //
-//   The parting plane is always horizontal in v1 (`[0, 1, 0]` normal;
-//   see `src/geometry/generateMold.ts` step 4). Exploded offset is ±Y:
-//     offset = max(30, 0.2 * bboxHeight_mm)
-//   Tween over 250 ms via a lightweight RAF loop owned by this module.
-//   No new tween library — vanilla `performance.now` + clamp-to-[0,1].
+//   Post-Wave-A the silicone is one piece, so "exploded" now lifts the
+//   entire silicone mesh along +Y. Offset rule carries over from the
+//   pre-#69 halves pipeline: `max(30 mm, 0.2 * bboxHeight_mm)`. Printable
+//   parts (base, sides, cap) retain their own per-part radial/axial
+//   tweens in `printableParts.ts` — those are coordinated with this
+//   single-mesh lift so the overall assembly reads cleanly when both
+//   modules animate together.
 //
 // Test-hook surface:
 //
 //   No module-level hooks exposed here. Consumers go through `scene` +
-//   traversal (`userData.tag === 'silicone'`) — same contract master /
-//   lay-flat use. The siblings keep the test API surface small.
+//   traversal (`userData.tag === 'silicone-body'`) — same contract as
+//   the master / printable-parts modules.
 
 import {
   Box3,
@@ -69,20 +68,22 @@ import { manifoldToBufferGeometry } from '@/geometry/adapters';
 /** Tag on the silicone group created in `scene/index.ts`. */
 const SILICONE_GROUP_TAG = 'silicone';
 
-/** Per-mesh tags so tests can distinguish the two halves. */
-const SILICONE_UPPER_MESH_TAG = 'silicone-upper';
-const SILICONE_LOWER_MESH_TAG = 'silicone-lower';
+/**
+ * Tag on the single silicone mesh child. Post-Wave-A we have ONE mesh,
+ * not two halves, so the old upper / lower tags are gone. Tests + specs
+ * that traversed by those tags have been updated to use this one.
+ */
+const SILICONE_BODY_MESH_TAG = 'silicone-body';
 
 /**
- * `userData` keys where we cache the Manifolds so `clearSilicone` can
- * release them even if the Mesh nodes have been removed by some other
- * code path. Exported so future code (a dispose hook on viewport
- * teardown) can read the same slots.
+ * `userData` key where we cache the Manifold so `clearSilicone` can
+ * release it even if the Mesh has been removed by some other code path.
+ * Exported so future code (a dispose hook on viewport teardown) can read
+ * the same slot.
  */
-export const SILICONE_UPPER_MANIFOLD_KEY = 'siliconeUpperManifold';
-export const SILICONE_LOWER_MANIFOLD_KEY = 'siliconeLowerManifold';
+export const SILICONE_MANIFOLD_KEY = 'siliconeManifold';
 
-/** Default exploded-offset floor in mm (AC: `max(30, 0.2 * bboxHeight)`). */
+/** Default exploded-offset floor in mm (`max(30, 0.2 * bboxHeight)`). */
 const EXPLODED_OFFSET_FLOOR_MM = 30;
 /** Fraction of bbox-height used for the exploded-offset ceiling. */
 const EXPLODED_OFFSET_BBOX_FRACTION = 0.2;
@@ -90,28 +91,26 @@ const EXPLODED_OFFSET_BBOX_FRACTION = 0.2;
 const EXPLODED_TWEEN_MS = 250;
 
 /**
- * Shape returned by `setSilicone`. `bbox` is the world-space AABB of
- * the COMBINED halves (upper ∪ lower) computed from the Manifolds before
- * any exploded-view offset has been applied. Callers use it to frame the
- * camera over the master + silicone union.
+ * Shape returned by `setSilicone`. `bbox` is the world-space AABB of the
+ * silicone mesh computed from the Manifold before any exploded-view
+ * offset has been applied. Callers use it to frame the camera over the
+ * master + silicone union.
  */
 export interface SiliconeResult {
   readonly bbox: Box3;
-  readonly upperMesh: Mesh;
-  readonly lowerMesh: Mesh;
+  readonly mesh: Mesh;
 }
 
 /**
  * Internal record stashed on the silicone group's `userData` so
- * `setExplodedView` can locate the tween target + Y-resting positions
- * without re-traversing the scene graph on every RAF tick.
+ * `setExplodedView` can locate the tween target + rest position without
+ * re-traversing the scene graph on every RAF tick.
  */
 interface SiliconeState {
-  upperMesh: Mesh;
-  lowerMesh: Mesh;
-  /** Max +Y offset for the upper mesh (lower mesh uses −offsetMax). */
+  mesh: Mesh;
+  /** Max +Y offset applied at fraction=1. */
   offsetMax_mm: number;
-  /** Current exploded fraction in [0, 1]: 0 = collapsed, 1 = fully apart. */
+  /** Current exploded fraction in [0, 1]: 0 = collapsed, 1 = fully lifted. */
   currentFraction: number;
   /** Target exploded fraction; the tween walks `currentFraction` to this. */
   targetFraction: number;
@@ -126,11 +125,6 @@ interface SiliconeState {
 /** `userData` key on the silicone group where the state record lives. */
 const SILICONE_STATE_KEY = 'siliconeState';
 
-/**
- * Locate the silicone group in `scene` by its `userData.tag`. Returns
- * `null` if the scene skeleton is missing the group — caller treats that
- * as a developer error.
- */
 function findSiliconeGroup(scene: Scene): Group | null {
   for (const child of scene.children) {
     if (
@@ -143,11 +137,6 @@ function findSiliconeGroup(scene: Scene): Group | null {
   return null;
 }
 
-/**
- * Read (or null-out) the state record cached on the silicone group.
- * The record is populated inside `setSilicone` and cleared inside
- * `clearSilicone`.
- */
 function getState(group: Group): SiliconeState | null {
   const s = group.userData[SILICONE_STATE_KEY] as SiliconeState | undefined;
   return s ?? null;
@@ -160,10 +149,6 @@ function setState(group: Group, state: SiliconeState | null): void {
   }
 }
 
-/**
- * Dispose a mesh's GPU resources (geometry + material) and remove it from
- * its parent. Safe on a mesh without a parent (no-op on the removal half).
- */
 function disposeMesh(mesh: Mesh): void {
   mesh.geometry.dispose();
   const mat = mesh.material;
@@ -175,11 +160,6 @@ function disposeMesh(mesh: Mesh): void {
   if (mesh.parent) mesh.parent.remove(mesh);
 }
 
-/**
- * Release a cached Manifold on the group's userData and clear the slot.
- * Idempotent. `.delete()` releases the underlying WASM heap allocation —
- * dropping the JS reference without calling it would leak.
- */
 function disposeCachedManifold(group: Group, key: string): void {
   const cached = group.userData[key] as Manifold | undefined;
   if (cached) {
@@ -192,11 +172,6 @@ function disposeCachedManifold(group: Group, key: string): void {
   }
 }
 
-/**
- * Cancel any in-flight exploded-view tween. Safe to call on idle state.
- * Used inside `setSilicone` (we fully reset on every swap) and
- * `clearSilicone` (idempotent teardown).
- */
 function cancelTween(state: SiliconeState): void {
   if (state.rafId !== 0) {
     cancelAnimationFrame(state.rafId);
@@ -205,12 +180,6 @@ function cancelTween(state: SiliconeState): void {
   state.tweenStart_ms = null;
 }
 
-/**
- * Create the shared translucent silicone material. One fresh copy per
- * mesh so each is independently disposable — sharing would complicate
- * the per-half teardown path. At two halves × a few materials' worth of
- * uniforms, the memory cost is negligible.
- */
 function createSiliconeMaterial(): MeshStandardMaterial {
   return new MeshStandardMaterial({
     color: 0x4a9eff,
@@ -224,31 +193,18 @@ function createSiliconeMaterial(): MeshStandardMaterial {
 }
 
 /**
- * Compute the world-space AABB of the combined halves from the halves'
- * BufferGeometries. We trust manifold-3d's `boundingBox()` but take it
- * from the BufferGeometry post-conversion for consistency with the
- * rendered mesh (the generator applied the view transform to the
- * Manifold so both are in world frame).
+ * Compute the world-space AABB of the silicone mesh from its
+ * BufferGeometry.
  */
-function unionBbox(upperMesh: Mesh, lowerMesh: Mesh): Box3 {
+function meshBbox(mesh: Mesh): Box3 {
+  mesh.geometry.computeBoundingBox();
   const box = new Box3();
-  upperMesh.geometry.computeBoundingBox();
-  lowerMesh.geometry.computeBoundingBox();
-  if (upperMesh.geometry.boundingBox) {
-    box.union(upperMesh.geometry.boundingBox);
-  }
-  if (lowerMesh.geometry.boundingBox) {
-    box.union(lowerMesh.geometry.boundingBox);
+  if (mesh.geometry.boundingBox) {
+    box.copy(mesh.geometry.boundingBox);
   }
   return box;
 }
 
-/**
- * Resolve the exploded-offset distance for a given combined bbox. Applies
- * the AC rule: `max(30 mm, 0.2 * bboxHeight)`. The bbox-height is the Y
- * extent of the combined silicone AABB — for a horizontal parting plane
- * the halves sit stacked along Y, so this is the natural metric.
- */
 function resolveExplodedOffset(bbox: Box3): number {
   const heightY = Math.max(0, bbox.max.y - bbox.min.y);
   return Math.max(
@@ -258,36 +214,17 @@ function resolveExplodedOffset(bbox: Box3): number {
 }
 
 /**
- * Apply a fractional exploded offset to the half meshes. `fraction = 0`
- * collapses both halves to y = 0 (resting); `fraction = 1` pushes the
- * upper half to `+offsetMax` and the lower half to `−offsetMax` along Y.
- *
- * Writing `mesh.position.y` is the group-level-transform rule applied to
- * the mesh itself — we never mutate the BufferGeometry vertex data. The
- * halves share a silicone group that always stays at world origin, so
- * the mesh's local Y offset equals the world displacement.
+ * Apply a fractional exploded offset to the silicone mesh. `fraction = 0`
+ * collapses it back to rest (y = 0); `fraction = 1` lifts it by
+ * `+offsetMax` along Y.
  */
 function applyFraction(state: SiliconeState, fraction: number): void {
   const clamped = Math.max(0, Math.min(1, fraction));
   state.currentFraction = clamped;
-  state.upperMesh.position.y = clamped * state.offsetMax_mm;
-  state.lowerMesh.position.y = -clamped * state.offsetMax_mm;
+  state.mesh.position.y = clamped * state.offsetMax_mm;
 }
 
-/**
- * Kick off (or update) an exploded-view tween toward `targetFraction`.
- * Uses a lightweight RAF loop owned by this module — no external tween
- * library. Reversing mid-flight is handled by snapshotting
- * `tweenStartFraction` at the moment the new target is set.
- *
- * Linear easing — the tween is short (250 ms) and the motion is along a
- * single axis, so the lack of easing is imperceptible. Keeping it linear
- * also makes the math testable without a timing harness.
- */
 function startTween(state: SiliconeState, targetFraction: number): void {
-  // Cancel any previous tween and re-seed from the CURRENT fraction so
-  // reversals are smooth: "mid-open" → "close" tweens from wherever the
-  // halves actually are, not from 1 (or 0).
   cancelTween(state);
   state.targetFraction = targetFraction;
   state.tweenStartFraction = state.currentFraction;
@@ -312,56 +249,47 @@ function startTween(state: SiliconeState, targetFraction: number): void {
 }
 
 /**
- * Install a freshly-generated pair of silicone half-Manifolds into the
- * scene's silicone group. Disposes any previously-installed pair first —
- * only one pair is live at a time, matching the `setMaster` invariant.
+ * Install a freshly-generated silicone Manifold into the scene's silicone
+ * group. Disposes any previously-installed mesh first — only one is live
+ * at a time, matching the `setMaster` / `setPrintableParts` invariant.
  *
  * Ownership: from the moment this function returns successfully, the
- * scene owns both Manifolds. The caller MUST NOT `.delete()` them. The
- * next `setSilicone` call (or `clearSilicone`) evicts them via the same
+ * scene owns the Manifold. The caller MUST NOT `.delete()` it. The next
+ * `setSilicone` call (or `clearSilicone`) evicts it via the same
  * cached-handle path `scene/master.ts` uses.
  *
- * Failure mode: if either BufferGeometry adapter throws, we dispose any
- * partially-built state AND delete both Manifolds so the caller's
- * lifetime assumption ("ownership transferred, don't double-free") still
- * holds without leaking WASM memory.
+ * Failure mode: if the BufferGeometry adapter throws, we dispose any
+ * partially-built state AND delete the Manifold so the caller's lifetime
+ * assumption ("ownership transferred, don't double-free") still holds
+ * without leaking WASM memory.
  *
  * @throws If the scene is missing its silicone group (developer error).
  */
 export async function setSilicone(
   scene: Scene,
-  halves: { upper: Manifold; lower: Manifold },
+  payload: { silicone: Manifold },
 ): Promise<SiliconeResult> {
   const group = findSiliconeGroup(scene);
   if (!group) {
-    // Ownership transfer hasn't happened yet; dispose the caller's
-    // Manifolds so the error path doesn't leak WASM heap.
-    try { halves.upper.delete(); } catch { /* already dead */ }
-    try { halves.lower.delete(); } catch { /* already dead */ }
+    try { payload.silicone.delete(); } catch { /* already dead */ }
     throw new Error(
       'setSilicone: scene is missing its silicone group (userData.tag === "silicone"). ' +
         'createScene() must have run first.',
     );
   }
 
-  // Build display geometries for both halves FIRST, before touching the
-  // existing children. If the adapter throws on one of them, we never
-  // entered the "swap in progress" state — easy recovery.
-  let upperGeom;
-  let lowerGeom;
+  // Build display geometry FIRST, before touching the existing children.
+  // If the adapter throws, we never entered the "swap in progress"
+  // state — easy recovery.
+  let geom;
   try {
-    upperGeom = await manifoldToBufferGeometry(halves.upper);
-    lowerGeom = await manifoldToBufferGeometry(halves.lower);
+    geom = await manifoldToBufferGeometry(payload.silicone);
   } catch (err) {
-    // Ownership transfer never completes on the error branch — dispose
-    // both Manifolds and anything we'd already built.
-    if (upperGeom) upperGeom.dispose();
-    try { halves.upper.delete(); } catch { /* already dead */ }
-    try { halves.lower.delete(); } catch { /* already dead */ }
+    try { payload.silicone.delete(); } catch { /* already dead */ }
     throw err;
   }
 
-  // Now swap. Tear down the previous pair (meshes + manifolds + tween)
+  // Now swap. Tear down the previous mesh + manifold + tween
   // atomically before installing the new one.
   const prev = getState(group);
   if (prev) cancelTween(prev);
@@ -369,32 +297,24 @@ export async function setSilicone(
   for (const child of existing) {
     if (child instanceof Mesh) disposeMesh(child);
   }
-  disposeCachedManifold(group, SILICONE_UPPER_MANIFOLD_KEY);
-  disposeCachedManifold(group, SILICONE_LOWER_MANIFOLD_KEY);
+  disposeCachedManifold(group, SILICONE_MANIFOLD_KEY);
   setState(group, null);
 
-  // Install the new meshes. One material instance per mesh so per-half
-  // disposal is independent.
-  const upperMesh = new Mesh(upperGeom, createSiliconeMaterial());
-  upperMesh.userData['tag'] = SILICONE_UPPER_MESH_TAG;
-  const lowerMesh = new Mesh(lowerGeom, createSiliconeMaterial());
-  lowerMesh.userData['tag'] = SILICONE_LOWER_MESH_TAG;
-  group.add(upperMesh);
-  group.add(lowerMesh);
+  // Install the new mesh.
+  const mesh = new Mesh(geom, createSiliconeMaterial());
+  mesh.userData['tag'] = SILICONE_BODY_MESH_TAG;
+  group.add(mesh);
 
-  // Cache the Manifolds on the group so `clearSilicone` (and future
+  // Cache the Manifold on the group so `clearSilicone` (and future
   // disposal paths) can release WASM memory without needing the caller
-  // to hold onto them.
-  group.userData[SILICONE_UPPER_MANIFOLD_KEY] = halves.upper;
-  group.userData[SILICONE_LOWER_MANIFOLD_KEY] = halves.lower;
+  // to hold onto it.
+  group.userData[SILICONE_MANIFOLD_KEY] = payload.silicone;
 
-  // Combined world-space bbox + exploded-offset computation.
-  const bbox = unionBbox(upperMesh, lowerMesh);
+  const bbox = meshBbox(mesh);
   const offsetMax_mm = resolveExplodedOffset(bbox);
 
   const state: SiliconeState = {
-    upperMesh,
-    lowerMesh,
+    mesh,
     offsetMax_mm,
     currentFraction: 0,
     targetFraction: 0,
@@ -404,19 +324,20 @@ export async function setSilicone(
   };
   setState(group, state);
 
-  // Fresh halves render collapsed (fraction=0). Explicitly apply to pin
-  // the initial Y — positions default to zero on a fresh Mesh, but we
-  // assert via the test the invariant holds.
+  // Fresh silicone renders collapsed (fraction=0). Explicitly apply to
+  // pin the initial Y — positions default to zero on a fresh Mesh, but
+  // we assert via the test that the invariant holds.
   applyFraction(state, 0);
 
-  return { bbox, upperMesh, lowerMesh };
+  return { bbox, mesh };
 }
 
 /**
- * Remove both silicone halves from the scene, dispose their GPU resources,
- * and `.delete()` the paired Manifolds. Idempotent and safe to call on a
- * scene that has no silicone installed — every staleness signal (commit,
- * reset, new-STL, viewport teardown) routes through this one function.
+ * Remove the silicone mesh from the scene, dispose its GPU resources,
+ * and `.delete()` the cached Manifold. Idempotent and safe to call on
+ * a scene that has no silicone installed — every staleness signal
+ * (commit, reset, new-STL, viewport teardown) routes through this one
+ * function.
  */
 export function clearSilicone(scene: Scene): void {
   const group = findSiliconeGroup(scene);
@@ -427,20 +348,14 @@ export function clearSilicone(scene: Scene): void {
   for (const child of existing) {
     if (child instanceof Mesh) disposeMesh(child);
   }
-  disposeCachedManifold(group, SILICONE_UPPER_MANIFOLD_KEY);
-  disposeCachedManifold(group, SILICONE_LOWER_MANIFOLD_KEY);
+  disposeCachedManifold(group, SILICONE_MANIFOLD_KEY);
   setState(group, null);
 }
 
 /**
- * Toggle the exploded-view state. `true` animates the halves apart over
- * ~250 ms; `false` collapses them back. No-op when no silicone is
- * installed — the toggle's enabled-gate in the UI prevents that path
- * in production, but we short-circuit here for defence-in-depth.
- *
- * Mid-flight toggles are supported: the tween re-seeds from the current
- * fraction so a user who flips the toggle back before the animation
- * completes doesn't see a snap.
+ * Toggle the exploded-view state. `true` animates the silicone mesh
+ * upward over ~250 ms; `false` collapses it back. No-op when no silicone
+ * is installed.
  */
 export function setExplodedView(scene: Scene, exploded: boolean): void {
   const group = findSiliconeGroup(scene);
@@ -450,10 +365,7 @@ export function setExplodedView(scene: Scene, exploded: boolean): void {
   startTween(state, exploded ? 1 : 0);
 }
 
-/**
- * Whether silicone is currently installed. Used by the toolbar toggle's
- * enable/disable wiring — `true` when there's something worth exploding.
- */
+/** Whether silicone is currently installed. */
 export function hasSilicone(scene: Scene): boolean {
   const group = findSiliconeGroup(scene);
   if (!group) return false;
@@ -462,16 +374,14 @@ export function hasSilicone(scene: Scene): boolean {
 
 /**
  * Whether the exploded-view tween is currently idle (no RAF in flight).
- * Returns `true` when no silicone is installed at all, or when the installed
- * pair's tween has completed (or never started).
+ * Returns `true` when no silicone is installed at all, or when the
+ * installed mesh's tween has completed (or never started).
  *
  * Used by visual-regression tests to gate `toHaveScreenshot` on a stable
  * scene — the tween runs off real-wall-clock `performance.now()` and
- * `requestAnimationFrame`, neither of which Playwright's `page.clock` fake
- * intercepts, so tests can't fast-forward it. Reading this hook lets a spec
- * `waitForFunction` until the scene has fully converged before snapshotting.
- *
- * Read-only: this function never mutates scene state. It's safe to poll.
+ * `requestAnimationFrame`, neither of which Playwright's `page.clock`
+ * fake intercepts, so tests can't fast-forward it. Read-only: this
+ * function never mutates scene state. Safe to poll.
  */
 export function isExplodedViewIdle(scene: Scene): boolean {
   const group = findSiliconeGroup(scene);

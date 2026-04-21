@@ -104,13 +104,13 @@ export interface MountedViewport {
    */
   isOrientationCommitted: () => boolean;
   /**
-   * Install a freshly-generated pair of silicone halves (issue #47).
-   * Transfers ownership of the Manifolds to the scene — caller must NOT
-   * `.delete()` them after this call. After installing, re-frames the
+   * Install the freshly-generated silicone Manifold (Wave-A single-body
+   * contract, issue #69). Transfers ownership to the scene — caller must
+   * NOT `.delete()` it after this call. After installing, re-frames the
    * camera to the union of the master + silicone bbox so the full
    * result is visible.
    */
-  setSilicone: (halves: { upper: Manifold; lower: Manifold }) => Promise<SiliconeResult>;
+  setSilicone: (payload: { silicone: Manifold }) => Promise<SiliconeResult>;
   /**
    * Tear down any silicone currently in the scene and release the paired
    * Manifolds. Idempotent. Wired to every staleness signal (commit,
@@ -285,21 +285,21 @@ export function mount(container: HTMLElement): MountedViewport {
   });
 
   /**
-   * Install a fresh pair of silicone half-Manifolds into the scene. After
-   * the scene-side adapter finishes, re-frame the camera to the union of
-   * the master group's bbox and the silicone bbox — so the user sees the
-   * whole result without a manual zoom-out (issue #47 AC).
+   * Install a fresh silicone Manifold (Wave-A single-body contract) into
+   * the scene. After the scene-side adapter finishes, re-frame the camera
+   * to the union of the master group's bbox and the silicone bbox — so
+   * the user sees the whole result without a manual zoom-out.
    *
-   * Ownership: transfers both Manifolds to the scene module. The caller
-   * (orchestrator happy-path) must NOT `.delete()` them after this
-   * resolves. On a throw, `scene/silicone.ts::setSilicone` disposes both
-   * halves before re-throwing, so the error branch preserves the
+   * Ownership: transfers the Manifold to the scene module. The caller
+   * (orchestrator happy-path) must NOT `.delete()` it after this
+   * resolves. On a throw, `scene/silicone.ts::setSilicone` disposes the
+   * Manifold before re-throwing, so the error branch preserves the
    * lifetime contract without a second dispose here.
    */
   const setSilicone = async (
-    halves: { upper: Manifold; lower: Manifold },
+    payload: { silicone: Manifold },
   ): Promise<SiliconeResult> => {
-    const installed = await sceneSetSilicone(scene, halves);
+    const installed = await sceneSetSilicone(scene, payload);
 
     // Union the silicone bbox with the master group's world-space bbox.
     // `Box3.setFromObject(masterGroup)` is fine here because the master

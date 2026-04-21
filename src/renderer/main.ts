@@ -285,14 +285,14 @@ function mountParameters(): void {
       // orchestrator's stale-drop + error paths still `.delete()` them
       // because the scene never received them in those cases.
       scene: {
-        setSilicone: (halves) => vp.setSilicone(halves),
+        setSilicone: (payload) => vp.setSilicone(payload),
         setPrintableParts: (parts) => vp.setPrintableParts(parts),
       },
       onSiliconeInstalled() {
         // Silicone is in the scene → the exploded-view toggle can be
         // used. Start collapsed (setActive(false)) because every fresh
-        // generate resets the state — the scene module installs halves
-        // with currentFraction = 0. The UI-layer `explodedViewActive`
+        // generate resets the state — the scene module installs the
+        // mesh with currentFraction = 0. The UI-layer `explodedViewActive`
         // flag also resets: a new generate cycle starts collapsed.
         explodedViewActive = false;
         if (explodedView) {
