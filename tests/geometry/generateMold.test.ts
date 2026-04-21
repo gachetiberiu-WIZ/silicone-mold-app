@@ -163,15 +163,17 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
         );
         const elapsed = performance.now() - t0;
         try {
-          // Perf budget. Wave-A dropped the sprue + vent + key CSG steps,
-          // but Wave-B halved the default silicone thickness (5 mm vs
-          // 10 mm), which tightens the levelSet grid spacing
+          // Perf budget. Wave-B halved the default silicone thickness
+          // (5 mm vs 10 mm), which tightens the levelSet grid spacing
           // (`max(1.5 mm, silicone/4)` = 1.5 mm now, down from 2.5 mm).
           // The grid-cell count scales ~n³ so the SDF sweep is the
-          // dominant cost; net pipeline wall-clock is similar to pre-#69
-          // or a touch slower depending on master surface complexity.
-          // Keep the 6 500 ms bound from issue #55 — the deleted CSG
-          // steps accounted for ~100–200 ms which is inside CI variance.
+          // dominant cost; Wave-A dropped sprue + vent + key CSG steps
+          // (~100-200 ms) but the net pipeline is slower than pre-#69
+          // because of the tighter grid. Observed CI wall-clock:
+          // ~7.3 s on ubuntu-latest (first Wave-A run). Keep the bound
+          // at 8500 ms (± ~15% headroom over observed CI) — local Win
+          // is typically ~2.5 s, so this only catches ~3× regressions
+          // on the SDF loop.
           //
           // Skipped entirely under V8 coverage instrumentation (coverage
           // slows the closure-heavy SDF hot loop ~7×).
@@ -182,7 +184,7 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
           ).__vitest_worker__;
           const coverageEnabled = !!worker?.config?.coverage?.enabled;
           if (!coverageEnabled) {
-            expect(elapsed).toBeLessThan(6500);
+            expect(elapsed).toBeLessThan(8500);
           }
 
           expect(isManifold(result.silicone)).toBe(true);
