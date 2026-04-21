@@ -98,6 +98,26 @@ export const LAY_FLAT_COMMITTED_EVENT = 'lay-flat-committed';
 const NORMAL_QUAD_SIZE_MM = 15;
 
 /**
+ * Maximum pointer travel (in CSS pixels) between `pointerdown` and
+ * `pointerup` for the up event to still count as a "click" that commits a
+ * face.  Larger travel is treated as a drag (OrbitControls rotate / pan)
+ * and the commit is silently dropped.
+ *
+ * Why this exists: the DOM `click` event, which this controller originally
+ * listened for, is suppressed by Chromium whenever the pointer moves more
+ * than ~5 px between down and up — any tiny hand-tremor during a click
+ * would cause the commit to be dropped and the user would see no
+ * feedback.  Listening to `pointerdown`/`pointerup` directly (issue #80
+ * dogfood) + gating on travel distance gives us a deterministic commit
+ * threshold we control instead of relying on Chromium's heuristic.
+ *
+ * 6 px is a touch above Chromium's own threshold so a commit that WOULD
+ * have fired a `click` still commits here; it's well below the distance
+ * a user would call "a drag" on a 1920-px-wide canvas.
+ */
+const CLICK_DRAG_THRESHOLD_PX = 6;
+
+/**
  * Angle tolerance (cosine) for coplanar flood-fill during hover (issue #67).
  * `cos(2°) ≈ 0.99939` — two triangles whose LOCAL normals dot above this
  * threshold are treated as coplanar. The mini-figurine fixture's flat
@@ -722,22 +742,78 @@ export function createLayFlatController(
     hideWidgets();
   }
 
-  function onClick(ev: PointerEvent): void {
+  // --- Click-vs-drag gate (issue #80 dogfood) ------------------------------
+  //
+  // Arm on `pointerdown` (left button over the canvas); commit on
+  // `pointerup` only if the pointer hasn't travelled more than
+  // CLICK_DRAG_THRESHOLD_PX CSS pixels AND the up landed on the same
+  // canvas.  Replaces the `click` listener — Chromium suppresses `click`
+  // when the down→up travel exceeds ~5 px, which was silently dropping
+  // commits on anyone whose hand twitched during a pick.
+  let downArmed = false;
+  let downX = 0;
+  let downY = 0;
+
+  function onPointerDown(ev: PointerEvent): void {
     if (!active) return;
-    // Only primary-button clicks commit. Right-drag is OrbitControls pan —
-    // we must not hijack it.
+    if (ev.button !== 0) {
+      // Non-primary button (e.g. right-drag → OrbitControls pan). Keep
+      // the armed flag as-is — a parallel primary-button click isn't
+      // possible (single pointer), so we simply don't re-arm here.
+      return;
+    }
+    if (ev.target !== canvas) {
+      // Pointer down originated outside our canvas — don't claim it.
+      return;
+    }
+    downArmed = true;
+    downX = ev.clientX;
+    downY = ev.clientY;
+  }
+
+  function onPointerUp(ev: PointerEvent): void {
+    if (!active) return;
+    if (!downArmed) return;
+    downArmed = false;
     if (ev.button !== 0) return;
+    if (ev.target !== canvas) {
+      // Up landed off-canvas (user dragged off the viewport). Not a click.
+      return;
+    }
+    const dx = ev.clientX - downX;
+    const dy = ev.clientY - downY;
+    if (Math.hypot(dx, dy) > CLICK_DRAG_THRESHOLD_PX) {
+      // Treat as a drag (OrbitControls rotate) — don't commit.
+      return;
+    }
 
     const mesh = getMasterMesh();
     if (!mesh) return;
 
-    // Re-pick at the click position so the commit acts on whatever's under
-    // the cursor at the moment of click — not whatever pointermove last saw,
-    // which could be one frame behind. Feels tighter.
+    // Re-pick at the up position so the commit acts on whatever's under
+    // the cursor at the moment of release — not whatever pointermove
+    // last saw, which could be one frame behind. Feels tighter.
     const pick = pickFaceUnderPointer(ev, canvas, camera, mesh);
     if (!pick) return;
 
     commit(pick, mesh);
+  }
+
+  /**
+   * OrbitControls fires `change` on every camera adjustment (rotate / pan /
+   * zoom). While picking mode is active we cache the last pointer position
+   * + last-seed-tri so repeated hovers over the same face can skip the
+   * raycast + flood-fill. Those caches become STALE the instant the camera
+   * moves — the cursor is in the same CSS pixel but now points at a
+   * different triangle.  Without this invalidation the hover overlay would
+   * still highlight the previous face until the user wiggled the mouse to
+   * invalidate it by hand.  Issue #80 dogfood.
+   */
+  function onControlsChange(): void {
+    if (!active) return;
+    lastPointerX = Number.NaN;
+    lastPointerY = Number.NaN;
+    lastHoverSeedTri = -1;
   }
 
   function onKeyDown(ev: KeyboardEvent): void {
@@ -873,8 +949,16 @@ export function createLayFlatController(
     if (viewportEl) viewportEl.classList.add(VIEWPORT_PICKING_CLASS);
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerleave', onPointerLeave);
-    canvas.addEventListener('click', onClick);
+    canvas.addEventListener('pointerdown', onPointerDown);
+    // `pointerup` goes on the window so a release that drifts off the
+    // canvas (mid-drag) still clears the armed flag — otherwise the next
+    // real click over the canvas would be ignored because `downArmed`
+    // was never reset.
+    window.addEventListener('pointerup', onPointerUp);
     window.addEventListener('keydown', onKeyDown);
+    // Invalidate the hover-pointer + seed-tri caches whenever the camera
+    // moves — the same CSS-pixel now points at a different triangle.
+    controls.addEventListener('change', onControlsChange);
     emitActiveChanged();
   }
 
@@ -886,13 +970,16 @@ export function createLayFlatController(
     if (viewportEl) viewportEl.classList.remove(VIEWPORT_PICKING_CLASS);
     canvas.removeEventListener('pointermove', onPointerMove);
     canvas.removeEventListener('pointerleave', onPointerLeave);
-    canvas.removeEventListener('click', onClick);
+    canvas.removeEventListener('pointerdown', onPointerDown);
+    window.removeEventListener('pointerup', onPointerUp);
     window.removeEventListener('keydown', onKeyDown);
+    controls.removeEventListener('change', onControlsChange);
     hideWidgets();
     // Reset throttle state so the next enable starts clean.
     lastPointerX = Number.NaN;
     lastPointerY = Number.NaN;
     lastHoverSeedTri = -1;
+    downArmed = false;
     emitActiveChanged();
   }
 

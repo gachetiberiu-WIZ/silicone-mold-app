@@ -197,8 +197,15 @@ function buildScene(): {
   // OrbitControls is unused in the tests below — we only need a handle
   // with the right shape. A plain empty object satisfies the type because
   // `createLayFlatController` only touches `controls.update()` inside the
-  // RAF loop, which none of these tests reach.
-  controls: { update: () => void; dispose: () => void };
+  // RAF loop, which none of these tests reach. `enable()` also wires a
+  // `controls.addEventListener('change', …)` for hover-cache invalidation
+  // on orbit (issue #80 dogfood) — included here so the stub is callable.
+  controls: {
+    update: () => void;
+    dispose: () => void;
+    addEventListener: () => void;
+    removeEventListener: () => void;
+  };
 } {
   const scene = new Scene();
 
@@ -231,6 +238,12 @@ function buildScene(): {
       /* no-op */
     },
     dispose: () => {
+      /* no-op */
+    },
+    addEventListener: () => {
+      /* no-op */
+    },
+    removeEventListener: () => {
       /* no-op */
     },
   };
