@@ -61,7 +61,10 @@ import type { Manifold } from 'manifold-3d';
 import type { Matrix4 } from 'three';
 
 import type { MoldParameters } from '../state/parameters';
-import type { MoldGenerationResult } from '@/geometry/generateMold';
+import type {
+  MoldGenerationResult,
+  OnGeneratePhase,
+} from '@/geometry/generateMold';
 import { bumpGenerateEpoch, getGenerateEpoch } from './generateEpoch';
 
 /** Minimal topbar surface the orchestrator writes to. */
@@ -139,6 +142,18 @@ export interface OrchestratorSceneSink {
  */
 export type OrchestratorOnGenerateSuccess = () => void;
 
+/**
+ * Minimal progress-banner surface the orchestrator drives (issue #87
+ * Fix 1). The orchestrator feeds phase labels through this sink as
+ * `generateSiliconeShell` walks through silicone → shell → slicing →
+ * brims → slab. Optional on the interface so existing tests and any
+ * call-site that doesn't care about progress still work.
+ */
+export interface OrchestratorStatus {
+  /** Update / show the progress banner. `null` hides. */
+  setPhase(label: string | null): void;
+}
+
 /** Dependencies injected into the orchestrator factory. */
 export interface GenerateOrchestratorDeps {
   getMaster: () => Manifold | null;
@@ -148,10 +163,31 @@ export interface GenerateOrchestratorDeps {
     master: Manifold,
     parameters: MoldParameters,
     viewTransform: Matrix4,
+    onPhase?: OnGeneratePhase,
   ) => Promise<MoldGenerationResult>;
   topbar: OrchestratorTopbar;
   button: OrchestratorButton;
   scene?: OrchestratorSceneSink;
+  /**
+   * Progress-banner sink (issue #87 Fix 1). Optional so legacy tests
+   * and any other callers that don't care about progress can omit it.
+   * When provided, the orchestrator:
+   *   1. Forwards `onPhase(key)` from the generator into
+   *      `status.setPhase(translatedLabel)` before each heavy step.
+   *   2. Awaits a RAF tick so the DOM paints the updated label
+   *      before the next synchronous manifold op blocks the UI
+   *      thread.
+   *   3. Calls `setPhase(null)` on success, stale-drop, and error
+   *      paths so the banner never strands on the scene.
+   */
+  status?: OrchestratorStatus;
+  /**
+   * Translate a `GeneratePhase` key (`'silicone'` / `'shell'` / …)
+   * into a user-facing label. The default implementation returns
+   * the raw key; production wires `(key) => t('status.phase.' + key)`
+   * so the translated strings flow through i18n.
+   */
+  translatePhase?: (key: string) => string;
   onSiliconeInstalled?: (result: unknown) => void;
   onGenerateSuccess?: OrchestratorOnGenerateSuccess;
   bumpEpoch?: () => number;
@@ -191,6 +227,8 @@ export function createGenerateOrchestrator(
     topbar,
     button,
     scene,
+    status,
+    translatePhase,
     onSiliconeInstalled,
     onGenerateSuccess,
     bumpEpoch = bumpGenerateEpoch,
@@ -225,8 +263,37 @@ export function createGenerateOrchestrator(
       topbar.setPrintShellVolume?.(null);
       topbar.setBaseSlabVolume?.(null);
 
+      // Issue #87 Fix 1: build the onPhase callback that forwards
+      // each GeneratePhase into the status sink + yields to RAF so
+      // the DOM paints the label before the next synchronous
+      // manifold op starts. Using a closure over `status` so the
+      // happy / stale / error paths below can share the hide logic.
+      const onPhase = status
+        ? async (key: string): Promise<void> => {
+            const label = translatePhase ? translatePhase(key) : key;
+            status.setPhase(label);
+            // Yield to RAF so the DOM paints the new label before
+            // the next `levelSet` / boolean blocks the UI thread.
+            // happy-dom / node test envs without requestAnimationFrame
+            // degrade to a microtask hop — still a yield, just not
+            // a paint.
+            await new Promise<void>((resolve) => {
+              if (typeof requestAnimationFrame === 'function') {
+                requestAnimationFrame(() => resolve());
+              } else {
+                resolve();
+              }
+            });
+          }
+        : undefined;
+
       try {
-        const result = await generate(master, parameters, viewTransform);
+        const result = await generate(
+          master,
+          parameters,
+          viewTransform,
+          onPhase,
+        );
 
         if (epoch !== getEpoch()) {
           // Staleness drop: an invalidation (commit, reset, new STL) or a
@@ -236,6 +303,11 @@ export function createGenerateOrchestrator(
           safeDelete(result.silicone);
           for (const p of result.shellPieces) safeDelete(p);
           safeDelete(result.basePart);
+          // Clear the progress banner — the stale run had a phase
+          // label showing, and a later `run()` may or may not have
+          // already set a new one. Safe to hide: if a later run is
+          // in flight it'll re-show on its next `onPhase`.
+          status?.setPhase(null);
           return;
         }
 
@@ -313,13 +385,23 @@ export function createGenerateOrchestrator(
           onGenerateSuccess();
         }
       } catch (err) {
-        if (epoch !== getEpoch()) return;
+        if (epoch !== getEpoch()) {
+          // Late error from a stale run — hide any banner it left.
+          status?.setPhase(null);
+          return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         logger.error('[generate] failed:', err);
         button.setError(message);
       } finally {
         if (epoch === getEpoch()) {
           button.setBusy(false);
+          // Issue #87 Fix 1: every terminal path (success, stale,
+          // error) must hide the progress banner. Putting it in the
+          // `epoch === getEpoch()` branch means a stale run that
+          // resolves AFTER a newer run has taken over leaves the
+          // newer run's banner intact.
+          status?.setPhase(null);
         }
       }
     },

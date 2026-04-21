@@ -459,6 +459,34 @@ async function buildMasterSdf(
 
 
 /**
+ * Phase identifier emitted by `generateSiliconeShell` via its optional
+ * `onPhase` callback (issue #87 Fix 1). Used by the renderer to update
+ * a progress banner during the generate pipeline so the user sees
+ * something besides a frozen canvas on a 10–60 s run.
+ *
+ * Emitted at each phase boundary BEFORE the work for that phase begins;
+ * the callback caller can `await` a RAF tick between emissions so the
+ * DOM paints before the next synchronous manifold op blocks the UI
+ * thread.
+ */
+export type GeneratePhase =
+  | 'silicone'
+  | 'shell'
+  | 'slicing'
+  | 'brims'
+  | 'slab';
+
+/**
+ * Optional progress callback signature. Typed as `Promise<void> | void`
+ * so the orchestrator can return a RAF-yield promise and the generator
+ * will await it — that's what buys us "DOM paints between phases"
+ * without restructuring the pipeline into an async generator.
+ */
+export type OnGeneratePhase = (
+  phase: GeneratePhase,
+) => void | Promise<void>;
+
+/**
  * Compute the silicone body + the surface-conforming print shell + the
  * associated volumes for the given master Manifold and parameter set.
  *
@@ -475,11 +503,15 @@ async function buildMasterSdf(
  * @param master Master Manifold, owned by the caller. Not consumed.
  * @param parameters Current mold parameters.
  * @param viewTransform The Master group's current world matrix.
+ * @param onPhase Optional progress callback fired BEFORE each heavy
+ *   phase begins. The return value (sync or Promise) is awaited, so
+ *   the caller can yield to RAF between phases — see issue #87 Fix 1.
  */
 export async function generateSiliconeShell(
   master: Manifold,
   parameters: MoldParameters,
   viewTransform: Matrix4,
+  onPhase?: OnGeneratePhase,
 ): Promise<MoldGenerationResult> {
   // Defence-in-depth validation. The UI's parameters panel already clamps
   // to legal ranges, but this function is reachable from tests and any
@@ -657,6 +689,12 @@ export async function generateSiliconeShell(
       const siliconeBounds = unifiedBounds;
       const shellBounds = unifiedBounds;
 
+      // Issue #87 Fix 1: fire the per-phase progress callback BEFORE
+      // each heavy step starts. Awaiting the return value lets the
+      // caller yield to RAF so the progress banner repaints before
+      // the synchronous manifold op blocks the UI thread.
+      if (onPhase) await onPhase('silicone');
+
       // Step 3a: outer silicone shell via levelSet. `level = -siliconeThickness`
       // outsets the master by that distance.
       const siliconeOuter = toplevel.Manifold.levelSet(
@@ -722,6 +760,8 @@ export async function generateSiliconeShell(
           }
         }
         const tCavity = performance.now();
+
+        if (onPhase) await onPhase('shell');
 
         // Step 4a: SECOND levelSet for the print-shell outer at a larger
         // offset. Same SDF closure, bigger bounds to hold the bigger
@@ -796,6 +836,7 @@ export async function generateSiliconeShell(
               z: shellBbox.max[2],
             },
           };
+          if (onPhase) await onPhase('slicing');
           const rawPieces = sliceShellRadial(
             toplevel,
             printShellFull,
@@ -808,6 +849,7 @@ export async function generateSiliconeShell(
           printShellFull = undefined;
           const tSlice = performance.now();
 
+          if (onPhase) await onPhase('brims');
           // Add brim to each piece. `addBrim` consumes its input and
           // returns a fresh Manifold; we swap the array entry in-place
           // so the failure path can release all currently-owned pieces
@@ -845,6 +887,7 @@ export async function generateSiliconeShell(
           }
           const tBrim = performance.now();
 
+          if (onPhase) await onPhase('slab');
           // Step 6: Wave D base slab + plug. Slice the transformed
           // master at its lowest Y, offset the footprint twice (outer
           // slab ring, inner plug ring), extrude each, union into one

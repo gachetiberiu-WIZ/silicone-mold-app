@@ -107,7 +107,9 @@ describe('parameter panel — rendering', () => {
 
     // Post-#84 Wave-E+F defaults.
     expect(val('brimWidth')).toBe('10.0');
-    expect(val('brimThickness')).toBe('3.0');
+    // Issue #87 dogfood fix: default bumped 3 → 8 to match the
+    // default print-shell thickness.
+    expect(val('brimThickness')).toBe('8.0');
 
     // Angle (1 decimal).
     expect(val('draftAngle')).toBe('0.0');

@@ -15,7 +15,7 @@
 //   6. Non-finite / negative / zero offsets → clear.
 //   7. Idempotent on a scene with no offset active.
 
-import { beforeEach, describe, expect, test } from 'vitest';
+import { describe, expect, test } from 'vitest';
 
 import { createScene } from '@/renderer/scene/index';
 import {
