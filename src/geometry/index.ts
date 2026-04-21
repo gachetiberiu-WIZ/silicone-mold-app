@@ -25,24 +25,4 @@ export {
   type MoldGenerationResult,
 } from './generateMold';
 export { buildPrintableBox, SIDE_CUT_ANGLES, type PrintableBoxParts } from './printableBox';
-export {
-  GeometryError,
-  computeKeyDiameter,
-  computeKeyLayout,
-  keyholeDirectionForIndex,
-  resolveKeyOffsets,
-  stampRegistrationKeys,
-  type KeyholeRadialDirection,
-  type RegistrationKeyLayout,
-  type RegistrationKeysResult,
-  type RegistrationKeyStyle,
-} from './registrationKeys';
-export {
-  MIN_VENT_SEPARATION_MM,
-  SPRUE_Y_EPSILON_MM,
-  drillSprue,
-  drillVents,
-  selectVentCandidates,
-  type DrillSprueResult,
-  type DrillVentsResult,
-} from './sprueVent';
+export { CIRCULAR_SEGMENTS, verticalCylinder } from './primitives';
