@@ -81,6 +81,9 @@ import type { Box, Manifold, ManifoldToplevel, Vec3 } from 'manifold-3d';
 
 import type { MoldParameters } from '@/renderer/state/parameters';
 import { isManifold } from './adapters';
+import { SIDE_CUT_ANGLES } from './sideAngles';
+
+export { SIDE_CUT_ANGLES };
 
 /**
  * Hard whitelist of `sideCount` values we support at v1. Mirrors the
@@ -90,29 +93,6 @@ import { isManifold } from './adapters';
  * the renderer (tests, future CLI, etc).
  */
 const SUPPORTED_SIDE_COUNTS: ReadonlyArray<2 | 3 | 4> = Object.freeze([2, 3, 4]);
-
-/**
- * Radial cut angles (degrees, CCW from +X axis, looking down −Y) for each
- * supported `sideCount`. The mapping is load-bearing for reproducibility
- * of part layout and is exported so tests can pin exact values without
- * hard-coding them inline.
- *
- * The angles define the BOUNDARIES between sectors — side[i] occupies
- * the arc between SIDE_CUT_ANGLES[sideCount][i] and
- * SIDE_CUT_ANGLES[sideCount][(i+1) % sideCount], walking CCW.
- *
- * Decisions (from issue #50):
- *   - 4 sides: 45/135/225/315 — diagonals through corners; symmetric on a
- *     square, mirror-pair-identical on a rectangle.
- *   - 2 sides: 90/270 — cuts along +X/−X axis; long-axis pull-direction.
- *   - 3 sides: 30/150/270 — 120° apart, asymmetric sizing acceptable for
- *     v1 with a single-strategy two-halves-in-box mold.
- */
-export const SIDE_CUT_ANGLES: Readonly<Record<2 | 3 | 4, readonly number[]>> = Object.freeze({
-  2: Object.freeze([90, 270]),
-  3: Object.freeze([30, 150, 270]),
-  4: Object.freeze([45, 135, 225, 315]),
-});
 
 /**
  * Bundle of printable-box Manifolds produced for one generation pass.
