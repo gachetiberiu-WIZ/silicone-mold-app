@@ -1,4 +1,4 @@
-name: update linux visual goldens (one-shot)
+name: update linux visual goldens (round 3)
 on:
   push:
     branches:
@@ -27,7 +27,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add tests/__screenshots__/linux-ci
           if ! git diff --cached --quiet; then
-            git commit -m "chore(test): regen generate-button-states linux baselines (round 2)"
+            git commit -m "chore(test): regen linux baselines — dimensions panel on left (round 3)"
             git push
           else
             echo "no golden changes to commit"
