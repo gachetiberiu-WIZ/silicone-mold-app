@@ -81,6 +81,8 @@ export function mountParameterPanel(
     printShellThickness_mm: NumberFieldHandle;
     baseSlabThickness_mm: NumberFieldHandle;
     baseSlabOverhang_mm: NumberFieldHandle;
+    brimWidth_mm: NumberFieldHandle;
+    brimThickness_mm: NumberFieldHandle;
     sideCount: SelectFieldHandle<string>;
     draftAngle_deg: NumberFieldHandle;
   } = {
@@ -132,6 +134,30 @@ export function mountParameterPanel(
       initial: DEFAULT_PARAMETERS.baseSlabOverhang_mm,
       onCommit: (value) => store.update({ baseSlabOverhang_mm: value }),
     }),
+    brimWidth_mm: createNumberField({
+      id: 'brimWidth',
+      label: t('parameters.brimWidth'),
+      kind: 'length',
+      unitSymbol: null,
+      min: NUMERIC_CONSTRAINTS.brimWidth_mm.min,
+      max: NUMERIC_CONSTRAINTS.brimWidth_mm.max,
+      step: NUMERIC_CONSTRAINTS.brimWidth_mm.step,
+      integer: NUMERIC_CONSTRAINTS.brimWidth_mm.integer,
+      initial: DEFAULT_PARAMETERS.brimWidth_mm,
+      onCommit: (value) => store.update({ brimWidth_mm: value }),
+    }),
+    brimThickness_mm: createNumberField({
+      id: 'brimThickness',
+      label: t('parameters.brimThickness'),
+      kind: 'length',
+      unitSymbol: null,
+      min: NUMERIC_CONSTRAINTS.brimThickness_mm.min,
+      max: NUMERIC_CONSTRAINTS.brimThickness_mm.max,
+      step: NUMERIC_CONSTRAINTS.brimThickness_mm.step,
+      integer: NUMERIC_CONSTRAINTS.brimThickness_mm.integer,
+      initial: DEFAULT_PARAMETERS.brimThickness_mm,
+      onCommit: (value) => store.update({ brimThickness_mm: value }),
+    }),
     sideCount: createSelectField<string>({
       id: 'sideCount',
       label: t('parameters.sideCount'),
@@ -166,6 +192,8 @@ export function mountParameterPanel(
   form.appendChild(handles.printShellThickness_mm.element);
   form.appendChild(handles.baseSlabThickness_mm.element);
   form.appendChild(handles.baseSlabOverhang_mm.element);
+  form.appendChild(handles.brimWidth_mm.element);
+  form.appendChild(handles.brimThickness_mm.element);
   form.appendChild(handles.sideCount.element);
   form.appendChild(handles.draftAngle_deg.element);
 
@@ -191,6 +219,8 @@ export function mountParameterPanel(
     handles.printShellThickness_mm.setValue(p.printShellThickness_mm);
     handles.baseSlabThickness_mm.setValue(p.baseSlabThickness_mm);
     handles.baseSlabOverhang_mm.setValue(p.baseSlabOverhang_mm);
+    handles.brimWidth_mm.setValue(p.brimWidth_mm);
+    handles.brimThickness_mm.setValue(p.brimThickness_mm);
     handles.sideCount.setValue(String(p.sideCount));
     handles.draftAngle_deg.setValue(p.draftAngle_deg);
     resetBtn.disabled = store.isAtDefaults();
@@ -215,6 +245,8 @@ export function mountParameterPanel(
     handles.printShellThickness_mm.setUnitSystem(unit);
     handles.baseSlabThickness_mm.setUnitSystem(unit);
     handles.baseSlabOverhang_mm.setUnitSystem(unit);
+    handles.brimWidth_mm.setUnitSystem(unit);
+    handles.brimThickness_mm.setUnitSystem(unit);
   }
 
   return {
@@ -225,6 +257,8 @@ export function mountParameterPanel(
       handles.printShellThickness_mm.destroy();
       handles.baseSlabThickness_mm.destroy();
       handles.baseSlabOverhang_mm.destroy();
+      handles.brimWidth_mm.destroy();
+      handles.brimThickness_mm.destroy();
       handles.sideCount.destroy();
       handles.draftAngle_deg.destroy();
       resetBtn.remove();

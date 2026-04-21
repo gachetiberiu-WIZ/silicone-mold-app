@@ -100,7 +100,9 @@ import type { MoldParameters } from '@/renderer/state/parameters';
 import { SIDE_COUNT_OPTIONS } from '@/renderer/state/parameters';
 import { manifoldToBufferGeometry, isManifold } from './adapters';
 import { buildBaseSlab, BASE_SLAB_PLUG_HEIGHT_MM } from './baseSlab';
+import { addBrim } from './brim';
 import { initManifold } from './initManifold';
+import { sliceShellRadial } from './shellSlicer';
 
 /**
  * Error raised on invalid `MoldParameters` input to `generateSiliconeShell`
@@ -122,7 +124,7 @@ export class InvalidParametersError extends Error {
  * the caller. The caller MUST `.delete()` each of:
  *
  *   - `silicone`
- *   - `printShell`
+ *   - every `shellPieces[i]` (Wave E, issue #84)
  *   - `basePart`
  *
  * to release WASM heap memory. The input `master` Manifold is NOT
@@ -130,9 +132,9 @@ export class InvalidParametersError extends Error {
  * Master group's userData; see `src/renderer/scene/master.ts`).
  *
  * The orchestrator (`src/renderer/ui/generateOrchestrator.ts`) owns this
- * contract on the renderer side. On the happy path both the silicone and
- * the print-shell hand off to their scene sinks; on stale-drop / error
- * paths the orchestrator disposes each Manifold here.
+ * contract on the renderer side. On the happy path the silicone and the
+ * shell pieces hand off to their scene sinks; on stale-drop / error
+ * paths the orchestrator disposes every Manifold here.
  */
 export interface MoldGenerationResult {
   /**
@@ -141,13 +143,17 @@ export interface MoldGenerationResult {
    */
   readonly silicone: Manifold;
   /**
-   * Surface-conforming rigid print shell hugging the silicone outer
-   * surface. Open-top pour edge (trimmed at
-   * `master.max.y + siliconeThickness + 3 mm`) and bottom trim at
-   * `master.min.y - 2 mm` (Wave D — the shell wraps the base-slab plug).
-   * Caller owns; `.delete()` when done.
+   * Radially-sliced rigid print shell pieces (Wave E, issue #84) with
+   * brim flanges attached on each cut face (Wave F). `length` equals
+   * `parameters.sideCount`. The original surface-conforming shell hugs
+   * the silicone outer surface (open-top pour edge trimmed at
+   * `master.max.y + siliconeThickness + 3 mm`, bottom trim at
+   * `master.min.y - 2 mm` so the shell wraps the base-slab plug); it is
+   * then split into `sideCount` pieces by vertical half-space planes
+   * through the master's XZ center at the angles from `SIDE_CUT_ANGLES`.
+   * Caller owns each element; `.delete()` when done.
    */
-  readonly printShell: Manifold;
+  readonly shellPieces: readonly Manifold[];
   /**
    * Printable base slab with step-pocket interlock (Wave D, issue #82).
    * Flat slab under the shell + raised plug that locates the shell over
@@ -164,11 +170,17 @@ export interface MoldGenerationResult {
    */
   readonly resinVolume_mm3: number;
   /**
-   * Volume of the rigid print shell in mm³. Pre-computed once so
-   * downstream topbar / UI surfaces don't have to re-walk the Manifold
-   * to read it.
+   * Per-piece volume (mm³) of each shell piece in `shellPieces`, same
+   * order. Pre-computed once so downstream UIs don't re-walk the
+   * Manifolds.
    */
-  readonly printShellVolume_mm3: number;
+  readonly shellPiecesVolume_mm3: readonly number[];
+  /**
+   * Total shell volume (mm³) = sum of `shellPiecesVolume_mm3`. Backs
+   * the topbar's "Print shell" readout (plural pieces aggregated for
+   * display consistency with pre-Wave-E releases).
+   */
+  readonly totalShellVolume_mm3: number;
   /**
    * Volume of the printable base slab in mm³ (Wave D, issue #82). Pre-
    * computed once so the topbar can render it without re-walking.
@@ -509,6 +521,24 @@ export async function generateSiliconeShell(
         `must be a positive finite number`,
     );
   }
+  if (
+    !(parameters.brimWidth_mm > 0) ||
+    !Number.isFinite(parameters.brimWidth_mm)
+  ) {
+    throw new InvalidParametersError(
+      `generateSiliconeShell: brimWidth_mm=${parameters.brimWidth_mm} ` +
+        `must be a positive finite number`,
+    );
+  }
+  if (
+    !(parameters.brimThickness_mm > 0) ||
+    !Number.isFinite(parameters.brimThickness_mm)
+  ) {
+    throw new InvalidParametersError(
+      `generateSiliconeShell: brimThickness_mm=${parameters.brimThickness_mm} ` +
+        `must be a positive finite number`,
+    );
+  }
 
   const toplevel: ManifoldToplevel = await initManifold();
   assertManifold(master, 'input master');
@@ -633,7 +663,7 @@ export async function generateSiliconeShell(
       );
       const tSiliconeLevel = performance.now();
       let silicone: Manifold | undefined;
-      let printShell: Manifold | undefined;
+      let shellPieces: Manifold[] | undefined;
       let basePart: Manifold | undefined;
       try {
         assertManifold(siliconeOuter, 'silicone outer shell (post-levelSet)');
@@ -655,6 +685,7 @@ export async function generateSiliconeShell(
           -totalOffset,
         );
         const tShellLevel = performance.now();
+        let printShellFull: Manifold | undefined;
         try {
           assertManifold(shellOuter, 'print-shell outer (post-levelSet)');
 
@@ -685,8 +716,8 @@ export async function generateSiliconeShell(
             // shell drops over the plug and the plug's 0.2 mm horizontal
             // clearance locates it.
             const bottomY = masterBbox.min[1] - BASE_SLAB_PLUG_HEIGHT_MM;
-            printShell = shellTrimTop.trimByPlane([0, 1, 0], bottomY);
-            assertManifold(printShell, 'print-shell after bottom trim');
+            printShellFull = shellTrimTop.trimByPlane([0, 1, 0], bottomY);
+            assertManifold(printShellFull, 'print-shell after bottom trim');
           } finally {
             shellRaw.delete();
             if (shellTrimTop) shellTrimTop.delete();
@@ -694,7 +725,79 @@ export async function generateSiliconeShell(
 
           const tPrintShell = performance.now();
 
-          // Step 5: Wave D base slab + plug. Slice the transformed
+          // Step 5: Wave E + F — radial slice + brim. Capture the pre-
+          // slice shell's bounding box for the brim builder (brim Y
+          // span clamps to `[shellMinY+2, shellMaxY-2]`, radial extent
+          // derived from `shellOuterRadius = max |shellBbox - xzCenter|`
+          // along any XZ face). Then slice into `sideCount` pieces and
+          // union a brim onto each piece's cut face(s).
+          const shellBbox = printShellFull.boundingBox();
+          const xzCenter = {
+            x: (masterBbox.min[0] + masterBbox.max[0]) / 2,
+            z: (masterBbox.min[2] + masterBbox.max[2]) / 2,
+          };
+          const shellBboxWorld = {
+            min: {
+              x: shellBbox.min[0],
+              y: shellBbox.min[1],
+              z: shellBbox.min[2],
+            },
+            max: {
+              x: shellBbox.max[0],
+              y: shellBbox.max[1],
+              z: shellBbox.max[2],
+            },
+          };
+          const rawPieces = sliceShellRadial(
+            toplevel,
+            printShellFull,
+            parameters.sideCount,
+            xzCenter,
+          );
+          // The full shell is no longer needed — the pieces cover its
+          // volume minus trimming rounding.
+          printShellFull.delete();
+          printShellFull = undefined;
+          const tSlice = performance.now();
+
+          // Add brim to each piece. `addBrim` consumes its input and
+          // returns a fresh Manifold; we swap the array entry in-place
+          // so the failure path can release all currently-owned pieces
+          // in one sweep.
+          shellPieces = new Array<Manifold>(rawPieces.length);
+          try {
+            for (let i = 0; i < rawPieces.length; i++) {
+              const rawPiece = rawPieces[i] as Manifold;
+              // Null out the slot BEFORE addBrim so if it throws we
+              // don't double-delete (addBrim disposes its input on
+              // both success AND failure per contract).
+              rawPieces[i] = undefined as unknown as Manifold;
+              const brimmed = addBrim({
+                toplevel,
+                piece: rawPiece,
+                pieceIndex: i,
+                sideCount: parameters.sideCount,
+                shellBboxWorld,
+                xzCenter,
+                brimWidth_mm: parameters.brimWidth_mm,
+                brimThickness_mm: parameters.brimThickness_mm,
+              });
+              assertManifold(brimmed, `shell piece ${i} (post-brim)`);
+              shellPieces[i] = brimmed;
+            }
+          } catch (err) {
+            // Release any remaining raw pieces that haven't been
+            // handed to addBrim yet.
+            for (const rp of rawPieces) {
+              if (rp) {
+                try { rp.delete(); } catch { /* already dead */ }
+              }
+            }
+            throw err;
+          }
+          const tBrim = performance.now();
+
+          // Step 6: Wave D base slab + plug. Slice the transformed
           // master at its lowest Y, offset the footprint twice (outer
           // slab ring, inner plug ring), extrude each, union into one
           // watertight piece. Returns a fresh Manifold in our world
@@ -726,12 +829,16 @@ export async function generateSiliconeShell(
           // scene module + topbar) handle the empty case gracefully.
           const tBaseSlab = performance.now();
 
-          // Step 6: volumes. Resin identity (resin ≡ masterVolume) pinned
+          // Step 7: volumes. Resin identity (resin ≡ masterVolume) pinned
           // at 1e-9 relative — no sprue / vent channels contribute any
           // more.
           const siliconeVolume_mm3 = silicone.volume();
           const resinVolume_mm3 = master.volume();
-          const printShellVolume_mm3 = printShell.volume();
+          const shellPiecesVolume_mm3 = shellPieces.map((p) => p.volume());
+          const totalShellVolume_mm3 = shellPiecesVolume_mm3.reduce(
+            (sum, v) => sum + v,
+            0,
+          );
           const baseSlabVolume_mm3 = basePart.volume();
 
           const sdfStats = sdfHandles.stats;
@@ -751,7 +858,9 @@ export async function generateSiliconeShell(
               `cavity=${(tCavity - tSiliconeLevel).toFixed(1)} ` +
               `shell-levelset=${(tShellLevel - tCavity).toFixed(1)} ` +
               `shell-trim=${(tPrintShell - tShellLevel).toFixed(1)} ` +
-              `baseSlab-build=${(tBaseSlab - tPrintShell).toFixed(1)} ` +
+              `shell-slice=${(tSlice - tPrintShell).toFixed(1)} ` +
+              `shell-brims=${(tBrim - tSlice).toFixed(1)} ` +
+              `baseSlab-build=${(tBaseSlab - tBrim).toFixed(1)} ` +
               `total=${(tBaseSlab - t0).toFixed(1)} ` +
               `(edgeLength=${edgeLength.toFixed(2)} mm, ` +
               `sideCount=${parameters.sideCount}) ` +
@@ -763,36 +872,44 @@ export async function generateSiliconeShell(
           console.info(
             `[generateSiliconeShell] silicone=${siliconeVolume_mm3.toFixed(1)} mm³, ` +
               `resin=${resinVolume_mm3.toFixed(1)} mm³, ` +
-              `printShell=${printShellVolume_mm3.toFixed(1)} mm³, ` +
+              `shellPieces=${shellPieces.length} (total=${totalShellVolume_mm3.toFixed(1)} mm³), ` +
               `baseSlab=${baseSlabVolume_mm3.toFixed(1)} mm³ ` +
               `(siliconeThickness=${siliconeThickness} mm, ` +
               `printShellThickness=${shellThickness} mm, ` +
               `baseSlabThickness=${parameters.baseSlabThickness_mm} mm, ` +
               `baseSlabOverhang=${parameters.baseSlabOverhang_mm} mm, ` +
+              `brimWidth=${parameters.brimWidth_mm} mm, ` +
+              `brimThickness=${parameters.brimThickness_mm} mm, ` +
               `sideCount=${parameters.sideCount}, ` +
               `total=${(tBaseSlab - t0).toFixed(1)} ms)`,
           );
 
           return {
             silicone,
-            printShell,
+            shellPieces,
             basePart,
             siliconeVolume_mm3,
             resinVolume_mm3,
-            printShellVolume_mm3,
+            shellPiecesVolume_mm3,
+            totalShellVolume_mm3,
             baseSlabVolume_mm3,
           };
         } finally {
           shellOuter.delete();
+          if (printShellFull) printShellFull.delete();
         }
       } catch (err) {
         // On any failure between silicone allocation and return, release
         // every successfully-allocated Manifold so the caller never
         // inherits an un-owned WASM handle.
-        if (silicone && silicone !== printShell) {
-          silicone.delete();
+        if (silicone) silicone.delete();
+        if (shellPieces) {
+          for (const p of shellPieces) {
+            if (p) {
+              try { p.delete(); } catch { /* already dead */ }
+            }
+          }
         }
-        if (printShell) printShell.delete();
         if (basePart) basePart.delete();
         throw err;
       } finally {

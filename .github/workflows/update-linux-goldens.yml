@@ -1,0 +1,85 @@
+name: update linux visual goldens
+
+on:
+  push:
+    branches: [feat/geometry-slice-brim]
+  workflow_dispatch:
+
+# One-shot chore: regenerate the visual-regression goldens invalidated by
+# Waves E + F (issue #84):
+#
+#   - tests/__screenshots__/linux-ci/visual/sidebar-parameters.spec.ts-snapshots/
+#       sidebar-parameters-{defaults,inches}.png — two new rows (Brim
+#       width + Brim thickness) under the slab rows make the sidebar
+#       taller.
+#   - tests/__screenshots__/linux-ci/visual/printable-parts-exploded.spec.ts-snapshots/
+#       printable-parts-exploded.png — Wave E slices the print shell into
+#       N pieces (default 4). Wave F adds brim flanges. Exploded view now
+#       fans pieces RADIALLY (previously single +Y lift).
+#
+# Pattern copied from PRs #70 / #73 / #75 / #80 / #83. Branch-gated by
+# the `if:` guard below so it can only fire on this feature branch. MUST
+# be removed in the final commit of this PR — see CLAUDE.md / past PRs
+# on one-shot-workflow cleanup discipline.
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-linux-goldens-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PNPM_VERSION: "10.33.0"
+  NODE_VERSION: "22"
+
+jobs:
+  regen:
+    if: github.ref == 'refs/heads/feat/geometry-slice-brim'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          ref: feat/geometry-slice-brim
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Generate baselines (--update-snapshots)
+        continue-on-error: true
+        run: >
+          pnpm test:visual --update-snapshots --
+          tests/visual/sidebar-parameters.spec.ts
+          tests/visual/printable-parts-exploded.spec.ts
+      - name: List new goldens
+        run: |
+          for d in sidebar-parameters printable-parts-exploded; do
+            echo "--- $d ---"
+            find "tests/__screenshots__/linux-ci/visual/${d}.spec.ts-snapshots" -type f 2>/dev/null | sort
+          done
+          echo "total PNGs in __screenshots__: $(find tests/__screenshots__ -type f -name '*.png' 2>/dev/null | wc -l)"
+      - name: Commit baselines back to branch
+        run: |
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add tests/__screenshots__/linux-ci
+          if git diff --cached --quiet; then
+            echo "No golden changes to commit."
+            exit 0
+          fi
+          git commit -m "chore(test): regen Wave E+F linux baselines (sliced shell + brims + two new param rows)"
+          git push origin feat/geometry-slice-brim
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 3

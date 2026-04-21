@@ -1,9 +1,10 @@
 // tests/e2e/printable-preview.spec.ts
 //
-// End-to-end for issue #62 (updated for Wave C, issue #72): printable-
-// parts preview + exploded-view extension. Post-Wave-C the print shell
-// is a SINGLE surface-conforming mesh (no rectangular box / N sides /
-// top cap).
+// End-to-end for issue #62 (updated for Wave E+F, issue #84): printable-
+// parts preview + exploded-view extension. Post-Wave-E the print shell
+// is radially SLICED into N pieces (default sideCount=4 → 4 pieces)
+// each tagged `shell-piece-0..N-1`. Exploded view moves each piece
+// RADIALLY outward from the master's XZ center (not +Y).
 //
 // Flow:
 //   1. Launch app, stub the Open dialog to return the mini-figurine.
@@ -12,12 +13,12 @@
 //   4. Click Generate → wait for volumes to populate.
 //   5. Assert printable-parts toggle is enabled + pressed (default ON per
 //      issue #67 carry-forward).
-//   6. Single `print-shell` mesh exists in the scene.
+//   6. N `shell-piece-i` meshes + 1 `base-slab-mesh` exist in the scene.
 //   7. Toggle exploded-view ON → wait for BOTH idle signals (silicone
-//      + print-shell) → assert print-shell world-Y > +20 mm (shell
-//      lifted along +Y above silicone).
-//   8. Stale-invalidation: commit a different face → both preview
-//      groups clear AND both toggles revert to disabled.
+//      + printable-parts) → assert at least one shell piece has moved
+//      RADIALLY (XZ distance > 20 mm) from origin while its Y stays ~0.
+//   8. Stale-invalidation: commit a different face → every preview
+//      mesh clears AND both toggles revert to disabled.
 //
 // Generator budget on the mini-figurine is ~3-4 s post-Wave-C (two
 // levelSet passes against the same SDF); wait ceilings bumped to 20 s
@@ -140,14 +141,12 @@ async function commitSideFace(page: Page): Promise<void> {
 }
 
 /**
- * Count print-shell meshes in the scene. Post-Wave-C (issue #72) this
- * is a single surface-conforming mesh tagged `print-shell` — the
- * rectangular-box rectangular base/sides/top-cap tags are gone.
- * Returned as an object so the shape can extend in Wave D/E/F (base
- * slab, sliced shell pieces) without churning call sites.
+ * Count printable meshes in the scene. Post-Wave-E (issue #84) the
+ * print shell is radially sliced into N pieces each tagged
+ * `shell-piece-{i}`. The base slab is tagged `base-slab-mesh`.
  */
 async function countPrintableMeshes(page: Page): Promise<{
-  printShell: number;
+  shellPieces: number;
   baseSlab: number;
 }> {
   return page.evaluate(() => {
@@ -161,27 +160,28 @@ async function countPrintableMeshes(page: Page): Promise<{
     const hooks = (window as unknown as { __testHooks?: SceneHook })
       .__testHooks;
     if (!hooks?.scene) throw new Error('scene hook missing');
-    let printShell = 0;
+    let shellPieces = 0;
     let baseSlab = 0;
     hooks.scene.traverse((obj) => {
       const tag = obj.userData?.['tag'];
-      if (tag === 'print-shell') printShell += 1;
+      if (typeof tag === 'string' && tag.startsWith('shell-piece-')) {
+        shellPieces += 1;
+      }
       if (tag === 'base-slab-mesh') baseSlab += 1;
     });
-    return { printShell, baseSlab };
+    return { shellPieces, baseSlab };
   });
 }
 
 /**
- * Read the world-space Y of a printable mesh by tag. Returns NaN if the
- * mesh isn't in the scene. We read the matrix directly per the same
- * pattern as `silicone-preview.spec.ts` — Three's `getWorldPosition`
- * needs a Vector3 which a plain `page.evaluate` return shape can't carry.
+ * Read the world-space (x, y, z) of a printable mesh by tag. Returns
+ * `null` if the mesh isn't in the scene. We read the matrix directly
+ * per the same pattern as `silicone-preview.spec.ts`.
  */
-async function readPrintableMeshWorldY(
+async function readPrintableMeshWorldPos(
   page: Page,
   tag: string,
-): Promise<number> {
+): Promise<{ x: number; y: number; z: number } | null> {
   return page.evaluate((targetTag: string) => {
     type Obj = {
       userData?: Record<string, unknown>;
@@ -194,20 +194,21 @@ async function readPrintableMeshWorldY(
     const hooks = (window as unknown as { __testHooks?: SceneHook })
       .__testHooks;
     if (!hooks?.scene) throw new Error('scene hook missing');
-    let worldY = Number.NaN;
+    let found: { x: number; y: number; z: number } | null = null;
     hooks.scene.traverse((obj) => {
       if (obj.userData?.['tag'] === targetTag) {
         if (obj.updateWorldMatrix) obj.updateWorldMatrix(true, false);
         if (obj.matrixWorld) {
-          worldY = obj.matrixWorld.elements[13]!;
+          const e = obj.matrixWorld.elements;
+          found = { x: e[12]!, y: e[13]!, z: e[14]! };
         }
       }
     });
-    return worldY;
+    return found;
   }, tag);
 }
 
-test('print-shell preview: default-ON reveals shell → exploded lifts shell above Y=+20', async () => {
+test('printable-parts preview: default-ON reveals shell pieces → exploded fans pieces radially outward', async () => {
   const app = await launchApp();
   try {
     const page = await app.firstWindow();
@@ -283,10 +284,11 @@ test('print-shell preview: default-ON reveals shell → exploded lifts shell abo
     await expect(explodedToggle).toBeEnabled();
     await expect(explodedToggle).toHaveAttribute('aria-pressed', 'false');
 
-    // Print shell + base slab installed AND visible (default ON per #67).
-    // Wave D (issue #82): two meshes in the printable-parts group.
+    // Shell pieces + base slab installed AND visible (default ON per
+    // #67). Wave E (issue #84): N=4 shell pieces (default sideCount) +
+    // 1 base slab in the printable-parts group.
     const counts = await countPrintableMeshes(page);
-    expect(counts.printShell).toBe(1);
+    expect(counts.shellPieces).toBe(4);
     expect(counts.baseSlab).toBe(1);
 
     // Scene-level visibility flag is true without any user click.
@@ -332,11 +334,14 @@ test('print-shell preview: default-ON reveals shell → exploded lifts shell abo
     });
     expect(visibleAfterToggle).toBe(true);
 
-    // Print shell currently at y ≈ 0 (not exploded yet).
-    expect(await readPrintableMeshWorldY(page, 'print-shell')).toBeCloseTo(
-      0,
-      3,
-    );
+    // Every shell piece currently at its origin (not exploded yet).
+    for (let i = 0; i < 4; i++) {
+      const pos = await readPrintableMeshWorldPos(page, `shell-piece-${i}`);
+      if (!pos) throw new Error(`shell-piece-${i} missing from scene`);
+      expect(pos.x).toBeCloseTo(0, 3);
+      expect(pos.y).toBeCloseTo(0, 3);
+      expect(pos.z).toBeCloseTo(0, 3);
+    }
 
     // Toggle exploded view ON. This fans out to BOTH scene modules —
     // silicone halves AND printable parts animate simultaneously.
@@ -365,13 +370,20 @@ test('print-shell preview: default-ON reveals shell → exploded lifts shell abo
       { timeout: 5_000 },
     );
 
-    // Wave C: the print shell is a single mesh that lifts along +Y with
-    // offset = max(40, 0.25 * bboxHeight) ≥ 40, so the shell should be
-    // at y ≈ 40+ after exploding. +20 is a conservative lower bound that
-    // catches a "shell never moved" regression while tolerating any
-    // bbox-height fluctuation.
-    const shellY = await readPrintableMeshWorldY(page, 'print-shell');
-    expect(shellY).toBeGreaterThan(20);
+    // Wave E: every shell piece moves RADIALLY outward, NOT +Y. Each
+    // piece's translation magnitude is `max(30, 0.3 * bboxHorizRadius)
+    // ≥ 30`. Assert that at least one piece has XZ distance > 20 mm
+    // (conservative floor under the 30 mm default), with Y ≈ 0.
+    let anyPieceMovedRadially = false;
+    for (let i = 0; i < 4; i++) {
+      const pos = await readPrintableMeshWorldPos(page, `shell-piece-${i}`);
+      if (!pos) throw new Error(`shell-piece-${i} missing from scene`);
+      const xzNorm = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
+      // Y stays at ~0 — no +Y lift for sliced pieces.
+      expect(Math.abs(pos.y)).toBeLessThan(5);
+      if (xzNorm > 20) anyPieceMovedRadially = true;
+    }
+    expect(anyPieceMovedRadially).toBe(true);
 
     // Collapse exploded view.
     await explodedToggle.click();
@@ -394,17 +406,20 @@ test('print-shell preview: default-ON reveals shell → exploded lifts shell abo
       undefined,
       { timeout: 5_000 },
     );
-    expect(await readPrintableMeshWorldY(page, 'print-shell')).toBeCloseTo(
-      0,
-      2,
-    );
+    for (let i = 0; i < 4; i++) {
+      const pos = await readPrintableMeshWorldPos(page, `shell-piece-${i}`);
+      if (!pos) throw new Error(`shell-piece-${i} missing from scene`);
+      expect(pos.x).toBeCloseTo(0, 2);
+      expect(pos.y).toBeCloseTo(0, 2);
+      expect(pos.z).toBeCloseTo(0, 2);
+    }
 
     // Commit a DIFFERENT face → stale invalidation tears everything down.
     await commitSideFace(page);
     await expect(printableToggle).toBeDisabled();
     await expect(printableToggle).toHaveAttribute('aria-pressed', 'false');
     const countsAfterStale = await countPrintableMeshes(page);
-    expect(countsAfterStale.printShell).toBe(0);
+    expect(countsAfterStale.shellPieces).toBe(0);
     expect(countsAfterStale.baseSlab).toBe(0);
   } finally {
     await app.close();

@@ -132,15 +132,17 @@ export interface MountedViewport {
    */
   isExplodedViewIdle: () => boolean;
   /**
-   * Install freshly-generated print-shell + base-slab Manifolds (Wave D,
-   * issue #82 — two meshes in the printable-parts group). Transfers
-   * ownership of both Manifolds to the scene; caller must NOT
-   * `.delete()` them after this call. After installing, re-frames the
-   * camera to the union of master + silicone + shell + slab bboxes.
+   * Install freshly-generated shell-piece + base-slab Manifolds (Wave E
+   * + F, issue #84 — N radially-sliced shell pieces + 1 base slab in
+   * the printable-parts group). Transfers ownership of EVERY Manifold
+   * to the scene; caller must NOT `.delete()` them after this call.
+   * After installing, re-frames the camera to the union of master +
+   * silicone + shell pieces + slab bboxes.
    */
   setPrintableParts: (parts: {
-    printShell: Manifold;
+    shellPieces: readonly Manifold[];
     basePart: Manifold;
+    xzCenter?: { x: number; z: number };
   }) => Promise<PrintablePartsResult>;
   /**
    * Tear down any printable parts currently in the scene and release
@@ -360,9 +362,11 @@ export function mount(container: HTMLElement): MountedViewport {
    * input Manifold before re-throwing, so the error branch preserves the
    * lifetime contract without a second dispose here.
    */
-  const setPrintableParts = async (
-    parts: { printShell: Manifold; basePart: Manifold },
-  ): Promise<PrintablePartsResult> => {
+  const setPrintableParts = async (parts: {
+    shellPieces: readonly Manifold[];
+    basePart: Manifold;
+    xzCenter?: { x: number; z: number };
+  }): Promise<PrintablePartsResult> => {
     const installed = await sceneSetPrintableParts(scene, parts);
 
     // Union with master + silicone bboxes for camera framing. Same

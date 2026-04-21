@@ -48,15 +48,15 @@ function readFixtureBuffer(name: string): ArrayBuffer {
 }
 
 /**
- * Dispose every Manifold owned by a `MoldGenerationResult` — the silicone
- * body, the surface-conforming print shell, and the base slab (Wave D,
- * issue #82). Extracted so each test's `finally` block stays a one-liner
- * and so adding a new result-bound Manifold in the future is a one-site
- * change.
+ * Dispose every Manifold owned by a `MoldGenerationResult` — the
+ * silicone body, every shell piece (Wave E, issue #84), and the base
+ * slab (Wave D, issue #82). Extracted so each test's `finally` block
+ * stays a one-liner and so adding a new result-bound Manifold in the
+ * future is a one-site change.
  */
 function disposeAll(result: MoldGenerationResult): void {
   result.silicone.delete();
-  result.printShell.delete();
+  for (const p of result.shellPieces) p.delete();
   result.basePart.delete();
 }
 
@@ -197,7 +197,13 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
           }
 
           expect(isManifold(result.silicone)).toBe(true);
-          expect(isManifold(result.printShell)).toBe(true);
+          // Wave E + F (issue #84): every shell piece is a watertight
+          // manifold, and the array length matches the requested
+          // sideCount (default 4).
+          expect(result.shellPieces.length).toBe(DEFAULT_PARAMETERS.sideCount);
+          for (const piece of result.shellPieces) {
+            expect(isManifold(piece)).toBe(true);
+          }
 
           // Silicone volume positive, finite, and a plausible fraction of
           // the master (5 mm silicone around ~1.2e5 mm³ figurine surface
@@ -206,9 +212,12 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
           expect(Number.isFinite(result.siliconeVolume_mm3)).toBe(true);
           expect(result.siliconeVolume_mm3).toBeGreaterThan(masterVol * 0.2);
 
-          // Print-shell volume strictly positive + finite.
-          expect(result.printShellVolume_mm3).toBeGreaterThan(0);
-          expect(Number.isFinite(result.printShellVolume_mm3)).toBe(true);
+          // Total shell volume (sum of pieces) strictly positive + finite.
+          expect(result.totalShellVolume_mm3).toBeGreaterThan(0);
+          expect(Number.isFinite(result.totalShellVolume_mm3)).toBe(true);
+          // Per-piece volumes sum to the reported total.
+          const summed = result.shellPiecesVolume_mm3.reduce((a, b) => a + b, 0);
+          expect(summed).toBeCloseTo(result.totalShellVolume_mm3, 6);
 
           // Base-slab (Wave D): finite + non-negative. Volume can be
           // legitimately 0 on fixtures whose lowest-Y slice is
@@ -289,59 +298,99 @@ describe('generateSiliconeShell — integration with adapter', () => {
   }, 30_000);
 });
 
-describe('generateSiliconeShell — print-shell invariants (Wave C)', () => {
-  // Watertight + bounds + trim-plane invariants for the surface-conforming
-  // print shell. Cube master keeps the analytic bounds tight and is small
-  // enough to run under every default suite.
-  test('printShell is watertight genus-0 with correct top/bottom trims', async () => {
+describe('generateSiliconeShell — shell pieces invariants (Wave C+E+F)', () => {
+  // Watertight + bounds invariants for the radially-sliced, brimmed
+  // print-shell pieces. Cube master keeps the analytic bounds tight
+  // and is small enough to run under every default suite.
+  test('shellPieces: N watertight pieces covering the full shell bbox', async () => {
     const toplevel = await initManifold();
     const SIDE = 4;
     const SILICONE = 5;
     const SHELL = 3;
     const POUR_EDGE = 3; // matches PRINT_SHELL_POUR_EDGE_MM
+    const SIDE_COUNT = 4;
+    const BRIM_W = 10;
+    const BRIM_T = 3;
     const master = toplevel.Manifold.cube([SIDE, SIDE, SIDE], true);
     try {
       const result = await generateSiliconeShell(
         master,
-        params({ siliconeThickness_mm: SILICONE, printShellThickness_mm: SHELL }),
+        params({
+          siliconeThickness_mm: SILICONE,
+          printShellThickness_mm: SHELL,
+          sideCount: SIDE_COUNT,
+          brimWidth_mm: BRIM_W,
+          brimThickness_mm: BRIM_T,
+        }),
         new Matrix4(),
       );
       try {
-        // Watertight + genus-0. The iso-surface from a single-piece
-        // levelSet followed by a difference + two plane trims must be
-        // a valid solid ball (the shell is a bowl topology, genus 0).
-        expect(isManifold(result.printShell)).toBe(true);
-        expect(result.printShell.genus()).toBe(0);
-        expect(result.printShell.isEmpty()).toBe(false);
+        // Wave E: `shellPieces.length` equals sideCount.
+        expect(result.shellPieces.length).toBe(SIDE_COUNT);
+        // Every piece is watertight + non-empty.
+        for (const piece of result.shellPieces) {
+          expect(isManifold(piece)).toBe(true);
+          expect(piece.isEmpty()).toBe(false);
+          expect(Number.isFinite(piece.volume())).toBe(true);
+          expect(piece.volume()).toBeGreaterThan(0);
+        }
 
-        // Master bounds: [-SIDE/2, SIDE/2]³. Expected shell bounds:
+        // The union of every piece's AABB reaches the full (pre-slice)
+        // shell extent on Y (top + bottom trim planes) and extends
+        // radially outward by at least brimWidth past the shell's
+        // outer surface.
+        //
+        // Expected shell bounds (pre-slice, pre-brim):
         //   top.y   = master.max.y + SILICONE + POUR_EDGE = 2 + 5 + 3 = 10
         //   bot.y   = master.min.y - 2 (Wave D plug wrap)  = -4
         //   XZ side = master ± (SILICONE + SHELL) = [-10, 10]
         //
-        // Allow `2 × edgeLength` slack on XZ because the BCC marching-
-        // tetrahedra iso-surface rounds corners outward by up to one
-        // grid cell, and for small cube fixtures the padded `shellBounds`
-        // also rounds to the next grid step — two sources of +edgeLength
-        // shift that add near corners. Y cuts stay tight because they
-        // come from explicit `trimByPlane` (kernel precision).
-        const bb = result.printShell.boundingBox();
+        // Brim adds a radial extent of +BRIM_W past the shell's outer
+        // edge on every cut direction. So the union's XZ extent should
+        // reach `xzMax + BRIM_W` on at least some direction.
         const edgeLength = 2.0;
+        const unionMin = [
+          Infinity,
+          Infinity,
+          Infinity,
+        ] as [number, number, number];
+        const unionMax = [
+          -Infinity,
+          -Infinity,
+          -Infinity,
+        ] as [number, number, number];
+        for (const piece of result.shellPieces) {
+          const bb = piece.boundingBox();
+          for (let a = 0; a < 3; a++) {
+            if (bb.min[a]! < unionMin[a]!) unionMin[a] = bb.min[a]!;
+            if (bb.max[a]! > unionMax[a]!) unionMax[a] = bb.max[a]!;
+          }
+        }
 
-        expect(bb.max[1]).toBeCloseTo(2 + SILICONE + POUR_EDGE, 3);
-        // Wave D (issue #82): shell bottom drops 2 mm below master.min.y
-        // so the shell wraps the base-slab plug.
-        expect(bb.min[1]).toBeCloseTo(-2 - 2, 3);
+        // Y range: pieces cover [bot, top] from the pre-slice shell.
+        expect(unionMax[1]!).toBeCloseTo(2 + SILICONE + POUR_EDGE, 3);
+        expect(unionMin[1]!).toBeCloseTo(-2 - 2, 3);
 
-        const xzMax = 2 + SILICONE + SHELL;
-        expect(bb.max[0]).toBeLessThanOrEqual(xzMax + 2 * edgeLength);
-        expect(bb.min[0]).toBeGreaterThanOrEqual(-(xzMax + 2 * edgeLength));
-        expect(bb.max[2]).toBeLessThanOrEqual(xzMax + 2 * edgeLength);
-        expect(bb.min[2]).toBeGreaterThanOrEqual(-(xzMax + 2 * edgeLength));
+        // XZ: at least one piece extends to `xzMax + BRIM_W - slack`
+        // along some axis (brim flange on a cardinal cut). Use a
+        // generous `brim_outer_bound` upper-clamp to catch runaway
+        // brims.
+        const xzOuter = 2 + SILICONE + SHELL;
+        const brimOuter = xzOuter + BRIM_W;
+        // Generous margin on the max side (brim_outer + 2×edgeLength
+        // for the shell's rounded-corner marching-tets + 2 mm kernel
+        // slop).
+        const maxClamp = brimOuter + 2 * edgeLength + 2;
+        expect(unionMax[0]!).toBeLessThanOrEqual(maxClamp);
+        expect(unionMin[0]!).toBeGreaterThanOrEqual(-maxClamp);
+        expect(unionMax[2]!).toBeLessThanOrEqual(maxClamp);
+        expect(unionMin[2]!).toBeGreaterThanOrEqual(-maxClamp);
 
-        // Volume matches the Manifold.volume() exactly.
-        expect(result.printShell.volume()).toBeCloseTo(result.printShellVolume_mm3, 3);
-        expect(result.printShellVolume_mm3).toBeGreaterThan(0);
+        // Total shell volume (sum of pieces, incl. brims) matches the
+        // pre-computed total.
+        expect(result.totalShellVolume_mm3).toBeGreaterThan(0);
+        const summed = result.shellPiecesVolume_mm3.reduce((a, b) => a + b, 0);
+        expect(summed).toBeCloseTo(result.totalShellVolume_mm3, 6);
       } finally {
         disposeAll(result);
       }
@@ -350,12 +399,10 @@ describe('generateSiliconeShell — print-shell invariants (Wave C)', () => {
     }
   }, 30_000);
 
-  test('printShell top + bottom trims respect offset viewTransform', async () => {
+  test('shellPieces: top + bottom Y extent tracks offset viewTransform', async () => {
     // Apply a +15 mm translation on Y; the trim planes should move with
-    // the transformed master. Use an identity rotation so the +Y axis in
-    // the master frame coincides with +Y in world frame — if we rotated,
-    // the trim planes (which are world-frame, per the generator) would
-    // not track the master's up axis.
+    // the transformed master. Use an identity rotation so the +Y axis
+    // in the master frame coincides with +Y in world frame.
     const toplevel = await initManifold();
     const master = toplevel.Manifold.cube([4, 4, 4], true);
     try {
@@ -366,11 +413,16 @@ describe('generateSiliconeShell — print-shell invariants (Wave C)', () => {
         new Matrix4().makeTranslation(0, TRANSLATE_Y, 0),
       );
       try {
-        const bb = result.printShell.boundingBox();
-        // Master (post-transform) bounds y ∈ [13, 17]. Shell top = 17 + 5 + 3 = 25;
-        // Wave D bottom = 13 - 2 = 11.
-        expect(bb.max[1]).toBeCloseTo(17 + 5 + 3, 3);
-        expect(bb.min[1]).toBeCloseTo(13 - 2, 3);
+        // Union Y extent across every piece: top = 17+5+3=25, bot = 13-2=11.
+        let yMin = Infinity;
+        let yMax = -Infinity;
+        for (const piece of result.shellPieces) {
+          const bb = piece.boundingBox();
+          if (bb.min[1]! < yMin) yMin = bb.min[1]!;
+          if (bb.max[1]! > yMax) yMax = bb.max[1]!;
+        }
+        expect(yMax).toBeCloseTo(17 + 5 + 3, 3);
+        expect(yMin).toBeCloseTo(13 - 2, 3);
       } finally {
         disposeAll(result);
       }
@@ -378,6 +430,33 @@ describe('generateSiliconeShell — print-shell invariants (Wave C)', () => {
       master.delete();
     }
   }, 30_000);
+
+  test.each([2, 3, 4] as const)(
+    'sideCount=%i produces exactly that many pieces',
+    async (sideCount) => {
+      const toplevel = await initManifold();
+      const master = toplevel.Manifold.cube([4, 4, 4], true);
+      try {
+        const result = await generateSiliconeShell(
+          master,
+          params({ sideCount }),
+          new Matrix4(),
+        );
+        try {
+          expect(result.shellPieces.length).toBe(sideCount);
+          for (const p of result.shellPieces) {
+            expect(isManifold(p)).toBe(true);
+            expect(p.isEmpty()).toBe(false);
+          }
+        } finally {
+          disposeAll(result);
+        }
+      } finally {
+        master.delete();
+      }
+    },
+    60_000,
+  );
 });
 
 describe('generateSiliconeShell — base slab (Wave D, issue #82)', () => {
@@ -582,7 +661,7 @@ describe('generateSiliconeShell — Generate×3 leak check', () => {
       const volumes: Array<{
         silicone: number;
         resin: number;
-        printShell: number;
+        totalShell: number;
         baseSlab: number;
       }> = [];
       for (let i = 0; i < 3; i++) {
@@ -590,16 +669,20 @@ describe('generateSiliconeShell — Generate×3 leak check', () => {
         volumes.push({
           silicone: r.siliconeVolume_mm3,
           resin: r.resinVolume_mm3,
-          printShell: r.printShellVolume_mm3,
+          totalShell: r.totalShellVolume_mm3,
           baseSlab: r.baseSlabVolume_mm3,
         });
+        // Wave E+F: disposeAll releases the silicone, every shell
+        // piece, and the base slab. A leak would surface here as a
+        // WASM handle being retained across iterations (and, in
+        // practice, as the volume drifting between runs).
         disposeAll(r);
       }
       // All three runs agree within 1e-3 relative on every volume.
       for (let i = 1; i < 3; i++) {
         expect(volumes[i]!.silicone).toBeCloseTo(volumes[0]!.silicone, 3);
         expect(volumes[i]!.resin).toBeCloseTo(volumes[0]!.resin, 3);
-        expect(volumes[i]!.printShell).toBeCloseTo(volumes[0]!.printShell, 3);
+        expect(volumes[i]!.totalShell).toBeCloseTo(volumes[0]!.totalShell, 3);
         expect(volumes[i]!.baseSlab).toBeCloseTo(volumes[0]!.baseSlab, 3);
       }
     } finally {
