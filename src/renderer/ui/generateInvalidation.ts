@@ -32,11 +32,17 @@ import { bumpGenerateEpoch } from './generateEpoch';
 import type { GenerateButtonApi } from './generateButton';
 import type { TopbarApi } from './topbar';
 
-/** Minimal surface required of the topbar by the invalidation wire. */
+/**
+ * Minimal surface required of the topbar by the invalidation wire.
+ * `setPrintShellVolume` is optional so legacy test mocks that predate the
+ * Wave-C fourth readout keep compiling; production always wires it.
+ */
 export type InvalidationTopbar = Pick<
   TopbarApi,
   'setSiliconeVolume' | 'setResinVolume'
->;
+> & {
+  setPrintShellVolume?(mm3: number | null): void;
+};
 
 /**
  * Minimal surface required of the Generate button by the invalidation wire.
@@ -133,6 +139,7 @@ export function attachGenerateInvalidation(
     generateButton.setEnabled(detail);
     topbar.setSiliconeVolume(null);
     topbar.setResinVolume(null);
+    topbar.setPrintShellVolume?.(null);
     generateButton.setError(null);
     // Issue #64 — clear the post-generate hint states. A staleness signal
     // (orientation commit, reset, new STL) invalidates any previous

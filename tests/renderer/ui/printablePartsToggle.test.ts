@@ -60,7 +60,7 @@ describe('mountPrintablePartsToggle — initial state', () => {
     const btn = getBtn();
     expect(btn.textContent).toBe('Show printable parts');
     expect(btn.title).toBe(
-      'Show the printable 3D-print parts (base, sides, top cap) around the silicone',
+      'Show the surface-conforming print shell around the silicone',
     );
   });
 });

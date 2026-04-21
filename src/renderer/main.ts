@@ -280,10 +280,10 @@ function mountParameters(): void {
       // master+silicone union, so the user sees the full result
       // without a manual zoom-out.
       //
-      // Issue #62: also hand the printable-box parts to the scene's
-      // printable-parts module. Ownership transfers on success; the
-      // orchestrator's stale-drop + error paths still `.delete()` them
-      // because the scene never received them in those cases.
+      // Issue #62 + #72: hand the surface-conforming print shell to the
+      // scene's printable-parts module. Ownership transfers on success;
+      // the orchestrator's stale-drop + error paths still `.delete()` it
+      // because the scene never received it in those cases.
       scene: {
         setSilicone: (payload) => vp.setSilicone(payload),
         setPrintableParts: (parts) => vp.setPrintableParts(parts),
@@ -450,13 +450,14 @@ async function loadMasterFromBuffer(buffer: ArrayBuffer): Promise<void> {
   explodedViewActive = false;
   if (topbar) {
     topbar.setMasterVolume(result.volume_mm3);
-    // Any previously-populated silicone + resin values are for the OLD
-    // master and must be cleared. The lay-flat controller's
+    // Any previously-populated silicone / print-shell / resin values are
+    // for the OLD master and must be cleared. The lay-flat controller's
     // `notifyMasterReset` will also fire a committed-event that clears
     // them, but only when a commit was previously live — belt-and-
     // braces here covers the first-load case and any defensive UI state.
     topbar.setSiliconeVolume(null);
     topbar.setResinVolume(null);
+    topbar.setPrintShellVolume(null);
   }
   // Clear any residual error from a previous generate attempt.
   if (generateButton) {

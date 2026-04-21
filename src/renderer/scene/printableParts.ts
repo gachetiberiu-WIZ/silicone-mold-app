@@ -1,82 +1,70 @@
 // src/renderer/scene/printableParts.ts
 //
-// Scene module owning the printable-box parts produced by the
-// `generateSiliconeShell` generator (Phase 3d wave 2, issue #50). This
-// mirrors the `scene/silicone.ts` lifecycle pattern (issue #47):
+// Scene module owning the surface-conforming print-shell mesh produced by
+// `generateSiliconeShell` (Wave C, issue #72). Post-Wave-C this is a
+// SINGLE mesh — the rectangular box + N-side radial split of the pre-#72
+// pipeline is gone. The module mirrors the `scene/silicone.ts` lifecycle
+// pattern:
 //
-//   - exactly one set of printable parts live at a time,
-//   - `setPrintableParts(scene, {base, sides, topCap})` disposes the
-//     previous set (geometry + material + Manifold `.delete()`) before
-//     installing the new one,
+//   - exactly one print-shell live at a time,
+//   - `setPrintableParts(scene, {printShell})` disposes the previous
+//     mesh (geometry + material + Manifold `.delete()`) before installing
+//     the new one,
 //   - `clearPrintableParts(scene)` is idempotent and safe on an empty
 //     group (used by every staleness signal: commit, reset, new-STL).
 //
 // Ownership handoff:
 //
 //   The caller (`generateOrchestrator.ts` on the happy path) passes in
-//   1 + N + 1 freshly-generated Manifolds. From the moment
-//   `setPrintableParts` returns, THIS MODULE owns their lifetime — the
-//   caller must NOT `.delete()` them again. Eviction happens on the next
-//   `setPrintableParts` call, on any `clearPrintableParts` call, and on
-//   viewport teardown.
+//   one freshly-generated Manifold. From the moment `setPrintableParts`
+//   returns, THIS MODULE owns its lifetime — the caller must NOT
+//   `.delete()` it again. Eviction happens on the next `setPrintableParts`
+//   call, on any `clearPrintableParts` call, and on viewport teardown.
 //
 // Frame alignment:
 //
-//   `buildPrintableBox` (via `generateSiliconeShell`) operates in the
-//   post-viewport-transform frame — same as the silicone halves. So we
-//   render the parts at world origin with no group transform. Double-
-//   applying the master group's matrix would drift them away from the
-//   visible silicone.
+//   `generateSiliconeShell` applies the Master group's world matrix to
+//   the master Manifold INSIDE the generator, so the returned print-shell
+//   Manifold is ALREADY in the world frame. We render the mesh at world
+//   origin with no group transform. Double-applying the master group's
+//   matrix would drift the mesh away from the visible silicone.
 //
 // Material:
 //
-//   `MeshStandardMaterial({ color: 0xb8b8b8, roughness: 0.8, metalness: 0 })`
-//   — opaque "3D-print plastic" gray. No transparency (the issue wants
-//   solid parts that occlude silicone when visible). Single material
-//   instance shared across all 1 + N + 1 parts: reduces GPU state churn
-//   and the per-material JSON is ~40 bytes each, so sharing saves a
-//   handful of dispose calls without introducing a lifetime trap (the
-//   module owns the one material and disposes it in teardown).
+//   `MeshStandardMaterial({ color: 0xb8b8b8, roughness: 0.8, metalness: 0.0 })`
+//   — opaque "3D-print plastic" gray. No transparency — the print shell
+//   occludes silicone + master when visible, and the exploded-view tween
+//   lifts it out of the way so the user can inspect the silicone cavity.
 //
 // Visibility:
 //
-//   The printable-parts group starts VISIBLE on every install
-//   (`group.visible = true`). This is the issue #67 "default ON" fix:
-//   users click "Generate mold" and expect to see the mold; hiding it
-//   behind an off-by-default toggle broke the dogfood flow (users
-//   reported "no base was created" because they never flipped it).
-//   The toolbar toggle flips `visible` via `setPrintablePartsVisible`.
+//   The group starts VISIBLE on every install (`group.visible = true`).
+//   This is the issue #67 "default ON" behaviour carried forward from
+//   the rectangular-box predecessor: users click "Generate mold" and
+//   expect to see the mold; the toolbar toggle flips `visible` via
+//   `setPrintablePartsVisible`.
 //
 // Exploded view:
 //
-//   Each part has its own resting position and an exploded offset vector:
-//     - base:    -Y  (floor drops below the origin)
-//     - topCap:  +Y  (ceiling rises above)
-//     - sides:   radially outward in XZ from the printable bbox XZ center
-//                (each side's centroid XZ ray, normalised)
-//   Magnitude: `offset = max(30, 0.2 * bboxHeight)` — same rule as
-//   silicone (see `silicone.ts`) so the two animations stay visually
-//   coordinated when both modules animate together.
-//
-//   The tween is fraction-based and per-module: a local RAF loop drives
-//   `currentFraction` from 0 toward `targetFraction` over 250 ms. When
-//   the group is hidden (`group.visible === false`) or the fraction is
-//   already at its target, no RAF is scheduled — no wasted per-frame
-//   work (issue #62 performance AC).
+//   Post-Wave-C the print shell is one piece; "exploded" lifts the
+//   whole mesh along +Y. Offset rule: `max(40 mm, 0.25 * bboxHeight)` —
+//   slightly higher than the silicone's `max(30, 0.2 * bboxHeight)` so
+//   the shell lifts clear ABOVE the silicone when both modules animate
+//   together, revealing the master + silicone beneath. Both modules use
+//   the same +Y-only axis-aligned motion (no radial motion remains —
+//   that was a property of the old N-sided ring frame).
 //
 // Test-hook surface:
 //
 //   Module-level getters: `arePrintablePartsVisible`,
 //   `isPrintableExplodedIdle`, `hasPrintableParts`. Exposed on the
-//   viewport handle per issue #62. Read-only; no setters through the
-//   test hook.
+//   viewport handle. Read-only; no setters through the test hook.
 
 import {
   Box3,
   Group,
   Mesh,
   MeshStandardMaterial,
-  Vector3,
   type Scene,
 } from 'three';
 import type { Manifold } from 'manifold-3d';
@@ -86,62 +74,42 @@ import { manifoldToBufferGeometry } from '@/geometry/adapters';
 /** Tag on the printable-parts group created in `scene/index.ts`. */
 const PRINTABLE_PARTS_GROUP_TAG = 'printableParts';
 
-/** Per-mesh tags so tests can distinguish the pieces. */
-const PRINTABLE_BASE_MESH_TAG = 'printable-base';
-const PRINTABLE_TOP_CAP_MESH_TAG = 'printable-top-cap';
-/** Prefix for per-side meshes: `printable-side-0`, `printable-side-1`, ... */
-const PRINTABLE_SIDE_MESH_TAG_PREFIX = 'printable-side-';
+/** Tag on the single print-shell mesh child. */
+const PRINT_SHELL_MESH_TAG = 'print-shell';
 
 /**
- * `userData` keys where we cache the Manifolds so teardown can release
- * them even if the Mesh nodes have been removed via another code path.
- * Exported so viewport-level dispose can read the same slots.
+ * `userData` key where we cache the Manifold so teardown can release it
+ * even if the Mesh node has been removed via another code path. Exported
+ * so viewport-level dispose can read the same slot.
  */
-export const PRINTABLE_BASE_MANIFOLD_KEY = 'printableBaseManifold';
-export const PRINTABLE_TOP_CAP_MANIFOLD_KEY = 'printableTopCapManifold';
-export const PRINTABLE_SIDES_MANIFOLDS_KEY = 'printableSidesManifolds';
+export const PRINT_SHELL_MANIFOLD_KEY = 'printShellManifold';
 
-/** Default exploded-offset floor in mm — same rule as silicone. */
-const EXPLODED_OFFSET_FLOOR_MM = 30;
-/** Fraction of bbox-height used for the exploded-offset ceiling. */
-const EXPLODED_OFFSET_BBOX_FRACTION = 0.2;
+/** Default exploded-offset floor in mm — shell lifts clear above silicone. */
+const EXPLODED_OFFSET_FLOOR_MM = 40;
+/**
+ * Fraction of bbox-height used for the exploded-offset ceiling. Higher
+ * than silicone's 0.2 so the shell rises clear of the silicone when both
+ * animate together.
+ */
+const EXPLODED_OFFSET_BBOX_FRACTION = 0.25;
 /** Tween duration for exploded-view transitions. Matches silicone. */
 const EXPLODED_TWEEN_MS = 250;
-
-/**
- * Small helper: a per-part record stashed on the state so the tween can
- * translate each Mesh along its own precomputed exploded-offset vector
- * without re-deriving the direction on every RAF tick. `dir` is a
- * unit-length world-space vector; `mesh.position` is written as
- * `dir * (fraction * offsetMax)` each frame.
- */
-interface PartTween {
-  readonly mesh: Mesh;
-  /** Unit-length direction (world frame). */
-  readonly dir: Vector3;
-}
 
 /** Shape returned by `setPrintableParts`. */
 export interface PrintablePartsResult {
   readonly bbox: Box3;
-  readonly baseMesh: Mesh;
-  readonly topCapMesh: Mesh;
-  readonly sideMeshes: readonly Mesh[];
+  readonly mesh: Mesh;
 }
 
 /**
  * Internal record stashed on the printable-parts group's `userData`.
- * Holds the tween targets + offset metadata + RAF handle so
+ * Holds the tween target + offset metadata + RAF handle so
  * `setPrintablePartsExplodedView` can update without re-traversing the
  * scene graph.
  */
 interface PrintableState {
-  baseMesh: Mesh;
-  topCapMesh: Mesh;
-  sideMeshes: Mesh[];
-  /** Direction + mesh for every part in the tween set. */
-  parts: PartTween[];
-  /** Max magnitude (mm) applied at fraction=1. */
+  mesh: Mesh;
+  /** Max +Y offset applied at fraction=1. */
   offsetMax_mm: number;
   /** Current exploded fraction ∈ [0, 1]. */
   currentFraction: number;
@@ -153,7 +121,7 @@ interface PrintableState {
   tweenStartFraction: number;
   /** RAF handle for the in-flight tween (0 = none). */
   rafId: number;
-  /** Shared material used by every part, disposed in teardown. */
+  /** Material used by the mesh, disposed in teardown. */
   material: MeshStandardMaterial;
 }
 
@@ -190,9 +158,11 @@ function setState(group: Group, state: PrintableState | null): void {
 }
 
 /**
- * Remove a mesh from its parent. We do NOT dispose its geometry here —
- * the material is shared across all parts (disposed once at teardown)
- * and the geometry is per-mesh (disposed immediately per call).
+ * Remove a mesh from its parent and dispose its GPU geometry. The
+ * material is disposed separately by the state teardown because it's
+ * owned by the state record (not the mesh — same instance would be shared
+ * in a hypothetical multi-mesh world; kept for symmetry with the tween
+ * state lifetime).
  */
 function disposeMeshGeometry(mesh: Mesh): void {
   mesh.geometry.dispose();
@@ -200,40 +170,20 @@ function disposeMeshGeometry(mesh: Mesh): void {
 }
 
 /**
- * Release a cached Manifold on the group's userData and clear the slot.
+ * Release the cached Manifold on the group's userData and clear the slot.
  * Idempotent. `.delete()` releases the underlying WASM heap allocation —
  * dropping the JS reference without calling it would leak.
  */
-function disposeCachedManifold(group: Group, key: string): void {
-  const cached = group.userData[key] as Manifold | undefined;
+function disposeCachedManifold(group: Group): void {
+  const cached = group.userData[PRINT_SHELL_MANIFOLD_KEY] as Manifold | undefined;
   if (cached) {
     try {
       cached.delete();
     } catch (err) {
-      console.warn(`[printableParts] disposing cached Manifold (${key}) threw:`, err);
+      console.warn('[printableParts] disposing cached print-shell Manifold threw:', err);
     }
-    delete group.userData[key];
+    delete group.userData[PRINT_SHELL_MANIFOLD_KEY];
   }
-}
-
-/**
- * Release all cached side-part Manifolds at once. Stored as an array on
- * userData since the count is dynamic (sideCount ∈ {2, 3, 4}).
- */
-function disposeCachedSideManifolds(group: Group): void {
-  const cached = group.userData[PRINTABLE_SIDES_MANIFOLDS_KEY] as
-    | Manifold[]
-    | undefined;
-  if (Array.isArray(cached)) {
-    for (const m of cached) {
-      try {
-        m.delete();
-      } catch (err) {
-        console.warn('[printableParts] disposing cached side Manifold threw:', err);
-      }
-    }
-  }
-  delete group.userData[PRINTABLE_SIDES_MANIFOLDS_KEY];
 }
 
 /**
@@ -248,15 +198,12 @@ function cancelTween(state: PrintableState): void {
 }
 
 /**
- * Create the shared opaque gray material. Single instance owned by the
- * state record — disposed once at teardown. Sharing across 6-ish parts
- * is safe because:
- *   - we never mutate material properties per-part,
- *   - teardown disposes the one shared reference (no double-dispose risk),
- *   - fresh `setPrintableParts` calls build a NEW material (they dispose
- *     the previous state including its material before installing).
+ * Create the opaque gray material. Single instance owned by the state
+ * record — disposed once at teardown. Fresh `setPrintableParts` calls
+ * build a NEW material (they dispose the previous state including its
+ * material before installing).
  */
-function createPrintableMaterial(): MeshStandardMaterial {
+function createPrintShellMaterial(): MeshStandardMaterial {
   return new MeshStandardMaterial({
     color: 0xb8b8b8,
     roughness: 0.8,
@@ -265,24 +212,24 @@ function createPrintableMaterial(): MeshStandardMaterial {
 }
 
 /**
- * Compute the world-space AABB of all printable parts from their
- * BufferGeometries. The generator baked the viewport transform into the
- * Manifolds so the geometries are already in world frame.
+ * Compute the world-space AABB of the print-shell mesh from its
+ * BufferGeometry. The generator baked the viewport transform into the
+ * Manifold so the geometry is already in world frame.
  */
-function unionBbox(meshes: readonly Mesh[]): Box3 {
+function meshBbox(mesh: Mesh): Box3 {
+  mesh.geometry.computeBoundingBox();
   const box = new Box3();
-  for (const mesh of meshes) {
-    mesh.geometry.computeBoundingBox();
-    const bb = mesh.geometry.boundingBox;
-    if (bb) box.union(bb);
+  if (mesh.geometry.boundingBox) {
+    box.copy(mesh.geometry.boundingBox);
   }
   return box;
 }
 
 /**
- * Resolve the exploded-offset magnitude for a bbox. Applies the silicone
- * rule `max(30, 0.2 * bboxHeight)` for visual coordination between the
- * two modules (silicone + printable move in lockstep when both animate).
+ * Resolve the exploded-offset magnitude for a bbox. Applies the Wave-C
+ * rule `max(40, 0.25 * bboxHeight)` — slightly larger than silicone's
+ * (30, 0.2) so the shell lifts clear ABOVE the silicone when both
+ * animate together.
  */
 function resolveExplodedOffset(bbox: Box3): number {
   const heightY = Math.max(0, bbox.max.y - bbox.min.y);
@@ -293,80 +240,13 @@ function resolveExplodedOffset(bbox: Box3): number {
 }
 
 /**
- * Compute per-part unit-vector directions for the exploded-view tween:
- *
- *   - base: straight -Y.
- *   - topCap: straight +Y.
- *   - sides: radially outward in XZ from the overall bbox XZ center,
- *     derived from each side mesh's own bbox center. For sideCount=3/4
- *     this produces the natural "petals opening" motion. For the (rare)
- *     degenerate case where a side's centroid coincides with the XZ
- *     center (numerically, within 1e-6 mm), we fall back to +X so the
- *     animation still produces motion rather than a silent no-op.
- *
- * Returns a `parts` array in the same order as `[base, ...sides, topCap]`
- * which matches the scene-graph add order.
- */
-function computePartTweens(
-  baseMesh: Mesh,
-  sideMeshes: readonly Mesh[],
-  topCapMesh: Mesh,
-  unionBox: Box3,
-): PartTween[] {
-  const out: PartTween[] = [];
-  out.push({ mesh: baseMesh, dir: new Vector3(0, -1, 0) });
-  out.push({ mesh: topCapMesh, dir: new Vector3(0, 1, 0) });
-
-  // XZ center of the union bbox — anchor for the radial direction.
-  const center = new Vector3();
-  unionBox.getCenter(center);
-
-  for (const side of sideMeshes) {
-    side.geometry.computeBoundingBox();
-    const sideBox = side.geometry.boundingBox;
-    // Defence-in-depth: if the side geometry is somehow empty, emit a
-    // +X direction so the test still sees a finite motion vector.
-    if (!sideBox) {
-      out.push({ mesh: side, dir: new Vector3(1, 0, 0) });
-      continue;
-    }
-    const sideCenter = new Vector3();
-    sideBox.getCenter(sideCenter);
-    const dx = sideCenter.x - center.x;
-    const dz = sideCenter.z - center.z;
-    const lenSq = dx * dx + dz * dz;
-    // 1e-6 mm² threshold — below this the centroid is numerically at
-    // the center and we'd divide by ~0.
-    if (lenSq < 1e-12) {
-      out.push({ mesh: side, dir: new Vector3(1, 0, 0) });
-      continue;
-    }
-    const len = Math.sqrt(lenSq);
-    out.push({ mesh: side, dir: new Vector3(dx / len, 0, dz / len) });
-  }
-  return out;
-}
-
-/**
- * Write the tween fraction into every part's `position`. `fraction = 0`
- * collapses all parts to their resting origin; `fraction = 1` places
- * each at `dir * offsetMax`.
- *
- * Group-level-transform rule applies: we write `mesh.position`, never
- * mutate the BufferGeometry. The printable-parts group stays at world
- * origin so the mesh's local offset equals world displacement.
+ * Write the tween fraction into the mesh's `position.y`. `fraction = 0`
+ * collapses to rest (y = 0); `fraction = 1` places at +offsetMax along Y.
  */
 function applyFraction(state: PrintableState, fraction: number): void {
   const clamped = Math.max(0, Math.min(1, fraction));
   state.currentFraction = clamped;
-  const mag = clamped * state.offsetMax_mm;
-  for (const part of state.parts) {
-    part.mesh.position.set(
-      part.dir.x * mag,
-      part.dir.y * mag,
-      part.dir.z * mag,
-    );
-  }
+  state.mesh.position.y = clamped * state.offsetMax_mm;
 }
 
 /**
@@ -378,8 +258,7 @@ function startTween(state: PrintableState, targetFraction: number): void {
   cancelTween(state);
   state.targetFraction = targetFraction;
   state.tweenStartFraction = state.currentFraction;
-  // If we're already at the target, no RAF work to do. This is the
-  // "no wasted per-frame work when not moving" guarantee from the issue.
+  // If we're already at the target, no RAF work to do.
   if (state.currentFraction === targetFraction) {
     return;
   }
@@ -404,135 +283,77 @@ function startTween(state: PrintableState, targetFraction: number): void {
 }
 
 /**
- * Install a freshly-generated set of printable-box Manifolds into the
- * scene's printable-parts group. Disposes the previous set first; only
- * one set is live at a time.
+ * Install a freshly-generated print-shell Manifold into the scene's
+ * printable-parts group. Disposes the previous mesh first; only one is
+ * live at a time.
  *
  * Ownership: from the moment this function returns successfully, the
- * scene owns every Manifold. The caller MUST NOT `.delete()` them. The
- * next `setPrintableParts` call (or `clearPrintableParts`) evicts them.
+ * scene owns the Manifold. The caller MUST NOT `.delete()` it. The next
+ * `setPrintableParts` call (or `clearPrintableParts`) evicts it.
  *
- * Visibility (issue #67): the new group starts VISIBLE
- * (`group.visible = true`) regardless of the previous visibility state —
- * fresh Generate, fresh "user sees the mold immediately" default. The
- * toolbar toggle starts pressed; users flip it off via
- * `setPrintablePartsVisible(scene, false)` if they want silicone-only.
+ * Visibility (issue #67 carry-forward): the new group starts VISIBLE
+ * regardless of the previous visibility state — fresh Generate → users
+ * see the mold immediately.
  *
- * Failure mode: if any BufferGeometry adapter throws, we dispose any
- * partially-built geometries AND `.delete()` every input Manifold so
- * the caller's lifetime assumption still holds without leaking WASM.
+ * Failure mode: if the BufferGeometry adapter throws, we dispose the
+ * Manifold so the caller's lifetime assumption still holds without
+ * leaking WASM.
  *
  * @throws If the scene is missing its printable-parts group.
  */
 export async function setPrintableParts(
   scene: Scene,
-  parts: {
-    base: Manifold;
-    sides: readonly Manifold[];
-    topCap: Manifold;
-  },
+  parts: { printShell: Manifold },
 ): Promise<PrintablePartsResult> {
   const group = findGroup(scene);
   if (!group) {
-    // Ownership hasn't transferred — dispose on behalf of the caller so
-    // the error branch doesn't leak WASM heap.
-    try { parts.base.delete(); } catch { /* already dead */ }
-    try { parts.topCap.delete(); } catch { /* already dead */ }
-    for (const s of parts.sides) {
-      try { s.delete(); } catch { /* already dead */ }
-    }
+    try { parts.printShell.delete(); } catch { /* already dead */ }
     throw new Error(
       'setPrintableParts: scene is missing its printable-parts group ' +
         '(userData.tag === "printableParts"). createScene() must have run first.',
     );
   }
 
-  // Build every BufferGeometry first — atomic replacement on failure.
-  const sideGeoms: Array<Awaited<ReturnType<typeof manifoldToBufferGeometry>>> = [];
-  let baseGeom: Awaited<ReturnType<typeof manifoldToBufferGeometry>> | undefined;
-  let topCapGeom: Awaited<ReturnType<typeof manifoldToBufferGeometry>> | undefined;
+  // Build display geometry first — atomic replacement on failure.
+  let geom: Awaited<ReturnType<typeof manifoldToBufferGeometry>> | undefined;
   try {
-    baseGeom = await manifoldToBufferGeometry(parts.base);
-    for (const s of parts.sides) {
-      sideGeoms.push(await manifoldToBufferGeometry(s));
-    }
-    topCapGeom = await manifoldToBufferGeometry(parts.topCap);
+    geom = await manifoldToBufferGeometry(parts.printShell);
   } catch (err) {
-    // Dispose anything already built + every caller-supplied Manifold.
-    if (baseGeom) baseGeom.dispose();
-    for (const g of sideGeoms) g.dispose();
-    if (topCapGeom) topCapGeom.dispose();
-    try { parts.base.delete(); } catch { /* already dead */ }
-    try { parts.topCap.delete(); } catch { /* already dead */ }
-    for (const s of parts.sides) {
-      try { s.delete(); } catch { /* already dead */ }
-    }
+    try { parts.printShell.delete(); } catch { /* already dead */ }
     throw err;
   }
 
-  // Tear down the previous set atomically.
+  // Tear down the previous state atomically.
   const prev = getState(group);
   if (prev) {
     cancelTween(prev);
-    // Dispose the previous material alongside the previous geometries.
     prev.material.dispose();
   }
   const existing = [...group.children];
   for (const child of existing) {
     if (child instanceof Mesh) disposeMeshGeometry(child);
   }
-  disposeCachedManifold(group, PRINTABLE_BASE_MANIFOLD_KEY);
-  disposeCachedManifold(group, PRINTABLE_TOP_CAP_MANIFOLD_KEY);
-  disposeCachedSideManifolds(group);
+  disposeCachedManifold(group);
   setState(group, null);
 
-  // Fresh install starts VISIBLE (issue #67: flip from Wave-4's
-  // default-OFF to default-ON. Users click Generate mold and expect
-  // the mold box to appear; the previous default caused confusion
-  // and support reports of "no base was created").
+  // Fresh install starts VISIBLE (issue #67 carry-forward).
   group.visible = true;
 
-  // One shared material for the whole set.
-  const material = createPrintableMaterial();
+  // Build the mesh.
+  const material = createPrintShellMaterial();
+  const mesh = new Mesh(geom, material);
+  mesh.userData['tag'] = PRINT_SHELL_MESH_TAG;
+  group.add(mesh);
 
-  // Build the meshes. The scene-graph add order matters only for
-  // `group.children` traversal stability in tests — `[base, ...sides, topCap]`
-  // matches the input parameter order so tests can index deterministically.
-  const baseMesh = new Mesh(baseGeom, material);
-  baseMesh.userData['tag'] = PRINTABLE_BASE_MESH_TAG;
-  group.add(baseMesh);
+  // Cache the Manifold so clearPrintableParts can release WASM memory
+  // without the caller holding onto it.
+  group.userData[PRINT_SHELL_MANIFOLD_KEY] = parts.printShell;
 
-  const sideMeshes: Mesh[] = [];
-  for (let i = 0; i < sideGeoms.length; i++) {
-    const sg = sideGeoms[i];
-    if (!sg) continue;
-    const m = new Mesh(sg, material);
-    m.userData['tag'] = `${PRINTABLE_SIDE_MESH_TAG_PREFIX}${i}`;
-    group.add(m);
-    sideMeshes.push(m);
-  }
-
-  const topCapMesh = new Mesh(topCapGeom, material);
-  topCapMesh.userData['tag'] = PRINTABLE_TOP_CAP_MESH_TAG;
-  group.add(topCapMesh);
-
-  // Cache the Manifolds on the group so clearPrintableParts can release
-  // WASM memory without needing the caller to hold onto them.
-  group.userData[PRINTABLE_BASE_MANIFOLD_KEY] = parts.base;
-  group.userData[PRINTABLE_TOP_CAP_MANIFOLD_KEY] = parts.topCap;
-  group.userData[PRINTABLE_SIDES_MANIFOLDS_KEY] = [...parts.sides];
-
-  // Compute union bbox + exploded offset magnitude + per-part directions.
-  const allMeshes: Mesh[] = [baseMesh, ...sideMeshes, topCapMesh];
-  const bbox = unionBbox(allMeshes);
+  const bbox = meshBbox(mesh);
   const offsetMax_mm = resolveExplodedOffset(bbox);
-  const partsTween = computePartTweens(baseMesh, sideMeshes, topCapMesh, bbox);
 
   const state: PrintableState = {
-    baseMesh,
-    topCapMesh,
-    sideMeshes,
-    parts: partsTween,
+    mesh,
     offsetMax_mm,
     currentFraction: 0,
     targetFraction: 0,
@@ -543,17 +364,17 @@ export async function setPrintableParts(
   };
   setState(group, state);
 
-  // Pin positions at fraction=0 (collapsed). Default Mesh.position is
-  // zero already, but explicit application ensures the invariant.
+  // Pin position at fraction=0 (collapsed). Default Mesh.position is zero
+  // already, but explicit application ensures the invariant.
   applyFraction(state, 0);
 
-  return { bbox, baseMesh, topCapMesh, sideMeshes };
+  return { bbox, mesh };
 }
 
 /**
- * Remove all printable parts from the scene, dispose GPU resources, and
- * `.delete()` every cached Manifold. Idempotent and safe on a scene
- * with no printable parts installed.
+ * Remove the print shell from the scene, dispose GPU resources, and
+ * `.delete()` the cached Manifold. Idempotent and safe on a scene with
+ * no print shell installed.
  */
 export function clearPrintableParts(scene: Scene): void {
   const group = findGroup(scene);
@@ -567,19 +388,14 @@ export function clearPrintableParts(scene: Scene): void {
   for (const child of existing) {
     if (child instanceof Mesh) disposeMeshGeometry(child);
   }
-  disposeCachedManifold(group, PRINTABLE_BASE_MANIFOLD_KEY);
-  disposeCachedManifold(group, PRINTABLE_TOP_CAP_MANIFOLD_KEY);
-  disposeCachedSideManifolds(group);
+  disposeCachedManifold(group);
   setState(group, null);
-  // Leave `group.visible` as-is; the next install resets it to false.
-  // A consumer that clears + immediately queries `arePrintablePartsVisible`
-  // should see false (enforced by the no-state guard in that getter).
+  // Leave `group.visible` as-is; the next install resets it to true.
 }
 
 /**
- * Flip the visibility of the whole printable-parts group. Called by the
- * toolbar toggle. No-op when no parts are installed (defence-in-depth;
- * the toolbar toggle's enable-gate already prevents it in production).
+ * Flip the visibility of the printable-parts group. Called by the
+ * toolbar toggle. No-op when no parts are installed (defence-in-depth).
  */
 export function setPrintablePartsVisible(scene: Scene, visible: boolean): void {
   const group = findGroup(scene);
@@ -587,14 +403,11 @@ export function setPrintablePartsVisible(scene: Scene, visible: boolean): void {
   const state = getState(group);
   if (!state) return;
   group.visible = visible;
-  // When parts are hidden, cancel any running tween so the RAF loop
-  // doesn't keep burning CPU on invisible geometry (issue #62 perf AC).
-  // The tween's CURRENT and TARGET fractions are preserved so the next
-  // visible transition resumes from the expected state.
+  // When hidden, cancel any running tween so the RAF loop doesn't burn
+  // CPU on invisible geometry. Snap to target so the next show reveals
+  // the mesh at its intended rest position.
   if (!visible && state.rafId !== 0) {
     cancelTween(state);
-    // Snap to the target fraction so the next show reveals parts at
-    // their intended rest position (not mid-tween).
     applyFraction(state, state.targetFraction);
   }
 }
@@ -612,8 +425,8 @@ export function arePrintablePartsVisible(scene: Scene): boolean {
 }
 
 /**
- * Whether a printable-parts set is currently installed. Used by the
- * toolbar toggle to gate enablement.
+ * Whether a print shell is currently installed. Used by the toolbar
+ * toggle to gate enablement.
  */
 export function hasPrintableParts(scene: Scene): boolean {
   const group = findGroup(scene);
@@ -622,18 +435,9 @@ export function hasPrintableParts(scene: Scene): boolean {
 }
 
 /**
- * Toggle the exploded-view state for printable parts. `true` animates
- * base/topCap/sides to their exploded positions; `false` collapses them.
- * No-op when no parts are installed OR when the group is hidden — the
- * issue's perf AC demands the tween stay idle when nothing is visible.
- *
- * The tween DOES still run while hidden if we wanted (for "pre-animate
- * before reveal" patterns), but the issue explicitly calls out the
- * wasted-work concern, so we short-circuit here. Callers that flip
- * visibility ON while exploded is already desired should either:
- *   (a) set visibility ON first, then call this, or
- *   (b) use the main.ts pattern: track a module-level "exploded"
- *       boolean in the UI layer, and apply it after every `setVisible(true)`.
+ * Toggle the exploded-view state for the print shell. `true` animates
+ * the mesh to +Y; `false` collapses it. No-op when no shell is
+ * installed OR when the group is hidden.
  */
 export function setPrintablePartsExplodedView(scene: Scene, exploded: boolean): void {
   const group = findGroup(scene);
@@ -642,7 +446,7 @@ export function setPrintablePartsExplodedView(scene: Scene, exploded: boolean): 
   if (!state) return;
   const target = exploded ? 1 : 0;
   // If the group is hidden, snap to the target (no tween, no RAF) so
-  // that the next setVisible(true) shows parts at the right place.
+  // that the next setVisible(true) shows the mesh at the right place.
   if (!group.visible) {
     cancelTween(state);
     state.targetFraction = target;
@@ -653,8 +457,8 @@ export function setPrintablePartsExplodedView(scene: Scene, exploded: boolean): 
 }
 
 /**
- * Whether the exploded-view tween for printable parts is currently idle.
- * Returns `true` when no parts are installed, OR the group is hidden, OR
+ * Whether the exploded-view tween for the print shell is currently idle.
+ * Returns `true` when no shell is installed, OR the group is hidden, OR
  * the tween has completed / never started.
  *
  * Used by visual-regression tests to gate `toHaveScreenshot` on a stable
@@ -667,7 +471,6 @@ export function isPrintableExplodedIdle(scene: Scene): boolean {
   if (!group) return true;
   const state = getState(group);
   if (!state) return true;
-  // Hidden implies idle — we cancel the tween on hide.
   if (!group.visible) return true;
   return state.rafId === 0 && state.tweenStart_ms === null;
 }

@@ -1,25 +1,27 @@
 // tests/e2e/printable-preview.spec.ts
 //
-// End-to-end for issue #62: printable-parts preview + exploded-view
-// extension.
+// End-to-end for issue #62 (updated for Wave C, issue #72): printable-
+// parts preview + exploded-view extension. Post-Wave-C the print shell
+// is a SINGLE surface-conforming mesh (no rectangular box / N sides /
+// top cap).
 //
 // Flow:
 //   1. Launch app, stub the Open dialog to return the mini-figurine.
 //   2. Open STL → master loads; printable-parts toggle starts disabled.
 //   3. Commit a face (camera-down-click, same helper as the silicone spec).
 //   4. Click Generate → wait for volumes to populate.
-//   5. Assert printable-parts toggle is enabled + not-pressed; group
-//      still hidden (default OFF per issue #62).
-//   6. Toggle printable-parts ON → group becomes visible; assert via
-//      scene.traverse that base + 4 sides + topCap meshes exist.
+//   5. Assert printable-parts toggle is enabled + pressed (default ON per
+//      issue #67 carry-forward).
+//   6. Single `print-shell` mesh exists in the scene.
 //   7. Toggle exploded-view ON → wait for BOTH idle signals (silicone
-//      + printable) → assert base world-Y < -20 mm (base fell below
-//      origin) AND topCap world-Y > +20 mm.
+//      + print-shell) → assert print-shell world-Y > +20 mm (shell
+//      lifted along +Y above silicone).
 //   8. Stale-invalidation: commit a different face → both preview
 //      groups clear AND both toggles revert to disabled.
 //
-// Generator budget on the mini-figurine is ~2-3 s; we set the wait
-// ceilings to 15 s for CI headroom, same as the silicone spec.
+// Generator budget on the mini-figurine is ~3-4 s post-Wave-C (two
+// levelSet passes against the same SDF); wait ceilings bumped to 20 s
+// for CI headroom.
 
 import { expect, test, type Page } from '@playwright/test';
 import { resolve } from 'node:path';
@@ -138,15 +140,14 @@ async function commitSideFace(page: Page): Promise<void> {
 }
 
 /**
- * Count printable-parts meshes by tag prefix. Returns `{base, sides,
- * topCap}` so tests can differentiate between "no parts installed" and
- * "partial install (bug)". The counts land at 1 / N / 1 after a
- * successful Generate with default sideCount=4.
+ * Count print-shell meshes in the scene. Post-Wave-C (issue #72) this
+ * is a single surface-conforming mesh tagged `print-shell` — the
+ * rectangular-box rectangular base/sides/top-cap tags are gone.
+ * Returned as an object so the shape can extend in Wave D/E/F (base
+ * slab, sliced shell pieces) without churning call sites.
  */
 async function countPrintableMeshes(page: Page): Promise<{
-  base: number;
-  sides: number;
-  topCap: number;
+  printShell: number;
 }> {
   return page.evaluate(() => {
     type SceneHook = {
@@ -159,18 +160,12 @@ async function countPrintableMeshes(page: Page): Promise<{
     const hooks = (window as unknown as { __testHooks?: SceneHook })
       .__testHooks;
     if (!hooks?.scene) throw new Error('scene hook missing');
-    let base = 0;
-    let sides = 0;
-    let topCap = 0;
+    let printShell = 0;
     hooks.scene.traverse((obj) => {
       const tag = obj.userData?.['tag'];
-      if (tag === 'printable-base') base += 1;
-      else if (tag === 'printable-top-cap') topCap += 1;
-      else if (typeof tag === 'string' && tag.startsWith('printable-side-')) {
-        sides += 1;
-      }
+      if (tag === 'print-shell') printShell += 1;
     });
-    return { base, sides, topCap };
+    return { printShell };
   });
 }
 
@@ -209,7 +204,7 @@ async function readPrintableMeshWorldY(
   }, tag);
 }
 
-test('printable-parts preview: toggle reveals → exploded drops base below Y=-20', async () => {
+test('print-shell preview: default-ON reveals shell → exploded lifts shell above Y=+20', async () => {
   const app = await launchApp();
   try {
     const page = await app.firstWindow();
@@ -285,11 +280,10 @@ test('printable-parts preview: toggle reveals → exploded drops base below Y=-2
     await expect(explodedToggle).toBeEnabled();
     await expect(explodedToggle).toHaveAttribute('aria-pressed', 'false');
 
-    // Printable parts are installed AND visible (default ON per #67).
+    // Print shell is installed AND visible (default ON per #67). Wave C:
+    // one surface-conforming mesh, not 6 rectangular pieces.
     const counts = await countPrintableMeshes(page);
-    expect(counts.base).toBe(1);
-    expect(counts.sides).toBe(4); // default sideCount
-    expect(counts.topCap).toBe(1);
+    expect(counts.printShell).toBe(1);
 
     // Scene-level visibility flag is true without any user click.
     const visibleAfterGenerate = await page.evaluate(() => {
@@ -334,14 +328,11 @@ test('printable-parts preview: toggle reveals → exploded drops base below Y=-2
     });
     expect(visibleAfterToggle).toBe(true);
 
-    // Base + topCap currently at y ≈ 0 (not exploded yet).
-    expect(await readPrintableMeshWorldY(page, 'printable-base')).toBeCloseTo(
+    // Print shell currently at y ≈ 0 (not exploded yet).
+    expect(await readPrintableMeshWorldY(page, 'print-shell')).toBeCloseTo(
       0,
       3,
     );
-    expect(
-      await readPrintableMeshWorldY(page, 'printable-top-cap'),
-    ).toBeCloseTo(0, 3);
 
     // Toggle exploded view ON. This fans out to BOTH scene modules —
     // silicone halves AND printable parts animate simultaneously.
@@ -370,13 +361,13 @@ test('printable-parts preview: toggle reveals → exploded drops base below Y=-2
       { timeout: 5_000 },
     );
 
-    // Base falls below -20 mm. Offset = max(30, 0.2 * bboxHeight) ≥ 30,
-    // so base should be at y ≈ -30 after exploding. -20 is the issue-
-    // specified assertion threshold (issue #62 E2E AC).
-    const baseY = await readPrintableMeshWorldY(page, 'printable-base');
-    expect(baseY).toBeLessThan(-20);
-    const topCapY = await readPrintableMeshWorldY(page, 'printable-top-cap');
-    expect(topCapY).toBeGreaterThan(20);
+    // Wave C: the print shell is a single mesh that lifts along +Y with
+    // offset = max(40, 0.25 * bboxHeight) ≥ 40, so the shell should be
+    // at y ≈ 40+ after exploding. +20 is a conservative lower bound that
+    // catches a "shell never moved" regression while tolerating any
+    // bbox-height fluctuation.
+    const shellY = await readPrintableMeshWorldY(page, 'print-shell');
+    expect(shellY).toBeGreaterThan(20);
 
     // Collapse exploded view.
     await explodedToggle.click();
@@ -399,7 +390,7 @@ test('printable-parts preview: toggle reveals → exploded drops base below Y=-2
       undefined,
       { timeout: 5_000 },
     );
-    expect(await readPrintableMeshWorldY(page, 'printable-base')).toBeCloseTo(
+    expect(await readPrintableMeshWorldY(page, 'print-shell')).toBeCloseTo(
       0,
       2,
     );
@@ -409,9 +400,7 @@ test('printable-parts preview: toggle reveals → exploded drops base below Y=-2
     await expect(printableToggle).toBeDisabled();
     await expect(printableToggle).toHaveAttribute('aria-pressed', 'false');
     const countsAfterStale = await countPrintableMeshes(page);
-    expect(countsAfterStale.base).toBe(0);
-    expect(countsAfterStale.sides).toBe(0);
-    expect(countsAfterStale.topCap).toBe(0);
+    expect(countsAfterStale.printShell).toBe(0);
   } finally {
     await app.close();
   }
