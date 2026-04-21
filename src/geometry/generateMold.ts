@@ -3,7 +3,11 @@
 // Mold generator — Phase 3d Wave C (issue #72). Produces:
 //
 //   1. a surface-conforming silicone body (shell − master) around the
-//      master via BVH-accelerated `Manifold.levelSet`,
+//      master via BVH-accelerated `Manifold.levelSet`. Trimmed open at
+//      `master.max.y` (issue #87 dogfood fix) so the master's top face
+//      is exposed as the pour opening — the user pours liquid silicone
+//      from above into the pour well that the shell rim forms above
+//      the silicone.
 //   2. a surface-conforming print shell hugging that silicone, computed
 //      by a second levelSet at a larger negative offset then subtracting
 //      the silicone outer body and trimming top + bottom to produce an
@@ -671,8 +675,52 @@ export async function generateSiliconeShell(
         // Step 3b: carve the cavity. `difference` is guaranteed-manifold
         // on two manifold inputs (ADR-002). The result is the SINGLE
         // silicone body we return.
-        silicone = toplevel.Manifold.difference([siliconeOuter, transformedMaster]);
-        assertManifold(silicone, 'silicone body (silicone outer − master)');
+        const siliconeClosed = toplevel.Manifold.difference([
+          siliconeOuter,
+          transformedMaster,
+        ]);
+        let siliconeClosedDisposed = false;
+        try {
+          assertManifold(
+            siliconeClosed,
+            'silicone body (silicone outer − master)',
+          );
+
+          // Step 3c (issue #87 dogfood fix): trim the silicone top so
+          // the master's upper face is EXPOSED — the user pours liquid
+          // silicone from above through this opening. Pre-fix the
+          // silicone fully enclosed the master (genus ≥ 1, sealed
+          // jacket) and there was no visible pour path.
+          //
+          // Trim plane: y = masterMaxYInWorld. `trimByPlane(n, d)` keeps
+          // the half where `dot(p, n) >= d`. For `n = [0, -1, 0]`,
+          // `d = -masterMaxY` keeps `-y >= -masterMaxY`, i.e.
+          // `y <= masterMaxY`. The result is a silicone body whose top
+          // surface lies at the master's top Y with the master's top
+          // outline as a hole — the pour opening.
+          //
+          // The shell's top trim still sits at
+          // `masterMaxY + siliconeThickness + PRINT_SHELL_POUR_EDGE_MM`,
+          // so the shell now forms a rim `siliconeThickness + 3 mm`
+          // above the silicone → a pour well the user pours liquid
+          // silicone into.
+          const siliconeTrimY = masterBbox.max[1];
+          silicone = siliconeClosed.trimByPlane([0, -1, 0], -siliconeTrimY);
+          // Release the closed-top silicone immediately — ownership of
+          // the trimmed result transfers to `silicone` for the rest of
+          // the pipeline.
+          siliconeClosed.delete();
+          siliconeClosedDisposed = true;
+          assertManifold(silicone, 'silicone body (top-trimmed for pour)');
+        } finally {
+          // Defence-in-depth: if `trimByPlane` throws or `assertManifold`
+          // rejects the trimmed result, make sure we release the
+          // pre-trim Manifold. `silicone` itself is released by the
+          // broader error path already in place below.
+          if (!siliconeClosedDisposed) {
+            try { siliconeClosed.delete(); } catch { /* already dead */ }
+          }
+        }
         const tCavity = performance.now();
 
         // Step 4a: SECOND levelSet for the print-shell outer at a larger

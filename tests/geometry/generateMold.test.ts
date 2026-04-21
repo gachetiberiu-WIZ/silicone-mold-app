@@ -71,8 +71,23 @@ describe('generateSiliconeShell — unit-cube fixture', () => {
         // For unit cube, r=5:
         //   V(cube)=1, SA=6, perimeter=12 → V(shell) ≈ 790.22 mm³
         // Silicone = shell − master = V(shell) − V(master) ≈ 789.22 mm³.
+        //
+        // Issue #87 dogfood fix: the silicone is now TRIMMED at
+        // `master.max.y` so the master's top face is exposed as the
+        // pour opening. The top-cap volume removed is roughly a dome-
+        // topped slab above `y = master.max.y` and below the
+        // Minkowski-expanded silicone surface at +5 mm. Analytic bound
+        // for the removed cap on a 1×1×1 cube at origin
+        // (y ∈ [-0.5, 0.5]): a 5 mm-tall dome atop a 1×1 face plus
+        // quarter-toroidal edge rings plus octant corner spheres. Lower
+        // bound (flat slab only): 1×1×5 = 5 mm³. Upper bound
+        // (full Minkowski cap): silicone top-half − 1×1 cylinder-ish —
+        // bounded by ~V(shell)/2 ≈ 395 mm³. Widen the tolerance to
+        // ±30 % (from ±15 %) so the trim doesn't flip the fixture's
+        // acceptance band either way; the mini-figurine test below
+        // retains the order-of-magnitude sanity check.
         const ANALYTIC_SHELL_VOL = 1 + 30 + 75 * Math.PI + (500 * Math.PI) / 3;
-        const ANALYTIC_SILICONE_VOL = ANALYTIC_SHELL_VOL - 1;
+        const ANALYTIC_SILICONE_VOL_PRE_TRIM = ANALYTIC_SHELL_VOL - 1;
 
         const p = params({ siliconeThickness_mm: 5 });
         const result = await generateSiliconeShell(
@@ -86,12 +101,33 @@ describe('generateSiliconeShell — unit-cube fixture', () => {
           // Silicone volume matches the Manifold's reported volume exactly.
           expect(result.silicone.volume()).toBeCloseTo(result.siliconeVolume_mm3, 3);
 
-          // Silicone volume within ±15% of the analytic Minkowski-sum
-          // prediction. The levelSet grid coarsens the Minkowski exactly —
-          // bigger than analytic on the rounded-corner dilation side, so
-          // we lose a little curvature mass in both directions.
-          expect(result.siliconeVolume_mm3).toBeLessThan(ANALYTIC_SILICONE_VOL * 1.15);
-          expect(result.siliconeVolume_mm3).toBeGreaterThan(ANALYTIC_SILICONE_VOL * 0.85);
+          // Silicone volume is less than the pre-trim Minkowski
+          // prediction by definition — the top cap is removed.
+          // The widened band (>= 50 %, <= 100 %) catches both
+          // "nothing got trimmed" (upper) and "trim ate the whole
+          // silicone" (lower) regressions without pinning the exact
+          // cap volume (which depends on the levelSet grid + rounded-
+          // corner dilation).
+          expect(result.siliconeVolume_mm3).toBeLessThan(
+            ANALYTIC_SILICONE_VOL_PRE_TRIM * 1.0,
+          );
+          expect(result.siliconeVolume_mm3).toBeGreaterThan(
+            ANALYTIC_SILICONE_VOL_PRE_TRIM * 0.5,
+          );
+
+          // Issue #87: silicone top now sits at or very near
+          // `master.max.y` — the trim plane is `y = master.max.y`.
+          // Allow one edgeLength (2 mm) of slack for the levelSet
+          // grid's marching-tets output on the dilated surface
+          // meeting the trim plane.
+          const masterBbox = manifold.boundingBox();
+          const siliconeBbox = result.silicone.boundingBox();
+          expect(siliconeBbox.max[1]).toBeLessThanOrEqual(
+            (masterBbox.max[1] ?? 0) + 0.1,
+          );
+          expect(siliconeBbox.max[1]).toBeGreaterThanOrEqual(
+            (masterBbox.max[1] ?? 0) - 2.5,
+          );
 
           // Resin identity: the Wave-A pipeline defines resin as master
           // volume exactly. Pin at 1e-9 relative (carried forward from
@@ -133,10 +169,21 @@ describe('generateSiliconeShell — unit-sphere fixture', () => {
         try {
           expect(isManifold(result.silicone)).toBe(true);
 
-          // Silicone volume ≈ analytic within ±10% (icosphere approximation
-          // + levelSet grid both contribute faceting error).
-          expect(result.siliconeVolume_mm3).toBeLessThan(ANALYTIC_SILICONE_VOL * 1.1);
-          expect(result.siliconeVolume_mm3).toBeGreaterThan(ANALYTIC_SILICONE_VOL * 0.9);
+          // Issue #87: the silicone is trimmed at `master.max.y` to
+          // expose the master's top face as the pour opening. The
+          // removed cap is a rough hemisphere of radius 6 (outer) minus
+          // the icosphere's contribution above y=1. Volume is bounded
+          // below by the flat top face area × silicone thickness, and
+          // above by half of the full Minkowski jacket. Widen the
+          // tolerance band to [0.4, 1.0] relative to the pre-trim
+          // prediction — rather than try to model the exact cap mass,
+          // which varies with the icosphere subdivision.
+          expect(result.siliconeVolume_mm3).toBeLessThan(
+            ANALYTIC_SILICONE_VOL * 1.0,
+          );
+          expect(result.siliconeVolume_mm3).toBeGreaterThan(
+            ANALYTIC_SILICONE_VOL * 0.4,
+          );
 
           // Resin identity at 1e-9 relative.
           expect(result.resinVolume_mm3).toBeCloseTo(MASTER_VOL, 9);
