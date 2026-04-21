@@ -2,8 +2,16 @@
 //
 // The single source of truth for mold-generation parameters selected by the
 // user in the right sidebar. This module is pure state — no DOM, no i18n,
-// no geometry. The Phase 3c mold generator will consume `get()` at the
-// moment the user presses the (not-yet-wired) Generate button.
+// no geometry.
+//
+// Wave-A scope (issue #69) drops the sprue, vent, vent-count, and
+// registration-key fields entirely — they belonged to the two-halves-in-box
+// strategy that's been replaced by rigid-shell + silicone-glove. The
+// remaining four fields — wall thickness, base thickness, side count,
+// draft angle — stay in this commit; `wallThickness_mm` is renamed to
+// `siliconeThickness_mm` and `baseThickness_mm` to `printShellThickness_mm`
+// in a follow-up commit on the same branch so the rename is reviewable
+// independently from the deletion.
 //
 // Design notes
 // ------------
@@ -14,29 +22,15 @@
 //   boundary — see `src/renderer/ui/formatters.ts`). Angles are always
 //   degrees.
 //
-// * No runtime dep for state management. The app's vanilla-TS posture
-//   matches the topbar + units-toggle modules; introducing Zustand / Redux
-//   for ~8 scalar fields would be disproportionate. If, during Phase 3d+,
-//   the state graph grows beyond what a plain `Set<listener>` can serve,
-//   we'll revisit via ADR.
-//
 // * Listener semantics. `subscribe(fn)` returns an unsubscribe callable.
 //   Listeners fire synchronously inside `update()` / `reset()` after the
 //   internal object is replaced. The listener receives the new readonly
 //   snapshot; mutating it has no effect on the store (the reference is
 //   frozen via `Object.freeze`).
 //
-// * Ranges from docs/research/molding-techniques.md §6 ("Recommendation
-//   for v1 — APPROVED 2026-04-18"). The issue-body numeric table was
-//   superseded per the agent clarification posted on #31: the research doc
-//   is the authoritative source when the two disagree (and the issue's own
-//   instruction says so verbatim). See PR body for details.
-//
 // * Validation. Ranges live next to the defaults so the panel can render
 //   "Out of range (min–max)" error messages and clamp on blur without
 //   importing a schema library.
-
-export type RegistrationKeyStyle = 'asymmetric-hemi' | 'cone' | 'keyhole';
 
 export interface MoldParameters {
   /** Silicone wall thickness in mm. */
@@ -45,14 +39,6 @@ export interface MoldParameters {
   baseThickness_mm: number;
   /** Number of printed side walls: 2, 3, or 4. */
   sideCount: 2 | 3 | 4;
-  /** Resin pour-funnel diameter in mm. */
-  sprueDiameter_mm: number;
-  /** Air-escape vent diameter in mm. */
-  ventDiameter_mm: number;
-  /** Number of vent channels (auto-placement later). */
-  ventCount: number;
-  /** Registration-key shape for mating faces. */
-  registrationKeyStyle: RegistrationKeyStyle;
   /** Draft angle in degrees. Always unit-agnostic. */
   draftAngle_deg: number;
 }
@@ -65,27 +51,19 @@ export interface NumericConstraint {
   min: number;
   max: number;
   step: number;
-  /** Integer-only flag (e.g. ventCount). */
   integer: boolean;
 }
 
 /**
- * Defaults APPROVED 2026-04-18 at the Phase-0 gate per
- * `docs/research/molding-techniques.md §6`. The issue-31 numeric table
- * conflicted with this doc; the research doc wins (the issue body says so
- * explicitly: "if a doc contradicts the table, the table is wrong").
- *
- * `ventCount` is not specified in the research doc; we keep the issue
- * table's default of 2 and range 0–8.
+ * Defaults for the Wave-A parameter set. `wallThickness_mm` + `baseThickness_mm`
+ * keep their pre-#69 ranges and defaults in this commit; the follow-up
+ * Wave-B rename commit shifts them to the new range (silicone 1–15
+ * default 5, print-shell 2–30 default 8).
  */
 export const DEFAULT_PARAMETERS: Readonly<MoldParameters> = Object.freeze({
   wallThickness_mm: 10,
   baseThickness_mm: 5,
   sideCount: 4,
-  sprueDiameter_mm: 5,
-  ventDiameter_mm: 1.5,
-  ventCount: 2,
-  registrationKeyStyle: 'asymmetric-hemi',
   draftAngle_deg: 0,
 });
 
@@ -99,17 +77,11 @@ export const NUMERIC_CONSTRAINTS: Readonly<
   Record<keyof Pick<MoldParameters,
     | 'wallThickness_mm'
     | 'baseThickness_mm'
-    | 'sprueDiameter_mm'
-    | 'ventDiameter_mm'
-    | 'ventCount'
     | 'draftAngle_deg'
   >, NumericConstraint>
 > = Object.freeze({
   wallThickness_mm: { min: 6, max: 25, step: 0.5, integer: false },
   baseThickness_mm: { min: 2, max: 15, step: 0.5, integer: false },
-  sprueDiameter_mm: { min: 3, max: 8, step: 0.5, integer: false },
-  ventDiameter_mm: { min: 1, max: 3, step: 0.5, integer: false },
-  ventCount: { min: 0, max: 8, step: 1, integer: true },
   draftAngle_deg: { min: 0, max: 3, step: 0.5, integer: false },
 });
 
@@ -117,10 +89,6 @@ export const NUMERIC_CONSTRAINTS: Readonly<
 export const SIDE_COUNT_OPTIONS: ReadonlyArray<2 | 3 | 4> = Object.freeze([
   2, 3, 4,
 ]);
-
-/** Allowed enum values for `registrationKeyStyle`. */
-export const KEY_STYLE_OPTIONS: ReadonlyArray<RegistrationKeyStyle> =
-  Object.freeze(['asymmetric-hemi', 'cone', 'keyhole']);
 
 export type ParametersListener = (
   parameters: Readonly<MoldParameters>,
@@ -160,10 +128,6 @@ function equals(a: MoldParameters, b: MoldParameters): boolean {
     a.wallThickness_mm === b.wallThickness_mm &&
     a.baseThickness_mm === b.baseThickness_mm &&
     a.sideCount === b.sideCount &&
-    a.sprueDiameter_mm === b.sprueDiameter_mm &&
-    a.ventDiameter_mm === b.ventDiameter_mm &&
-    a.ventCount === b.ventCount &&
-    a.registrationKeyStyle === b.registrationKeyStyle &&
     a.draftAngle_deg === b.draftAngle_deg
   );
 }
@@ -188,8 +152,6 @@ export function createParametersStore(
         listener(current);
       } catch (err) {
         // A single bad subscriber should not break the store for others.
-        // Log and continue; this matches the behaviour of well-behaved
-        // observable implementations.
         console.error('[parameters] listener threw:', err);
       }
     }

@@ -21,15 +21,6 @@
     "wall": "Wall thickness",
     "base": "Base thickness",
     "sideCount": "Side count",
-    "sprue": "Sprue diameter",
-    "vent": "Vent diameter",
-    "ventCount": "Vent count",
-    "keyStyle": "Registration keys",
-    "keyStyleOptions": {
-      "asymmetric-hemi": "Asymmetric hemispheres",
-      "cone": "Cone",
-      "keyhole": "Keyhole"
-    },
     "draft": "Draft angle",
     "reset": "Reset to defaults",
     "invalid": "Out of range ({{min}}–{{max}})"
@@ -42,7 +33,7 @@
   },
   "explodedView": {
     "toggle": "Exploded view",
-    "toggleHint": "Show the two silicone halves moved apart so the cavity is visible"
+    "toggleHint": "Show the silicone body lifted so the cavity is visible"
   },
   "printableParts": {
     "toggle": "Show printable parts",
