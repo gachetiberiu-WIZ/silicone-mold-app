@@ -26,6 +26,17 @@
     "reset": "Reset to defaults",
     "invalid": "Out of range ({{min}}–{{max}})"
   },
+  "dimensions": {
+    "title": "Dimensions",
+    "currentSize": "Current size",
+    "scalePercent": "Scale %",
+    "width": "Width (X)",
+    "height": "Height (Y)",
+    "depth": "Depth (Z)",
+    "constrainProportions": "Constrain proportions",
+    "resetSize": "Reset to STL size",
+    "noMaster": "Load an STL to see dimensions"
+  },
   "layFlat": {
     "toggle": "Place on face",
     "toggleHint": "Click a face on the mesh to lay it flat on the print bed (Esc to cancel)",

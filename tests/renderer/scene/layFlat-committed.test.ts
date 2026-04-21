@@ -94,11 +94,15 @@ function buildHarness(): {
   // Minimal controls stub — the controller's commit/reset path calls
   // `frameToBox3(camera, controls, box)`, which expects `controls.target`
   // to be a Three `Vector3` (so it can `.copy(center)`) plus an `update()`.
-  // A real `OrbitControls` is overkill; we give it a real Vector3 target
-  // and a no-op update. Nothing in this test asserts on the camera state.
+  // `enable()` also wires an `addEventListener('change', …)` handler for
+  // hover-cache invalidation on orbit (issue #80 dogfood) so we implement
+  // a trivial on/off subscription too — nothing in this test asserts on
+  // its firing, but enable() needs it callable.
   const controls = {
     target: new Vector3(),
     update() {},
+    addEventListener() {},
+    removeEventListener() {},
   } as unknown as OrbitControls;
 
   // Canvas — happy-dom provides HTMLCanvasElement but `getBoundingClientRect`
@@ -207,19 +211,29 @@ describe('LAY_FLAT_COMMITTED_EVENT — initial + idempotent state', () => {
 describe('LAY_FLAT_COMMITTED_EVENT — commit path', () => {
   /**
    * Drive a commit through the public API: enable picking mode, dispatch a
-   * click at the canvas centre. The camera is positioned straight above the
-   * box (set up in `buildHarness`) so a centred ray hits the +Y face, which
-   * the controller's commit logic picks + rotates onto the bed.
+   * pointerdown + pointerup pair at the canvas centre. The camera is
+   * positioned straight above the box (set up in `buildHarness`) so a
+   * centred ray hits the +Y face, which the controller's commit logic
+   * picks + rotates onto the bed.
+   *
+   * The controller now uses `pointerdown`/`pointerup` instead of `click`
+   * (issue #80 dogfood — Chromium drops `click` after ~5 px of pointer
+   * travel, which was silently losing commits on hand-tremor). A zero-
+   * travel pointerdown→pointerup pair is always within the 6 px drag
+   * threshold so it always commits.
    */
   function drivePickAndCommit(): void {
     const { controller, canvas } = harness!;
     controller.enable();
-    const click = new Event('click', { bubbles: true });
-    // PointerEvent constructor isn't fully implemented in happy-dom; the
-    // controller only reads `.clientX`/`.clientY`/`.button`, so assign
-    // them directly onto the Event.
-    Object.assign(click, { clientX: 100, clientY: 100, button: 0 });
-    canvas.dispatchEvent(click);
+    const down = new Event('pointerdown', { bubbles: true });
+    Object.assign(down, { clientX: 100, clientY: 100, button: 0 });
+    canvas.dispatchEvent(down);
+    // Dispatch pointerup on the canvas so it bubbles up to our window-scoped
+    // listener. `ev.target` resolves to the canvas on the bubble path, which
+    // is what the controller's "up landed on canvas" guard checks for.
+    const up = new Event('pointerup', { bubbles: true });
+    Object.assign(up, { clientX: 100, clientY: 100, button: 0 });
+    canvas.dispatchEvent(up);
   }
 
   test('commit fires the event with detail=true', () => {
@@ -247,15 +261,28 @@ describe('LAY_FLAT_COMMITTED_EVENT — commit path', () => {
   });
 });
 
+/**
+ * Dispatch a stationary pointerdown → pointerup pair at the canvas centre,
+ * mirroring the commit flow the production controller now listens for
+ * (issue #80 dogfood — click was replaced with pointerdown/pointerup +
+ * drag-threshold gate).
+ */
+function pointerDownUp(canvas: HTMLCanvasElement): void {
+  const down = new Event('pointerdown', { bubbles: true });
+  Object.assign(down, { clientX: 100, clientY: 100, button: 0 });
+  canvas.dispatchEvent(down);
+  const up = new Event('pointerup', { bubbles: true });
+  Object.assign(up, { clientX: 100, clientY: 100, button: 0 });
+  canvas.dispatchEvent(up);
+}
+
 describe('LAY_FLAT_COMMITTED_EVENT — reset path', () => {
   test('reset() after a commit fires the event with detail=false', () => {
     const { controller } = harness!;
     // Drive the initial commit first (outside the capture so it doesn't
     // pollute the assertion).
     controller.enable();
-    const click = new Event('click');
-    Object.assign(click, { clientX: 100, clientY: 100, button: 0 });
-    harness!.canvas.dispatchEvent(click);
+    pointerDownUp(harness!.canvas);
     expect(controller.isCommitted()).toBe(true);
 
     const details = captureCommittedDetails(() => {
@@ -266,13 +293,90 @@ describe('LAY_FLAT_COMMITTED_EVENT — reset path', () => {
   });
 });
 
+describe('LAY_FLAT_COMMITTED_EVENT — click-vs-drag gate (issue #80 dogfood)', () => {
+  /**
+   * These tests pin the new pointerdown/pointerup commit semantics that
+   * replaced the old `click` listener. The controller used to listen for
+   * `click`, which Chromium suppresses whenever the pointer moves more
+   * than ~5 CSS px between down and up — any hand-tremor during a click
+   * silently dropped the commit. We now listen for pointerdown + pointerup
+   * ourselves and gate the commit on a 6 px travel threshold, so we own
+   * the click-vs-drag decision instead of relying on Chromium's heuristic.
+   */
+  function dispatchDown(canvas: HTMLCanvasElement, x: number, y: number): void {
+    const ev = new Event('pointerdown', { bubbles: true });
+    Object.assign(ev, { clientX: x, clientY: y, button: 0 });
+    canvas.dispatchEvent(ev);
+  }
+  function dispatchUp(
+    target: EventTarget,
+    x: number,
+    y: number,
+    button = 0,
+  ): void {
+    const ev = new Event('pointerup', { bubbles: true });
+    Object.assign(ev, { clientX: x, clientY: y, button });
+    target.dispatchEvent(ev);
+  }
+
+  test('zero-travel pointerdown → pointerup commits the face', () => {
+    const { controller, canvas } = harness!;
+    controller.enable();
+    dispatchDown(canvas, 100, 100);
+    dispatchUp(canvas, 100, 100);
+    expect(controller.isCommitted()).toBe(true);
+  });
+
+  test('small (<6 px) travel still commits — matches Chromium click behaviour', () => {
+    const { controller, canvas } = harness!;
+    controller.enable();
+    dispatchDown(canvas, 100, 100);
+    // 3 px diagonal travel — hypot(3, 0) = 3, under the 6 px threshold.
+    dispatchUp(canvas, 103, 100);
+    expect(controller.isCommitted()).toBe(true);
+  });
+
+  test('travel > 6 px (drag) does NOT commit', () => {
+    const { controller, canvas } = harness!;
+    controller.enable();
+    dispatchDown(canvas, 100, 100);
+    // 20 px horizontal travel — treated as a rotate drag.
+    dispatchUp(canvas, 120, 100);
+    expect(controller.isCommitted()).toBe(false);
+    // Controller stays in picking mode on a drag (only commits auto-exit).
+    expect(controller.isActive()).toBe(true);
+  });
+
+  test('non-primary pointerdown (right button) does not arm the gate', () => {
+    const { controller, canvas } = harness!;
+    controller.enable();
+    // Right-button down → should NOT arm. A subsequent left pointerup with
+    // zero travel would therefore be a no-op.
+    const down = new Event('pointerdown', { bubbles: true });
+    Object.assign(down, { clientX: 100, clientY: 100, button: 2 });
+    canvas.dispatchEvent(down);
+    dispatchUp(canvas, 100, 100, 0);
+    expect(controller.isCommitted()).toBe(false);
+  });
+
+  test('pointerdown off-canvas is ignored', () => {
+    const { controller, canvas } = harness!;
+    controller.enable();
+    // Fabricate a pointerdown with a non-canvas target by dispatching on
+    // body. The controller's `ev.target !== canvas` guard must reject it.
+    const down = new Event('pointerdown', { bubbles: true });
+    Object.assign(down, { clientX: 100, clientY: 100, button: 0 });
+    document.body.dispatchEvent(down);
+    dispatchUp(canvas, 100, 100);
+    expect(controller.isCommitted()).toBe(false);
+  });
+});
+
 describe('LAY_FLAT_COMMITTED_EVENT — notifyMasterReset path', () => {
   test('notifyMasterReset after a commit fires the event with detail=false', () => {
     const { controller } = harness!;
     controller.enable();
-    const click = new Event('click');
-    Object.assign(click, { clientX: 100, clientY: 100, button: 0 });
-    harness!.canvas.dispatchEvent(click);
+    pointerDownUp(harness!.canvas);
     expect(controller.isCommitted()).toBe(true);
 
     const details = captureCommittedDetails(() => {
@@ -286,9 +390,7 @@ describe('LAY_FLAT_COMMITTED_EVENT — notifyMasterReset path', () => {
     const { controller } = harness!;
     // Commit → clear → clear again.
     controller.enable();
-    const click = new Event('click');
-    Object.assign(click, { clientX: 100, clientY: 100, button: 0 });
-    harness!.canvas.dispatchEvent(click);
+    pointerDownUp(harness!.canvas);
     controller.notifyMasterReset();
     expect(controller.isCommitted()).toBe(false);
 

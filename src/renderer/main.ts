@@ -29,9 +29,17 @@ import { getMasterManifold } from './scene/master';
 import { mount, type MountedViewport } from './scene/viewport';
 import { initI18n, t } from './i18n';
 import {
+  createDimensionsStore,
+  type DimensionsStore,
+} from './state/dimensions';
+import {
   createParametersStore,
   type ParametersStore,
 } from './state/parameters';
+import {
+  mountDimensionsPanel,
+  type DimensionsPanelApi,
+} from './ui/dimensions/panel';
 import { attachDropZone } from './ui/dropZone';
 import { clear as clearErrorToast, showError, showNotice } from './ui/errorToast';
 import { bumpGenerateEpoch } from './ui/generateEpoch';
@@ -66,6 +74,8 @@ let topbar: TopbarApi | null = null;
 let viewport: MountedViewport | null = null;
 let parametersStore: ParametersStore | null = null;
 let parameterPanel: ParameterPanelApi | null = null;
+let dimensionsStore: DimensionsStore | null = null;
+let dimensionsPanel: DimensionsPanelApi | null = null;
 let placeOnFace: PlaceOnFaceToggleApi | null = null;
 let explodedView: ExplodedViewToggleApi | null = null;
 let printablePartsToggle: PrintablePartsToggleApi | null = null;
@@ -216,11 +226,38 @@ function mountParameters(): void {
     );
     return;
   }
+  const leftContainer = document.getElementById('sidebar-left');
+  if (!leftContainer) {
+    console.error(
+      'Missing #sidebar-left container — renderer HTML is out of date.',
+    );
+    return;
+  }
   parametersStore = createParametersStore();
+  dimensionsStore = createDimensionsStore();
   // Panel mounts first because `mountParameterPanel` does `container.textContent = ''`
   // to wipe any pre-mount HTML fallback. Mounting the generate-block before
   // the panel would have it clobbered.
   parameterPanel = mountParameterPanel(container, parametersStore);
+
+  // Mount the Dimensions panel (issue #79) into the DEDICATED LEFT sidebar
+  // (issue #80 dogfood feedback — users wanted size controls visually
+  // separated from the generate flow). The left pane owns ONLY this panel
+  // for now; the right pane keeps Generate + MOLD PARAMETERS + Reset.
+  if (viewport) {
+    const vp = viewport;
+    const dStore = dimensionsStore;
+    dimensionsPanel = mountDimensionsPanel(leftContainer, dStore, {
+      getNativeBbox: () => vp.getNativeBbox(),
+    });
+
+    // Subscribe to the dimensions store → push every change through to
+    // the Master group's scale. The viewport re-runs `recenterGroup` and
+    // re-frames the camera inside `setMasterScale`.
+    dStore.subscribe((d) => {
+      vp.setMasterScale({ sx: d.scaleX, sy: d.scaleY, sz: d.scaleZ });
+    });
+  }
 
   // Mount the Generate-mold block and move it to the TOP of the sidebar
   // (issue #36: "at the TOP of the right sidebar, above the parameter
@@ -345,6 +382,20 @@ function mountParameters(): void {
     });
   }
 
+  // Issue #79 — same staleness semantics for dimension edits. Any scale
+  // change invalidates the previously-generated silicone + print-shell
+  // volumes the same way a parameter change does.
+  if (dimensionsStore && topbar && generateButton) {
+    const tbar = topbar;
+    const btn = generateButton;
+    dimensionsStore.subscribe(() => {
+      if (btn.isGenerated() && !btn.isBusy()) {
+        btn.setStale(true);
+        tbar.setVolumesStale(true);
+      }
+    });
+  }
+
   // Subscribe to orientation-committed transitions. The controller fires
   // true after a Place-on-face commit, false after Reset orientation, and
   // false when a new master is loaded. `attachGenerateInvalidation`:
@@ -401,12 +452,14 @@ function mountParameters(): void {
     };
     const hooks = (w.__testHooks ??= {});
     hooks['parameters'] = parametersStore;
+    if (dimensionsStore) hooks['dimensions'] = dimensionsStore;
     if (generateButton) hooks['generateButton'] = generateButton;
   }
-  // Silence unused-var lint for the panel handle — we need the reference
+  // Silence unused-var lint for the panel handles — we need the reference
   // to prevent early GC of its listeners, and to give future shutdown
   // hooks a place to call destroy().
   void parameterPanel;
+  void dimensionsPanel;
 }
 
 /**
@@ -428,6 +481,15 @@ async function loadMasterFromBuffer(buffer: ArrayBuffer): Promise<void> {
     throw new Error('viewport not mounted yet');
   }
   const result = await viewport.setMaster(buffer);
+  // Issue #79 — reset the Dimensions store on every new master load so
+  // the scale controls start at 100 % and the axis readouts show the
+  // new STL's native bbox. `setMaster` already resets `group.scale` to
+  // (1,1,1) at the scene-graph layer; this keeps the UI store aligned.
+  // `refresh()` re-renders the panel so the new `nativeBbox` feeds the
+  // mm readouts even when the store was already at defaults (no-op
+  // reset case).
+  if (dimensionsStore) dimensionsStore.reset();
+  if (dimensionsPanel) dimensionsPanel.refresh();
   // Bump the shared generate-epoch so any in-flight run against the
   // previous master drops its result on resolve. `notifyMasterReset`
   // only fires a committed-event when a commit was previously live, so

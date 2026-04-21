@@ -72,6 +72,22 @@ const MASTER_MESH_TAG = 'master';
 export const MASTER_MANIFOLD_KEY = 'masterManifold';
 
 /**
+ * `userData` key that holds the mesh-LOCAL AABB of the current master at
+ * the moment it was loaded — i.e. BEFORE any group-level transforms
+ * (auto-center, lay-flat rotation, dimensions-panel scale) were applied.
+ * The Dimensions panel (issue #79) reads this to compute user-visible mm
+ * readouts as `nativeBbox × scale[axis]`. The stored `Box3` is a clone —
+ * callers can safely hold the reference across master swaps without
+ * observing later mutation.
+ *
+ * Lifetime: set inside `setMaster` for every successful load, cleared
+ * inside `disposeMaster` + replaced inside `setMaster` before adding the
+ * new mesh. Consumers should fetch via `getNativeBbox(scene)` instead of
+ * reading this key directly.
+ */
+export const MASTER_NATIVE_BBOX_KEY = 'masterNativeBbox';
+
+/**
  * Matte light-grey material. Non-transparent, no clearcoat — the mesh reads
  * as a neutral object against the `#1b1d22` background. No metalness so the
  * hemisphere + directional lights in `createScene()` light it evenly.
@@ -205,6 +221,25 @@ export function getMasterManifold(scene: Scene): Manifold | null {
 }
 
 /**
+ * Returns a CLONE of the native (mesh-local, pre-transform) AABB of the
+ * currently-loaded master. Used by the Dimensions panel (issue #79) to
+ * compute `nativeBbox × scale[axis]` mm readouts live as the user edits
+ * the scale controls.
+ *
+ * Returns `null` when no master is loaded (the panel renders a placeholder
+ * in that state). Always returns a fresh `Box3`, so consumers that mutate
+ * the result — e.g. `bbox.getSize(new Vector3())` — don't corrupt the
+ * cached snapshot.
+ */
+export function getNativeBbox(scene: Scene): Box3 | null {
+  const group = findMasterGroup(scene);
+  if (!group) return null;
+  const cached = group.userData[MASTER_NATIVE_BBOX_KEY] as Box3 | undefined;
+  if (!cached) return null;
+  return cached.clone();
+}
+
+/**
  * Tear down any live master Manifold and its cache slot. Idempotent and safe
  * to call on a scene that never loaded a master. Intended for viewport
  * disposal; `setMaster` handles the per-swap case internally.
@@ -213,6 +248,10 @@ export function disposeMaster(scene: Scene): void {
   const group = findMasterGroup(scene);
   if (!group) return;
   disposeCachedManifold(group);
+  // Drop the native-bbox cache too — it's a plain Box3, no WASM resources
+  // to release, but leaving it on a disposed group would let stale data
+  // leak across a viewport remount.
+  delete group.userData[MASTER_NATIVE_BBOX_KEY];
 }
 
 /**
@@ -311,6 +350,12 @@ export async function setMaster(scene: Scene, buffer: ArrayBuffer): Promise<Mast
   // ("Load second STL after a lay-flat rotation → new master loads at
   // identity orientation, not inheriting stale quaternion").
   group.quaternion.identity();
+  // Issue #79 — same story for per-axis scale. A previous `setMaster` may
+  // have run with the Dimensions panel scale != (1,1,1). The dimensions
+  // store is reset to defaults by the entrypoint on every new load, but
+  // the scene-graph side has to mirror that: without this line the new
+  // master inherits stale scale until the first dimensions event fires.
+  group.scale.set(1, 1, 1);
 
   const material = createMasterMaterial();
   const mesh = new Mesh(displayGeometry, material);
@@ -376,6 +421,14 @@ export async function setMaster(scene: Scene, buffer: ArrayBuffer): Promise<Mast
   // above on the next `setMaster`, or via `disposeMaster(scene)` at
   // viewport teardown.
   group.userData[MASTER_MANIFOLD_KEY] = loaded.manifold;
+
+  // Cache the NATIVE (mesh-local, pre-transform) AABB for the Dimensions
+  // panel (issue #79). We stash a CLONE so later consumers that mutate
+  // the returned bbox — e.g. `getNativeBbox(scene).expandByScalar(...)`
+  // for exploratory math — cannot corrupt the cached snapshot. Eviction
+  // mirrors the Manifold cache: replaced on the next `setMaster`, cleared
+  // on `disposeMaster`.
+  group.userData[MASTER_NATIVE_BBOX_KEY] = localBbox.clone();
 
   return {
     mesh,

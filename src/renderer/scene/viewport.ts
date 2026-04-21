@@ -16,7 +16,7 @@
 //      spec. Does NOT enable test-hook exposure.
 
 import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { Box3, type Mesh, type PerspectiveCamera, type Scene, type WebGLRenderer } from 'three';
+import { Box3, type Group, Mesh, type PerspectiveCamera, type Scene, type WebGLRenderer } from 'three';
 import type { Manifold } from 'manifold-3d';
 
 import { createCamera, computeAspect, frameToBox3 } from './camera';
@@ -27,11 +27,13 @@ import {
   OVERLAY_SIZE_PX,
   type AxesGizmoOverlay,
 } from './gizmos';
+import { recenterGroup } from './layFlat';
 import { createLayFlatController, type LayFlatController } from './layFlatController';
 import { createRenderer, resizeRendererToContainer } from './renderer';
 import { createScene } from './index';
 import {
   disposeMaster as sceneDisposeMaster,
+  getNativeBbox as sceneGetNativeBbox,
   setMaster as sceneSetMaster,
   type MasterResult,
 } from './master';
@@ -172,6 +174,29 @@ export interface MountedViewport {
    * overlay has been populated.
    */
   isFaceHoverOverlayVisible: () => boolean;
+  /**
+   * Issue #79 — apply a per-axis scale to the master group. Writes
+   * `group.scale.set(sx, sy, sz)`, then re-runs `recenterGroup` so the
+   * scaled mesh stays planted on the print bed (lowest Y=0, centered on
+   * X=0/Z=0), and re-frames the camera to the new world AABB.
+   *
+   * Non-destructive: the underlying `BufferGeometry` and cached `Manifold`
+   * are untouched. `generateMold` already receives `masterGroup.matrixWorld`
+   * as its `viewTransform`, so the scale flows through to the geometry
+   * kernel automatically — no changes to the generate pipeline.
+   *
+   * No-op when no master is loaded. Negative / zero / non-finite axes are
+   * rejected (we early-return rather than throw — the UI layer clamps
+   * inputs upstream).
+   */
+  setMasterScale: (scale: { sx: number; sy: number; sz: number }) => void;
+  /**
+   * Issue #79 — read-side companion to `setMasterScale`. Returns the
+   * native (pre-transform) mesh-local AABB as a fresh `Box3`, or `null`
+   * when no master is loaded. Used by the Dimensions panel to derive
+   * live mm readouts as `nativeBbox × scale[axis]`.
+   */
+  getNativeBbox: () => Box3 | null;
   /** Stop RAF, detach listeners, dispose GPU resources, remove the canvas. */
   dispose: () => void;
 }
@@ -398,6 +423,73 @@ export function mount(container: HTMLElement): MountedViewport {
     return result;
   };
 
+  /**
+   * Issue #79 — apply a per-axis scale to the Master group and re-run the
+   * auto-center + re-frame passes. Called from the Dimensions panel on
+   * every store update; also from the `__testHooks.viewport.setMasterScale`
+   * surface for E2E specs.
+   *
+   * Edge cases:
+   *   - No master loaded → no-op. We don't throw because the panel
+   *     subscribes to the store BEFORE the master is loaded on first
+   *     launch, and the store may fire (e.g. during `reset`) before a
+   *     master exists in the scene.
+   *   - Non-finite / non-positive axes → no-op. The dimensions state slice
+   *     clamps upstream, but guard defensively so a buggy caller can't
+   *     `scale.set(0,0,0)` and hide the mesh.
+   */
+  const setMasterScale = (scale: {
+    sx: number;
+    sy: number;
+    sz: number;
+  }): void => {
+    const { sx, sy, sz } = scale;
+    if (
+      !Number.isFinite(sx) || !Number.isFinite(sy) || !Number.isFinite(sz) ||
+      sx <= 0 || sy <= 0 || sz <= 0
+    ) {
+      return;
+    }
+
+    const masterGroup = scene.children.find(
+      (c) => c.userData['tag'] === 'master',
+    ) as Group | undefined;
+    if (!masterGroup) return;
+
+    // The group must host a mesh for recenterGroup to operate on. First
+    // load or post-dispose → no child mesh → early-return. The scale
+    // still applies to `group.scale` so when a master DOES load, the
+    // transform is already in place — but we skip the recenter+reframe
+    // half because there's nothing to center.
+    const mesh = masterGroup.children.find((c) => c instanceof Mesh) as
+      | Mesh
+      | undefined;
+    masterGroup.scale.set(sx, sy, sz);
+    if (!mesh) {
+      masterGroup.updateMatrixWorld(true);
+      return;
+    }
+
+    // Re-apply the on-bed auto-center pass. `recenterGroup` wipes the
+    // group's translation, computes a tight vertex-walk world bbox under
+    // the current rotation + scale, and translates the group so the
+    // mesh sits on Y=0 centered on X=0/Z=0. Same code path that
+    // `layFlatController::commit` runs after a rotation.
+    recenterGroup(masterGroup, mesh);
+
+    // Re-frame the camera to the new world bbox so the user sees the
+    // scaled mesh in full without a manual zoom-out. `Box3.setFromObject`
+    // with the default (non-precise) flag is acceptable here: after
+    // `recenterGroup`, the group's world matrix is coherent and the
+    // mesh's local AABB is what we ultimately want framed.
+    const worldBbox = new Box3().setFromObject(masterGroup);
+    if (!worldBbox.isEmpty()) {
+      frameToBox3(camera, controls, worldBbox);
+    }
+  };
+
+  const getNativeBboxFromScene = (): Box3 | null => sceneGetNativeBbox(scene);
+
   // Test-hook surface — gated on BUILD-TIME NODE_ENV=test so prod bundles
   // tree-shake this block. Runtime `?test=1` alone does NOT expose hooks.
   if (BUILD_TIME_TEST) {
@@ -471,6 +563,8 @@ export function mount(container: HTMLElement): MountedViewport {
     isPrintableExplodedIdle: () => sceneIsPrintableExplodedIdle(scene),
     hasPrintableParts: () => sceneHasPrintableParts(scene),
     isFaceHoverOverlayVisible: () => layFlat.getHoverOverlay().visible,
+    setMasterScale,
+    getNativeBbox: getNativeBboxFromScene,
     dispose,
   };
 
