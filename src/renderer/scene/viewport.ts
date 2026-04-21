@@ -132,13 +132,15 @@ export interface MountedViewport {
    */
   isExplodedViewIdle: () => boolean;
   /**
-   * Install a freshly-generated print-shell Manifold (Wave-C single-mesh
-   * contract, issue #72). Transfers ownership to the scene — caller must
-   * NOT `.delete()` it after this call. After installing, re-frames the
-   * camera to the union of master + silicone + print-shell bboxes.
+   * Install freshly-generated print-shell + base-slab Manifolds (Wave D,
+   * issue #82 — two meshes in the printable-parts group). Transfers
+   * ownership of both Manifolds to the scene; caller must NOT
+   * `.delete()` them after this call. After installing, re-frames the
+   * camera to the union of master + silicone + shell + slab bboxes.
    */
   setPrintableParts: (parts: {
     printShell: Manifold;
+    basePart: Manifold;
   }) => Promise<PrintablePartsResult>;
   /**
    * Tear down any printable parts currently in the scene and release
@@ -359,7 +361,7 @@ export function mount(container: HTMLElement): MountedViewport {
    * lifetime contract without a second dispose here.
    */
   const setPrintableParts = async (
-    parts: { printShell: Manifold },
+    parts: { printShell: Manifold; basePart: Manifold },
   ): Promise<PrintablePartsResult> => {
     const installed = await sceneSetPrintableParts(scene, parts);
 

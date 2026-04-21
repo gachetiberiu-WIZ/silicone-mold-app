@@ -34,25 +34,26 @@
 //     nulled the readouts; re-pushing our stale numbers would be wrong),
 //   - skip `setBusy(false)` (a later run is still current and owns busy).
 //
-// Manifold ownership (issue #47 + #62 + #72)
-// ------------------------------------------
+// Manifold ownership (issues #47, #62, #72, #82)
+// ----------------------------------------------
 //
-// Both Manifolds in `MoldGenerationResult` are generator-owned until the
-// orchestrator decides what to do with them:
+// The three Manifolds in `MoldGenerationResult` (silicone, printShell,
+// basePart) are generator-owned until the orchestrator decides what to
+// do with them:
 //
 //   - Happy path + `scene` supplied:  ownership HANDS OFF to the scene
 //     sinks via `scene.setSilicone({silicone})` + `scene.setPrintableParts
-//     ({printShell})`. The orchestrator must NOT `.delete()` them
-//     afterwards — the sinks do so on their next replacement / clear
+//     ({printShell, basePart})`. The orchestrator must NOT `.delete()`
+//     them afterwards — the sinks do so on their next replacement / clear
 //     cycle.
 //   - Happy path + no `scene`:  fall back to the original behaviour of
 //     `.delete()`-ing here. Kept so pre-scene orchestrator tests (and
 //     any callers that only want volumes) still work.
-//   - Stale-drop path:  Manifolds NEVER reached the scene → orchestrator
-//     is still the owner → `.delete()` before returning.
+//   - Stale-drop path:  no Manifold reached the scene → orchestrator
+//     is still the owner → `.delete()` every one before returning.
 //   - Error path (generate rejected):  Manifolds never existed (the
 //     Promise rejected before producing them) → nothing to delete.
-//   - sink rejects:  the sink is contracted to have disposed the input
+//   - sink rejects:  the sink is contracted to have disposed every input
 //     Manifold on its error branch before re-throwing.
 
 import type { Manifold } from 'manifold-3d';
@@ -72,6 +73,12 @@ export interface OrchestratorTopbar {
    * production wires a real implementation.
    */
   setPrintShellVolume?(mm3: number | null): void;
+  /**
+   * Set the base-slab volume in mm³ (Wave D, issue #82). Optional so
+   * legacy tests that don't wire the 5th readout still work; production
+   * wires a real implementation.
+   */
+  setBaseSlabVolume?(mm3: number | null): void;
 }
 
 /** Minimal Generate-button surface the orchestrator drives. */
@@ -96,16 +103,20 @@ export interface OrchestratorButton {
 export interface OrchestratorSceneSink {
   setSilicone(payload: { silicone: Manifold }): Promise<unknown>;
   /**
-   * Hand the surface-conforming print shell to the scene. Optional so
-   * legacy call sites can wire only `setSilicone` and fall back to
-   * disposing the print-shell immediately.
+   * Hand the surface-conforming print shell + base slab to the scene
+   * (Wave D, issue #82). Optional so legacy call sites can wire only
+   * `setSilicone` and fall back to disposing the print-shell + base-slab
+   * immediately.
    *
    * Contract: same as `setSilicone` — from the moment this resolves,
-   * the sink owns the Manifold. The orchestrator MUST NOT `.delete()`
-   * it. On rejection the sink is responsible for having disposed the
-   * input Manifold before throwing.
+   * the sink owns BOTH Manifolds. The orchestrator MUST NOT `.delete()`
+   * them. On rejection the sink is responsible for having disposed both
+   * input Manifolds before throwing.
    */
-  setPrintableParts?(parts: { printShell: Manifold }): Promise<unknown>;
+  setPrintableParts?(parts: {
+    printShell: Manifold;
+    basePart: Manifold;
+  }): Promise<unknown>;
 }
 
 /**
@@ -200,23 +211,26 @@ export function createGenerateOrchestrator(
       topbar.setSiliconeVolume(null);
       topbar.setResinVolume(null);
       topbar.setPrintShellVolume?.(null);
+      topbar.setBaseSlabVolume?.(null);
 
       try {
         const result = await generate(master, parameters, viewTransform);
 
         if (epoch !== getEpoch()) {
           // Staleness drop: an invalidation (commit, reset, new STL) or a
-          // later click bumped the epoch while we were awaiting. Neither
-          // Manifold reached the scene, so the orchestrator is still the
-          // owner — release them here.
+          // later click bumped the epoch while we were awaiting. None of
+          // the Manifolds reached the scene, so the orchestrator is still
+          // the owner — release them here.
           safeDelete(result.silicone);
           safeDelete(result.printShell);
+          safeDelete(result.basePart);
           return;
         }
 
         topbar.setSiliconeVolume(result.siliconeVolume_mm3);
         topbar.setResinVolume(result.resinVolume_mm3);
         topbar.setPrintShellVolume?.(result.printShellVolume_mm3);
+        topbar.setBaseSlabVolume?.(result.baseSlabVolume_mm3);
 
         // Track sink failures so the post-run success hook (below) can
         // skip firing when any downstream sink surfaced an error.
@@ -250,16 +264,17 @@ export function createGenerateOrchestrator(
           safeDelete(result.silicone);
         }
 
-        // Print-shell hand-off. Mirror of the silicone hand-off above:
-        // if the scene sink supplies `setPrintableParts`, ownership
-        // transfers; the orchestrator must NOT `.delete()` the Manifold.
-        // If the sink is absent, fall back to disposing the shell
-        // immediately.
+        // Print-shell + base-slab hand-off (Wave D). Mirror of the
+        // silicone hand-off above: if the scene sink supplies
+        // `setPrintableParts`, ownership of BOTH Manifolds transfers;
+        // the orchestrator must NOT `.delete()` them. If the sink is
+        // absent, fall back to disposing both immediately.
         let printShellFailed = false;
         if (scene?.setPrintableParts) {
           try {
             await scene.setPrintableParts({
               printShell: result.printShell,
+              basePart: result.basePart,
             });
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
@@ -269,6 +284,7 @@ export function createGenerateOrchestrator(
           }
         } else {
           safeDelete(result.printShell);
+          safeDelete(result.basePart);
         }
 
         if (

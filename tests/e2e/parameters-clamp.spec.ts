@@ -4,13 +4,13 @@
 // renderer, an out-of-range input surfaces the inline error live, and blur
 // clamps the value back into the legal range while clearing the error.
 //
-// Post-#69 scope: four rows (silicone thickness, print-shell thickness,
-// sideCount, draftAngle).
+// Post-#82 scope: six rows (silicone thickness, print-shell thickness,
+// base-slab thickness, base-slab overhang, sideCount, draftAngle).
 
 import { expect, test } from '@playwright/test';
 import { launchApp } from './fixtures/app';
 
-test('sidebar renders with 4 fields + reset button on app launch', async () => {
+test('sidebar renders with 6 fields + reset button on app launch', async () => {
   const app = await launchApp();
   try {
     const page = await app.firstWindow();
@@ -23,6 +23,8 @@ test('sidebar renders with 4 fields + reset button on app launch', async () => {
     const fieldIds = [
       'siliconeThickness',
       'printShellThickness',
+      'baseSlabThickness',
+      'baseSlabOverhang',
       'sideCount',
       'draftAngle',
     ];

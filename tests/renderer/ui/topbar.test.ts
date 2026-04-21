@@ -41,8 +41,8 @@ beforeEach(() => {
   initI18n();
 });
 
-describe('topbar — four volume readouts', () => {
-  test('mounts master + silicone + print-shell + resin readouts with i18n labels', () => {
+describe('topbar — five volume readouts', () => {
+  test('mounts master + silicone + print-shell + base-slab + resin readouts with i18n labels', () => {
     const header = mount();
     mountTopbar(header);
 
@@ -54,6 +54,9 @@ describe('topbar — four volume readouts', () => {
     );
     const printShellLabel = header.querySelector<HTMLElement>(
       '[data-testid="print-shell-volume-readout"] .topbar__volume-label',
+    );
+    const baseSlabLabel = header.querySelector<HTMLElement>(
+      '[data-testid="base-slab-volume-readout"] .topbar__volume-label',
     );
     const resinLabel = header.querySelector<HTMLElement>(
       '[data-testid="resin-volume-readout"] .topbar__volume-label',
@@ -68,12 +71,15 @@ describe('topbar — four volume readouts', () => {
     expect(printShellLabel?.textContent).toBe(
       `${i18next.t('topbar.volumePrintShell')}:`,
     );
+    expect(baseSlabLabel?.textContent).toBe(
+      `${i18next.t('topbar.volumeBaseSlab')}:`,
+    );
     expect(resinLabel?.textContent).toBe(
       `${i18next.t('topbar.volumeResin')}:`,
     );
   });
 
-  test('initial state: master shows "no master loaded"; silicone/print-shell/resin show "click generate"', () => {
+  test('initial state: master shows "no master loaded"; silicone/print-shell/base-slab/resin show "click generate"', () => {
     const header = mount();
     mountTopbar(header);
 
@@ -88,12 +94,16 @@ describe('topbar — four volume readouts', () => {
     const printShell = header.querySelector<HTMLElement>(
       '[data-testid="print-shell-volume-value"]',
     );
+    const baseSlab = header.querySelector<HTMLElement>(
+      '[data-testid="base-slab-volume-value"]',
+    );
     const resin = header.querySelector<HTMLElement>(
       '[data-testid="resin-volume-value"]',
     );
     expect(master?.textContent).toBe(noMaster);
     expect(silicone?.textContent).toBe(notGenerated);
     expect(printShell?.textContent).toBe(notGenerated);
+    expect(baseSlab?.textContent).toBe(notGenerated);
     expect(resin?.textContent).toBe(notGenerated);
   });
 });
@@ -148,13 +158,26 @@ describe('topbar — setSiliconeVolume / setPrintShellVolume / setResinVolume', 
     expect(resin?.textContent).toBe('127,452 mm\u00B3');
   });
 
-  test('the four setters are independent (setting one does not clobber the others)', () => {
+  test('setBaseSlabVolume(88_888) renders "88,888 mm³" in mm mode', () => {
+    const header = mount();
+    const api = mountTopbar(header);
+    api.setUnits('mm');
+    api.setBaseSlabVolume(88_888);
+
+    const baseSlab = header.querySelector<HTMLElement>(
+      '[data-testid="base-slab-volume-value"]',
+    );
+    expect(baseSlab?.textContent).toBe('88,888 mm\u00B3');
+  });
+
+  test('the five setters are independent (setting one does not clobber the others)', () => {
     const header = mount();
     const api = mountTopbar(header);
     api.setUnits('mm');
     api.setMasterVolume(127_451.6);
     api.setSiliconeVolume(319_914);
     api.setPrintShellVolume(455_000);
+    api.setBaseSlabVolume(88_888);
     api.setResinVolume(127_451.6);
 
     expect(
@@ -172,6 +195,11 @@ describe('topbar — setSiliconeVolume / setPrintShellVolume / setResinVolume', 
       )?.textContent,
     ).toBe('455,000 mm\u00B3');
     expect(
+      header.querySelector<HTMLElement>(
+        '[data-testid="base-slab-volume-value"]',
+      )?.textContent,
+    ).toBe('88,888 mm\u00B3');
+    expect(
       header.querySelector<HTMLElement>('[data-testid="resin-volume-value"]')
         ?.textContent,
     ).toBe('127,452 mm\u00B3');
@@ -179,13 +207,14 @@ describe('topbar — setSiliconeVolume / setPrintShellVolume / setResinVolume', 
 });
 
 describe('topbar — units flip updates all readouts', () => {
-  test('mm → in re-formats master, silicone, print-shell, and resin in a single pass', () => {
+  test('mm → in re-formats master, silicone, print-shell, base-slab, and resin in a single pass', () => {
     const header = mount();
     const api = mountTopbar(header);
     api.setUnits('mm');
     api.setMasterVolume(127_451.6);
     api.setSiliconeVolume(319_914);
     api.setPrintShellVolume(455_000);
+    api.setBaseSlabVolume(88_888);
     api.setResinVolume(127_451.6);
 
     api.setUnits('in');
@@ -203,22 +232,25 @@ describe('topbar — units flip updates all readouts', () => {
     const printShellText = header.querySelector<HTMLElement>(
       '[data-testid="print-shell-volume-value"]',
     )?.textContent;
+    const baseSlabText = header.querySelector<HTMLElement>(
+      '[data-testid="base-slab-volume-value"]',
+    )?.textContent;
 
     expect(masterText).toMatch(/\d+\.\d{3} in\u00B3$/);
     expect(siliconeText).toMatch(/\d+\.\d{3} in\u00B3$/);
     expect(printShellText).toMatch(/\d+\.\d{3} in\u00B3$/);
+    expect(baseSlabText).toMatch(/\d+\.\d{3} in\u00B3$/);
     expect(resinText).toMatch(/\d+\.\d{3} in\u00B3$/);
-    // master + resin share the same volume, so their textual
-    // representations match exactly.
     expect(masterText).toBe(resinText);
   });
 
-  test('units-changed DOM event also re-formats all four readouts', () => {
+  test('units-changed DOM event also re-formats all five readouts', () => {
     const header = mount();
     const api = mountTopbar(header);
     api.setMasterVolume(16_387.064);
     api.setSiliconeVolume(16_387.064);
     api.setPrintShellVolume(16_387.064);
+    api.setBaseSlabVolume(16_387.064);
     api.setResinVolume(16_387.064);
 
     document.dispatchEvent(
@@ -241,6 +273,11 @@ describe('topbar — units flip updates all readouts', () => {
       )?.textContent,
     ).toBe(expectIn);
     expect(
+      header.querySelector<HTMLElement>(
+        '[data-testid="base-slab-volume-value"]',
+      )?.textContent,
+    ).toBe(expectIn);
+    expect(
       header.querySelector<HTMLElement>('[data-testid="resin-volume-value"]')
         ?.textContent,
     ).toBe(expectIn);
@@ -248,14 +285,15 @@ describe('topbar — units flip updates all readouts', () => {
 });
 
 describe('topbar — stale indicator (issue #64, Option A)', () => {
-  // `setVolumesStale(true)` marks silicone + print-shell + resin with
-  // `is-stale`. Master is never stale.
-  test('setVolumesStale(true) adds is-stale to silicone + print-shell + resin wraps, not master', () => {
+  // `setVolumesStale(true)` marks silicone + print-shell + base-slab +
+  // resin with `is-stale`. Master is never stale.
+  test('setVolumesStale(true) adds is-stale to silicone/print-shell/base-slab/resin wraps, not master', () => {
     const header = mount();
     const api = mountTopbar(header);
     api.setMasterVolume(1000);
     api.setSiliconeVolume(2000);
     api.setPrintShellVolume(3000);
+    api.setBaseSlabVolume(4000);
     api.setResinVolume(500);
 
     api.setVolumesStale(true);
@@ -269,6 +307,9 @@ describe('topbar — stale indicator (issue #64, Option A)', () => {
     const printShellWrap = header.querySelector<HTMLElement>(
       '[data-testid="print-shell-volume-readout"]',
     );
+    const baseSlabWrap = header.querySelector<HTMLElement>(
+      '[data-testid="base-slab-volume-readout"]',
+    );
     const resinWrap = header.querySelector<HTMLElement>(
       '[data-testid="resin-volume-readout"]',
     );
@@ -276,6 +317,7 @@ describe('topbar — stale indicator (issue #64, Option A)', () => {
     expect(masterWrap?.classList.contains('is-stale')).toBe(false);
     expect(siliconeWrap?.classList.contains('is-stale')).toBe(true);
     expect(printShellWrap?.classList.contains('is-stale')).toBe(true);
+    expect(baseSlabWrap?.classList.contains('is-stale')).toBe(true);
     expect(resinWrap?.classList.contains('is-stale')).toBe(true);
     expect(api.isVolumesStale()).toBe(true);
   });
@@ -292,11 +334,15 @@ describe('topbar — stale indicator (issue #64, Option A)', () => {
     const printShellWrap = header.querySelector<HTMLElement>(
       '[data-testid="print-shell-volume-readout"]',
     );
+    const baseSlabWrap = header.querySelector<HTMLElement>(
+      '[data-testid="base-slab-volume-readout"]',
+    );
     const resinWrap = header.querySelector<HTMLElement>(
       '[data-testid="resin-volume-readout"]',
     );
     expect(siliconeWrap?.classList.contains('is-stale')).toBe(false);
     expect(printShellWrap?.classList.contains('is-stale')).toBe(false);
+    expect(baseSlabWrap?.classList.contains('is-stale')).toBe(false);
     expect(resinWrap?.classList.contains('is-stale')).toBe(false);
     expect(api.isVolumesStale()).toBe(false);
   });
@@ -326,12 +372,13 @@ describe('topbar — stale indicator (issue #64, Option A)', () => {
 });
 
 describe('topbar — back-compat setVolume alias', () => {
-  test('setVolume updates only the master readout (silicone / print-shell / resin untouched)', () => {
+  test('setVolume updates only the master readout (other four readouts untouched)', () => {
     const header = mount();
     const api = mountTopbar(header);
     api.setUnits('mm');
     api.setSiliconeVolume(200);
     api.setPrintShellVolume(250);
+    api.setBaseSlabVolume(275);
     api.setResinVolume(300);
     api.setVolume(100);
 
@@ -349,6 +396,11 @@ describe('topbar — back-compat setVolume alias', () => {
         '[data-testid="print-shell-volume-value"]',
       )?.textContent,
     ).toBe('250 mm\u00B3');
+    expect(
+      header.querySelector<HTMLElement>(
+        '[data-testid="base-slab-volume-value"]',
+      )?.textContent,
+    ).toBe('275 mm\u00B3');
     expect(
       header.querySelector<HTMLElement>('[data-testid="resin-volume-value"]')
         ?.textContent,

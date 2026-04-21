@@ -46,6 +46,18 @@ export interface MoldParameters {
    * thickness parameter for the new shell geometry.
    */
   printShellThickness_mm: number;
+  /**
+   * Base-slab thickness in mm (Wave D, issue #82). The printable base slab
+   * that sits under the print shell extrudes downward by this much from
+   * `master.min.y`. Range 5–15 mm, default 8 mm.
+   */
+  baseSlabThickness_mm: number;
+  /**
+   * Base-slab overhang in mm (Wave D, issue #82). Controls how far the
+   * slab sticks out past the print shell's outer footprint. Range 2–10 mm,
+   * default 5 mm.
+   */
+  baseSlabOverhang_mm: number;
   /** Number of printed side walls: 2, 3, or 4. */
   sideCount: 2 | 3 | 4;
   /** Draft angle in degrees. Always unit-agnostic. */
@@ -72,6 +84,8 @@ export interface NumericConstraint {
 export const DEFAULT_PARAMETERS: Readonly<MoldParameters> = Object.freeze({
   siliconeThickness_mm: 5,
   printShellThickness_mm: 8,
+  baseSlabThickness_mm: 8,
+  baseSlabOverhang_mm: 5,
   sideCount: 4,
   draftAngle_deg: 0,
 });
@@ -86,11 +100,15 @@ export const NUMERIC_CONSTRAINTS: Readonly<
   Record<keyof Pick<MoldParameters,
     | 'siliconeThickness_mm'
     | 'printShellThickness_mm'
+    | 'baseSlabThickness_mm'
+    | 'baseSlabOverhang_mm'
     | 'draftAngle_deg'
   >, NumericConstraint>
 > = Object.freeze({
   siliconeThickness_mm: { min: 1, max: 15, step: 0.5, integer: false },
   printShellThickness_mm: { min: 2, max: 30, step: 0.5, integer: false },
+  baseSlabThickness_mm: { min: 5, max: 15, step: 0.5, integer: false },
+  baseSlabOverhang_mm: { min: 2, max: 10, step: 0.5, integer: false },
   draftAngle_deg: { min: 0, max: 3, step: 0.5, integer: false },
 });
 
@@ -136,6 +154,8 @@ function equals(a: MoldParameters, b: MoldParameters): boolean {
   return (
     a.siliconeThickness_mm === b.siliconeThickness_mm &&
     a.printShellThickness_mm === b.printShellThickness_mm &&
+    a.baseSlabThickness_mm === b.baseSlabThickness_mm &&
+    a.baseSlabOverhang_mm === b.baseSlabOverhang_mm &&
     a.sideCount === b.sideCount &&
     a.draftAngle_deg === b.draftAngle_deg
   );

@@ -49,13 +49,15 @@ function readFixtureBuffer(name: string): ArrayBuffer {
 
 /**
  * Dispose every Manifold owned by a `MoldGenerationResult` — the silicone
- * body and the surface-conforming print shell. Extracted so each test's
- * `finally` block stays a one-liner and so adding a new result-bound
- * Manifold in the future is a one-site change.
+ * body, the surface-conforming print shell, and the base slab (Wave D,
+ * issue #82). Extracted so each test's `finally` block stays a one-liner
+ * and so adding a new result-bound Manifold in the future is a one-site
+ * change.
  */
 function disposeAll(result: MoldGenerationResult): void {
   result.silicone.delete();
   result.printShell.delete();
+  result.basePart.delete();
 }
 
 describe('generateSiliconeShell — unit-cube fixture', () => {
@@ -208,6 +210,21 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
           expect(result.printShellVolume_mm3).toBeGreaterThan(0);
           expect(Number.isFinite(result.printShellVolume_mm3)).toBe(true);
 
+          // Base-slab (Wave D): finite + non-negative. Volume can be
+          // legitimately 0 on fixtures whose lowest-Y slice is
+          // degenerate (e.g. this mini-figurine's native-orientation
+          // Z-up STL has its horizontal base on Z, not Y — under the
+          // identity viewTransform used here the Y-min slice is
+          // through a thin sliver of the figurine's side). A real
+          // user orienting their figure on the bed via lay-flat would
+          // get a non-empty slice. `isEmpty === false` is NOT asserted
+          // for that reason.
+          expect(Number.isFinite(result.baseSlabVolume_mm3)).toBe(true);
+          expect(result.baseSlabVolume_mm3).toBeGreaterThanOrEqual(0);
+          // basePart is manifold OR empty — both are valid states
+          // (empty on degenerate slices, manifold on realistic ones).
+          expect(result.basePart.status()).toBe('NoError');
+
           // Resin identity: EXACTLY master volume at 1e-9 relative.
           expect(result.resinVolume_mm3).toBeCloseTo(masterVol, 9);
           const relErr =
@@ -299,7 +316,7 @@ describe('generateSiliconeShell — print-shell invariants (Wave C)', () => {
 
         // Master bounds: [-SIDE/2, SIDE/2]³. Expected shell bounds:
         //   top.y   = master.max.y + SILICONE + POUR_EDGE = 2 + 5 + 3 = 10
-        //   bot.y   = master.min.y                         = -2
+        //   bot.y   = master.min.y - 2 (Wave D plug wrap)  = -4
         //   XZ side = master ± (SILICONE + SHELL) = [-10, 10]
         //
         // Allow `2 × edgeLength` slack on XZ because the BCC marching-
@@ -312,7 +329,9 @@ describe('generateSiliconeShell — print-shell invariants (Wave C)', () => {
         const edgeLength = 2.0;
 
         expect(bb.max[1]).toBeCloseTo(2 + SILICONE + POUR_EDGE, 3);
-        expect(bb.min[1]).toBeCloseTo(-2, 3);
+        // Wave D (issue #82): shell bottom drops 2 mm below master.min.y
+        // so the shell wraps the base-slab plug.
+        expect(bb.min[1]).toBeCloseTo(-2 - 2, 3);
 
         const xzMax = 2 + SILICONE + SHELL;
         expect(bb.max[0]).toBeLessThanOrEqual(xzMax + 2 * edgeLength);
@@ -348,9 +367,111 @@ describe('generateSiliconeShell — print-shell invariants (Wave C)', () => {
       );
       try {
         const bb = result.printShell.boundingBox();
-        // Master (post-transform) bounds y ∈ [13, 17]. Shell top = 17 + 5 + 3 = 25; bottom = 13.
+        // Master (post-transform) bounds y ∈ [13, 17]. Shell top = 17 + 5 + 3 = 25;
+        // Wave D bottom = 13 - 2 = 11.
         expect(bb.max[1]).toBeCloseTo(17 + 5 + 3, 3);
-        expect(bb.min[1]).toBeCloseTo(13, 3);
+        expect(bb.min[1]).toBeCloseTo(13 - 2, 3);
+      } finally {
+        disposeAll(result);
+      }
+    } finally {
+      master.delete();
+    }
+  }, 30_000);
+});
+
+describe('generateSiliconeShell — base slab (Wave D, issue #82)', () => {
+  test('basePart: watertight genus-0 + expected Y span + non-zero volume', async () => {
+    const toplevel = await initManifold();
+    const SIDE = 4;
+    const SILICONE = 5;
+    const SHELL = 3;
+    const SLAB_THICKNESS = 8;
+    const SLAB_OVERHANG = 5;
+    const master = toplevel.Manifold.cube([SIDE, SIDE, SIDE], true);
+    try {
+      const result = await generateSiliconeShell(
+        master,
+        params({
+          siliconeThickness_mm: SILICONE,
+          printShellThickness_mm: SHELL,
+          baseSlabThickness_mm: SLAB_THICKNESS,
+          baseSlabOverhang_mm: SLAB_OVERHANG,
+        }),
+        new Matrix4(),
+      );
+      try {
+        expect(isManifold(result.basePart)).toBe(true);
+        expect(result.basePart.genus()).toBe(0);
+        expect(result.basePart.isEmpty()).toBe(false);
+
+        const bb = result.basePart.boundingBox();
+        // Master bounds: y ∈ [-2, 2]. Slab Y span:
+        //   min.y = master.min.y - slabThickness = -2 - 8 = -10
+        //   max.y = master.min.y + plug(2)       = -2 + 2 =  0
+        expect(bb.min[1]).toBeCloseTo(-2 - SLAB_THICKNESS, 2);
+        expect(bb.max[1]).toBeCloseTo(-2 + 2, 2);
+
+        // XZ footprint reaches at least the master edge + (silicone +
+        // shell + overhang). The round-join offset may add a touch more
+        // on corners, so use >=.
+        const minXzExpected = -(2 + SILICONE + SHELL + SLAB_OVERHANG);
+        const maxXzExpected = 2 + SILICONE + SHELL + SLAB_OVERHANG;
+        // Allow a tiny bit of slack for kernel tolerance.
+        const xzTolerance = 0.1;
+        expect(bb.min[0]).toBeLessThanOrEqual(minXzExpected + xzTolerance);
+        expect(bb.max[0]).toBeGreaterThanOrEqual(maxXzExpected - xzTolerance);
+        expect(bb.min[2]).toBeLessThanOrEqual(minXzExpected + xzTolerance);
+        expect(bb.max[2]).toBeGreaterThanOrEqual(maxXzExpected - xzTolerance);
+
+        // Volume pre-computation matches Manifold.volume().
+        expect(result.basePart.volume()).toBeCloseTo(
+          result.baseSlabVolume_mm3,
+          3,
+        );
+        expect(result.baseSlabVolume_mm3).toBeGreaterThan(0);
+
+        // Rough volume envelope: slab body + plug cap.
+        //   slab_body_footprint_area ≈ (2·(sliceHalfEdge + silicone + shell + overhang))²
+        //     where sliceHalfEdge = SIDE/2 = 2 mm.
+        //   slab_body ≈ (2·(2+5+3+5))² · 8 = 30² · 8 = 7200 mm³.
+        //   plug_footprint_area ≈ (2·(2+5-0.2))² ≈ (13.6)² ≈ 184.96 mm²
+        //   plug ≈ 184.96 · 2 ≈ 370 mm³.
+        //   approx total ≈ 7570 mm³. Allow ±25 % for the round-offset
+        //   corner curvature and kernel tolerance.
+        const analyticLower = 7570 * 0.75;
+        const analyticUpper = 7570 * 1.25;
+        expect(result.baseSlabVolume_mm3).toBeGreaterThan(analyticLower);
+        expect(result.baseSlabVolume_mm3).toBeLessThan(analyticUpper);
+      } finally {
+        disposeAll(result);
+      }
+    } finally {
+      master.delete();
+    }
+  }, 30_000);
+
+  test('basePart bounds respect offset viewTransform on Y', async () => {
+    const toplevel = await initManifold();
+    const master = toplevel.Manifold.cube([4, 4, 4], true);
+    try {
+      const SLAB_THICKNESS = 6;
+      const TRANSLATE_Y = 10;
+      const result = await generateSiliconeShell(
+        master,
+        params({
+          siliconeThickness_mm: 5,
+          printShellThickness_mm: 3,
+          baseSlabThickness_mm: SLAB_THICKNESS,
+        }),
+        new Matrix4().makeTranslation(0, TRANSLATE_Y, 0),
+      );
+      try {
+        const bb = result.basePart.boundingBox();
+        // Master (post-transform): y ∈ [8, 12]. Slab min.y = 8 - 6 = 2;
+        // max.y = 8 + 2 = 10.
+        expect(bb.min[1]).toBeCloseTo(8 - SLAB_THICKNESS, 2);
+        expect(bb.max[1]).toBeCloseTo(8 + 2, 2);
       } finally {
         disposeAll(result);
       }
@@ -462,6 +583,7 @@ describe('generateSiliconeShell — Generate×3 leak check', () => {
         silicone: number;
         resin: number;
         printShell: number;
+        baseSlab: number;
       }> = [];
       for (let i = 0; i < 3; i++) {
         const r = await generateSiliconeShell(master, runParams, new Matrix4());
@@ -469,6 +591,7 @@ describe('generateSiliconeShell — Generate×3 leak check', () => {
           silicone: r.siliconeVolume_mm3,
           resin: r.resinVolume_mm3,
           printShell: r.printShellVolume_mm3,
+          baseSlab: r.baseSlabVolume_mm3,
         });
         disposeAll(r);
       }
@@ -477,6 +600,7 @@ describe('generateSiliconeShell — Generate×3 leak check', () => {
         expect(volumes[i]!.silicone).toBeCloseTo(volumes[0]!.silicone, 3);
         expect(volumes[i]!.resin).toBeCloseTo(volumes[0]!.resin, 3);
         expect(volumes[i]!.printShell).toBeCloseTo(volumes[0]!.printShell, 3);
+        expect(volumes[i]!.baseSlab).toBeCloseTo(volumes[0]!.baseSlab, 3);
       }
     } finally {
       master.delete();

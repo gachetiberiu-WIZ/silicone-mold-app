@@ -520,6 +520,7 @@ async function loadMasterFromBuffer(buffer: ArrayBuffer): Promise<void> {
     topbar.setSiliconeVolume(null);
     topbar.setResinVolume(null);
     topbar.setPrintShellVolume(null);
+    topbar.setBaseSlabVolume(null);
   }
   // Clear any residual error from a previous generate attempt.
   if (generateButton) {

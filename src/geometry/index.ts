@@ -26,3 +26,8 @@ export {
 } from './generateMold';
 export { SIDE_CUT_ANGLES } from './sideAngles';
 export { CIRCULAR_SEGMENTS, verticalCylinder } from './primitives';
+export {
+  buildBaseSlab,
+  BASE_SLAB_PLUG_HEIGHT_MM,
+  type BuildBaseSlabArgs,
+} from './baseSlab';

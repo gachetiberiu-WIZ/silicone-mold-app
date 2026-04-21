@@ -1,33 +1,38 @@
 // tests/renderer/scene/printableParts.test.ts
 //
-// Unit tests for the printable-parts scene module (Wave C, issue #72).
-// Post-Wave-C this module manages a SINGLE surface-conforming print-shell
-// mesh (the rectangular-box N-side radial split is gone). Mirrors the
-// `silicone.test.ts` shape so conventions stay in sync.
+// Unit tests for the printable-parts scene module. Post-Wave-D (issue
+// #82) this module manages TWO meshes under the printable-parts group:
+//   - print-shell (lifts +Y on explode)
+//   - base-slab   (lifts -Y on explode)
+//
+// Both are installed via `setPrintableParts(scene, {printShell, basePart})`
+// and removed via `clearPrintableParts`. The toggle flips BOTH together.
 //
 // Pins:
 //
-//   1. `setPrintableParts` places 1 Mesh child under the group with the
-//      expected gray opaque material (color, roughness, metalness,
-//      transparent=false).
-//   2. Installed group starts `visible=true` regardless of prior state
-//      (default ON, issue #67 carry-forward).
-//   3. `setPrintableParts` atomically replaces a previous mesh — old
-//      mesh disposed, old Manifold `.delete()`'d, new mesh installed.
+//   1. `setPrintableParts` places 2 Mesh children under the group with
+//      the expected gray opaque material (color, roughness, metalness,
+//      transparent=false) and the expected tags.
+//   2. Installed group starts `visible=true` regardless of prior state.
+//   3. `setPrintableParts` atomically replaces prior meshes — both old
+//      meshes disposed, both old Manifolds `.delete()`'d, new pair
+//      installed.
 //   4. Generate × 3 never accumulates meshes or cached handles.
-//   5. `clearPrintableParts` removes the mesh + disposes GPU + deletes
-//      the cached Manifold.
-//   6. `setPrintablePartsVisible(true/false)` flips group.visible.
+//   5. `clearPrintableParts` removes both meshes + disposes GPU +
+//      deletes both cached Manifolds.
+//   6. `setPrintablePartsVisible(true/false)` flips group.visible (and
+//      therefore both meshes' visibility in a single operation).
 //   7. `setPrintablePartsExplodedView(true)` while visible animates the
-//      mesh to +Y; `false` collapses to origin.
+//      shell mesh to +Y AND the slab mesh to -Y in parallel; `false`
+//      collapses both to origin.
 //   8. While hidden, `setPrintablePartsExplodedView` does NOT start a
 //      tween (perf: no wasted per-frame work).
 //   9. `arePrintablePartsVisible` + `isPrintableExplodedIdle` report
 //      correctly through every state transition.
 //
-// We don't run a real `generateSiliconeShell` — we build small cubes
-// directly and hand them as fake print shells to exercise the full
-// adapter + scene-graph path deterministically in < 100 ms.
+// Fake Manifolds: we build small cubes directly via manifold-3d and
+// hand them as fakes — the real generator output doesn't matter for
+// scene-graph contract tests.
 
 import { MeshStandardMaterial, type Group, type Mesh } from 'three';
 import type { Manifold, ManifoldToplevel } from 'manifold-3d';
@@ -36,6 +41,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vi
 import { initManifold } from '@/geometry/initManifold';
 import { createScene } from '@/renderer/scene/index';
 import {
+  BASE_SLAB_MANIFOLD_KEY,
   PRINT_SHELL_MANIFOLD_KEY,
   arePrintablePartsVisible,
   clearPrintableParts,
@@ -62,138 +68,158 @@ function getGroup(scene: ReturnType<typeof createScene>): Group {
 }
 
 /**
- * Build a plausible print-shell Manifold for testing. A hollow-ish cube
- * stand-in — just a cube at origin with Y ∈ [-30, 30] → bbox height 60 →
- * exploded offset defaults to `max(40, 0.25 * 60) = 40 mm`.
+ * Build plausible print-shell + base-slab Manifolds for testing. Print
+ * shell is a cube at origin with Y ∈ [-30, 30] → bbox height 60 →
+ * shell exploded offset defaults to `max(40, 0.25 * 60) = 40 mm`.
+ * Base slab is a flat shorter cube at Y ∈ [-5, 5] → height 10 → slab
+ * exploded offset defaults to `max(30, 0.2 * 10) = 30 mm` (magnitude;
+ * direction is -Y).
  */
-function makePrintShell(): { printShell: Manifold } {
+function makeParts(): { printShell: Manifold; basePart: Manifold } {
   return {
     printShell: toplevel.Manifold.cube([40, 60, 40], true),
+    basePart: toplevel.Manifold.cube([50, 10, 50], true),
   };
 }
 
 describe('setPrintableParts — basic install', () => {
-  test('places one print-shell Mesh under the printable-parts group', async () => {
+  test('places one print-shell Mesh and one base-slab Mesh under the group', async () => {
     const scene = createScene();
-    const parts = makePrintShell();
+    const parts = makeParts();
 
     const result = await setPrintableParts(scene, parts);
 
     const group = getGroup(scene);
     const meshChildren = group.children.filter((c) => (c as Mesh).isMesh);
-    expect(meshChildren.length).toBe(1);
+    expect(meshChildren.length).toBe(2);
 
-    expect(result.mesh).toBe(meshChildren[0]);
-    expect(result.mesh.userData['tag']).toBe('print-shell');
+    const shellTagged = meshChildren.find(
+      (c) => c.userData['tag'] === 'print-shell',
+    );
+    const slabTagged = meshChildren.find(
+      (c) => c.userData['tag'] === 'base-slab-mesh',
+    );
+    expect(shellTagged).toBeTruthy();
+    expect(slabTagged).toBeTruthy();
+    expect(result.shellMesh).toBe(shellTagged);
+    expect(result.slabMesh).toBe(slabTagged);
   });
 
-  test('installs the opaque gray material on the mesh', async () => {
+  test('installs opaque gray material on both meshes', async () => {
     const scene = createScene();
-    const parts = makePrintShell();
+    const parts = makeParts();
 
-    const { mesh } = await setPrintableParts(scene, parts);
+    const { shellMesh, slabMesh } = await setPrintableParts(scene, parts);
 
-    const mat = mesh.material as MeshStandardMaterial;
-    expect(mat).toBeInstanceOf(MeshStandardMaterial);
-    expect(mat.color.getHex()).toBe(0xb8b8b8);
-    expect(mat.roughness).toBeCloseTo(0.8, 5);
-    expect(mat.metalness).toBeCloseTo(0.0, 5);
-    // Opaque: transparent=false (default when not set), opacity=1.
-    expect(mat.transparent).toBe(false);
-    expect(mat.opacity).toBeCloseTo(1, 5);
+    for (const mesh of [shellMesh, slabMesh]) {
+      const mat = mesh.material as MeshStandardMaterial;
+      expect(mat).toBeInstanceOf(MeshStandardMaterial);
+      expect(mat.color.getHex()).toBe(0xb8b8b8);
+      expect(mat.roughness).toBeCloseTo(0.8, 5);
+      expect(mat.metalness).toBeCloseTo(0.0, 5);
+      expect(mat.transparent).toBe(false);
+      expect(mat.opacity).toBeCloseTo(1, 5);
+    }
   });
 
   test('group starts VISIBLE after install (issue #67 carry-forward)', async () => {
     const scene = createScene();
     const group = getGroup(scene);
 
-    // Pre-install: the scene factory sets visible=false (no parts yet).
     expect(group.visible).toBe(false);
 
-    await setPrintableParts(scene, makePrintShell());
+    await setPrintableParts(scene, makeParts());
     expect(group.visible).toBe(true);
     expect(arePrintablePartsVisible(scene)).toBe(true);
   });
 
-  test('caches the print-shell Manifold on the group userData', async () => {
+  test('caches both Manifolds on the group userData', async () => {
     const scene = createScene();
-    const parts = makePrintShell();
+    const parts = makeParts();
 
     await setPrintableParts(scene, parts);
 
     const group = getGroup(scene);
     expect(group.userData[PRINT_SHELL_MANIFOLD_KEY]).toBe(parts.printShell);
+    expect(group.userData[BASE_SLAB_MANIFOLD_KEY]).toBe(parts.basePart);
   });
 
   test('hasPrintableParts reports true after setPrintableParts', async () => {
     const scene = createScene();
     expect(hasPrintableParts(scene)).toBe(false);
-    await setPrintableParts(scene, makePrintShell());
+    await setPrintableParts(scene, makeParts());
     expect(hasPrintableParts(scene)).toBe(true);
   });
 });
 
 describe('setPrintableParts — replacement (no accumulation)', () => {
-  test('second setPrintableParts replaces the first; prior Manifold disposed', async () => {
+  test('second setPrintableParts replaces the first; both prior Manifolds disposed', async () => {
     const scene = createScene();
-    const first = makePrintShell();
-    const deleteSpy = vi.fn(first.printShell.delete.bind(first.printShell));
-    first.printShell.delete = deleteSpy;
+    const first = makeParts();
+    const shellSpy = vi.fn(first.printShell.delete.bind(first.printShell));
+    const slabSpy = vi.fn(first.basePart.delete.bind(first.basePart));
+    first.printShell.delete = shellSpy;
+    first.basePart.delete = slabSpy;
 
     await setPrintableParts(scene, first);
 
-    const second = makePrintShell();
+    const second = makeParts();
     await setPrintableParts(scene, second);
 
     const group = getGroup(scene);
     const meshes = group.children.filter((c) => (c as Mesh).isMesh);
-    expect(meshes.length).toBe(1);
+    expect(meshes.length).toBe(2);
 
-    // Prior Manifold .delete()'d exactly once.
-    expect(deleteSpy).toHaveBeenCalledTimes(1);
+    expect(shellSpy).toHaveBeenCalledTimes(1);
+    expect(slabSpy).toHaveBeenCalledTimes(1);
 
-    // New Manifold cached.
     expect(group.userData[PRINT_SHELL_MANIFOLD_KEY]).toBe(second.printShell);
+    expect(group.userData[BASE_SLAB_MANIFOLD_KEY]).toBe(second.basePart);
   });
 
-  test('generate × 3 leaves exactly one mesh + one cached Manifold', async () => {
+  test('generate × 3 leaves exactly two meshes + two cached Manifolds', async () => {
     const scene = createScene();
     const group = getGroup(scene);
 
     for (let i = 0; i < 3; i++) {
-      await setPrintableParts(scene, makePrintShell());
+      await setPrintableParts(scene, makeParts());
       const meshes = group.children.filter((c) => (c as Mesh).isMesh);
-      expect(meshes.length).toBe(1);
+      expect(meshes.length).toBe(2);
       expect(group.userData[PRINT_SHELL_MANIFOLD_KEY]).toBeDefined();
+      expect(group.userData[BASE_SLAB_MANIFOLD_KEY]).toBeDefined();
     }
   });
 
   test('replacement resets visibility to true (default ON)', async () => {
     const scene = createScene();
-    await setPrintableParts(scene, makePrintShell());
-    // User flipped the toggle off in-between.
+    await setPrintableParts(scene, makeParts());
     setPrintablePartsVisible(scene, false);
     expect(arePrintablePartsVisible(scene)).toBe(false);
 
-    await setPrintableParts(scene, makePrintShell());
-    // Fresh install re-shows — the default-ON semantic applies to every
-    // install, not just the first one.
+    await setPrintableParts(scene, makeParts());
     expect(arePrintablePartsVisible(scene)).toBe(true);
   });
 });
 
 describe('clearPrintableParts', () => {
-  test('removes the mesh, disposes GPU, and deletes the cached Manifold', async () => {
+  test('removes both meshes, disposes GPU, and deletes both cached Manifolds', async () => {
     const scene = createScene();
-    const parts = makePrintShell();
-    const deleteSpy = vi.fn(parts.printShell.delete.bind(parts.printShell));
-    parts.printShell.delete = deleteSpy;
+    const parts = makeParts();
+    const shellSpy = vi.fn(parts.printShell.delete.bind(parts.printShell));
+    const slabSpy = vi.fn(parts.basePart.delete.bind(parts.basePart));
+    parts.printShell.delete = shellSpy;
+    parts.basePart.delete = slabSpy;
 
-    const { mesh } = await setPrintableParts(scene, parts);
+    const { shellMesh, slabMesh } = await setPrintableParts(scene, parts);
 
-    const geomDispose = vi.spyOn(mesh.geometry, 'dispose');
-    const matDispose = vi.spyOn(
-      mesh.material as MeshStandardMaterial,
+    const shellGeomDispose = vi.spyOn(shellMesh.geometry, 'dispose');
+    const shellMatDispose = vi.spyOn(
+      shellMesh.material as MeshStandardMaterial,
+      'dispose',
+    );
+    const slabGeomDispose = vi.spyOn(slabMesh.geometry, 'dispose');
+    const slabMatDispose = vi.spyOn(
+      slabMesh.material as MeshStandardMaterial,
       'dispose',
     );
 
@@ -203,11 +229,15 @@ describe('clearPrintableParts', () => {
     const meshes = group.children.filter((c) => (c as Mesh).isMesh);
     expect(meshes.length).toBe(0);
 
-    expect(geomDispose).toHaveBeenCalledTimes(1);
-    expect(matDispose).toHaveBeenCalledTimes(1);
-    expect(deleteSpy).toHaveBeenCalledTimes(1);
+    expect(shellGeomDispose).toHaveBeenCalledTimes(1);
+    expect(shellMatDispose).toHaveBeenCalledTimes(1);
+    expect(slabGeomDispose).toHaveBeenCalledTimes(1);
+    expect(slabMatDispose).toHaveBeenCalledTimes(1);
+    expect(shellSpy).toHaveBeenCalledTimes(1);
+    expect(slabSpy).toHaveBeenCalledTimes(1);
 
     expect(group.userData[PRINT_SHELL_MANIFOLD_KEY]).toBeUndefined();
+    expect(group.userData[BASE_SLAB_MANIFOLD_KEY]).toBeUndefined();
     expect(hasPrintableParts(scene)).toBe(false);
   });
 
@@ -220,16 +250,16 @@ describe('clearPrintableParts', () => {
 
   test('is idempotent after install + clear (double-clear)', async () => {
     const scene = createScene();
-    await setPrintableParts(scene, makePrintShell());
+    await setPrintableParts(scene, makeParts());
     clearPrintableParts(scene);
     expect(() => clearPrintableParts(scene)).not.toThrow();
   });
 });
 
 describe('setPrintablePartsVisible', () => {
-  test('flips group.visible true/false', async () => {
+  test('flips group.visible true/false (hides both meshes)', async () => {
     const scene = createScene();
-    await setPrintableParts(scene, makePrintShell());
+    await setPrintableParts(scene, makeParts());
     const group = getGroup(scene);
 
     setPrintablePartsVisible(scene, true);
@@ -249,69 +279,70 @@ describe('setPrintablePartsVisible', () => {
 });
 
 describe('setPrintablePartsExplodedView — tween', () => {
-  test('while visible, exploded=true lifts mesh to +Y; false collapses', async () => {
+  test('while visible, exploded=true lifts shell +Y AND drops slab -Y; false collapses both', async () => {
     const scene = createScene();
-    await setPrintableParts(scene, makePrintShell());
+    await setPrintableParts(scene, makeParts());
     setPrintablePartsVisible(scene, true);
 
     const group = getGroup(scene);
-    const mesh = group.children.find(
+    const shellMesh = group.children.find(
       (c) => c.userData['tag'] === 'print-shell',
+    ) as Mesh;
+    const slabMesh = group.children.find(
+      (c) => c.userData['tag'] === 'base-slab-mesh',
     ) as Mesh;
 
     setPrintablePartsExplodedView(scene, true);
     advanceRaf(300); // past the 250 ms tween
 
-    // makePrintShell(): bbox Y ∈ [-30, 30] → height 60 → 0.25*60 = 15 →
-    // floor 40 → offset = 40 mm.
-    expect(mesh.position.y).toBeCloseTo(40, 3);
-    expect(mesh.position.x).toBeCloseTo(0, 4);
-    expect(mesh.position.z).toBeCloseTo(0, 4);
+    // makeParts(): shell bbox Y ∈ [-30, 30] → 0.25*60=15 → floor 40 → +40.
+    expect(shellMesh.position.y).toBeCloseTo(40, 3);
+    // slab bbox Y ∈ [-5, 5] → 0.2*10=2 → floor 30 → magnitude 30 → -30.
+    expect(slabMesh.position.y).toBeCloseTo(-30, 3);
+    expect(shellMesh.position.x).toBeCloseTo(0, 4);
+    expect(slabMesh.position.x).toBeCloseTo(0, 4);
 
-    // Idle after tween completes.
     expect(isPrintableExplodedIdle(scene)).toBe(true);
 
-    // Collapse back.
     setPrintablePartsExplodedView(scene, false);
     advanceRaf(300);
 
-    expect(mesh.position.y).toBeCloseTo(0, 3);
+    expect(shellMesh.position.y).toBeCloseTo(0, 3);
+    expect(slabMesh.position.y).toBeCloseTo(0, 3);
   });
 
   test('while hidden, exploded state is applied WITHOUT starting a tween (perf)', async () => {
     const scene = createScene();
-    await setPrintableParts(scene, makePrintShell());
-    // Force hide so we exercise the "exploded-while-hidden" short-circuit.
+    await setPrintableParts(scene, makeParts());
     setPrintablePartsVisible(scene, false);
 
     setPrintablePartsExplodedView(scene, true);
 
-    // Idle — no RAF scheduled because no visible tween is worth running.
     expect(isPrintableExplodedIdle(scene)).toBe(true);
 
     const group = getGroup(scene);
-    const mesh = group.children.find(
+    const shellMesh = group.children.find(
       (c) => c.userData['tag'] === 'print-shell',
     ) as Mesh;
+    const slabMesh = group.children.find(
+      (c) => c.userData['tag'] === 'base-slab-mesh',
+    ) as Mesh;
 
-    // Position snapped to the exploded target — when visible again, mesh
-    // appears at the right place.
-    expect(mesh.position.y).toBeCloseTo(40, 3);
+    expect(shellMesh.position.y).toBeCloseTo(40, 3);
+    expect(slabMesh.position.y).toBeCloseTo(-30, 3);
   });
 
-  test('hiding mid-tween cancels the RAF loop (no wasted frame work)', async () => {
+  test('hiding mid-tween cancels RAF loops on both meshes', async () => {
     const scene = createScene();
-    await setPrintableParts(scene, makePrintShell());
+    await setPrintableParts(scene, makeParts());
     setPrintablePartsVisible(scene, true);
 
     setPrintablePartsExplodedView(scene, true);
     expect(isPrintableExplodedIdle(scene)).toBe(false);
 
-    // Advance a bit into the tween.
     advanceRaf(100);
     expect(isPrintableExplodedIdle(scene)).toBe(false);
 
-    // Hide the group. Tween cancels; idle flips true.
     setPrintablePartsVisible(scene, false);
     expect(isPrintableExplodedIdle(scene)).toBe(true);
   });
@@ -323,21 +354,24 @@ describe('setPrintablePartsExplodedView — tween', () => {
     expect(isPrintableExplodedIdle(scene)).toBe(true);
   });
 
-  test('fresh setPrintableParts resets position to collapsed even after exploded', async () => {
+  test('fresh setPrintableParts resets both positions to collapsed even after exploded', async () => {
     const scene = createScene();
-    await setPrintableParts(scene, makePrintShell());
+    await setPrintableParts(scene, makeParts());
     setPrintablePartsVisible(scene, true);
     setPrintablePartsExplodedView(scene, true);
     advanceRaf(300);
 
-    // Install a new shell — position should reset to 0.
-    await setPrintableParts(scene, makePrintShell());
+    await setPrintableParts(scene, makeParts());
     const group = getGroup(scene);
-    const mesh = group.children.find(
+    const shellMesh = group.children.find(
       (c) => c.userData['tag'] === 'print-shell',
     ) as Mesh;
+    const slabMesh = group.children.find(
+      (c) => c.userData['tag'] === 'base-slab-mesh',
+    ) as Mesh;
 
-    expect(mesh.position.y).toBeCloseTo(0, 4);
+    expect(shellMesh.position.y).toBeCloseTo(0, 4);
+    expect(slabMesh.position.y).toBeCloseTo(0, 4);
   });
 });
 
@@ -349,13 +383,13 @@ describe('isPrintableExplodedIdle — state machine', () => {
 
   test('returns true when parts installed but never exploded', async () => {
     const scene = createScene();
-    await setPrintableParts(scene, makePrintShell());
+    await setPrintableParts(scene, makeParts());
     expect(isPrintableExplodedIdle(scene)).toBe(true);
   });
 
-  test('returns false while tween is in flight, true after', async () => {
+  test('returns false while either tween is in flight; true only when BOTH settle', async () => {
     const scene = createScene();
-    await setPrintableParts(scene, makePrintShell());
+    await setPrintableParts(scene, makeParts());
     setPrintablePartsVisible(scene, true);
 
     setPrintablePartsExplodedView(scene, true);
@@ -367,7 +401,7 @@ describe('isPrintableExplodedIdle — state machine', () => {
 
   test('returns true when group is hidden even if target fraction is 1', async () => {
     const scene = createScene();
-    await setPrintableParts(scene, makePrintShell());
+    await setPrintableParts(scene, makeParts());
     setPrintablePartsVisible(scene, false);
     setPrintablePartsExplodedView(scene, true);
     expect(isPrintableExplodedIdle(scene)).toBe(true);
@@ -375,9 +409,6 @@ describe('isPrintableExplodedIdle — state machine', () => {
 });
 
 // -- Fake RAF helpers --------------------------------------------------------
-//
-// Mirror of silicone.test.ts's fake RAF implementation so tests advance
-// `performance.now()` deterministically and drain the RAF queue.
 
 let rafCallbacks: Map<number, FrameRequestCallback>;
 let rafCounter: number;

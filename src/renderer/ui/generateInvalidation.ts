@@ -42,6 +42,7 @@ export type InvalidationTopbar = Pick<
   'setSiliconeVolume' | 'setResinVolume'
 > & {
   setPrintShellVolume?(mm3: number | null): void;
+  setBaseSlabVolume?(mm3: number | null): void;
 };
 
 /**
@@ -140,6 +141,7 @@ export function attachGenerateInvalidation(
     topbar.setSiliconeVolume(null);
     topbar.setResinVolume(null);
     topbar.setPrintShellVolume?.(null);
+    topbar.setBaseSlabVolume?.(null);
     generateButton.setError(null);
     // Issue #64 — clear the post-generate hint states. A staleness signal
     // (orientation commit, reset, new STL) invalidates any previous

@@ -121,9 +121,9 @@ test.describe('visual — printable parts preview + exploded view', () => {
       { timeout: 60_000 },
     );
 
-    // Wait for BOTH the silicone body AND the print shell to be live in
-    // the scene. Wave C: one `silicone-body` mesh + one `print-shell`
-    // mesh = 2 parts total.
+    // Wait for the silicone body AND the print shell AND the base slab
+    // to be live in the scene. Wave D (issue #82): one `silicone-body`
+    // mesh + one `print-shell` + one `base-slab-mesh` = 3 parts total.
     await page.waitForFunction(
       () => {
         type Obj = { userData?: Record<string, unknown> };
@@ -134,13 +134,15 @@ test.describe('visual — printable parts preview + exploded view', () => {
           .__testHooks;
         if (!hooks?.scene) return false;
         let silicone = 0;
-        let printable = 0;
+        let shell = 0;
+        let slab = 0;
         hooks.scene.traverse((obj) => {
           const tag = obj.userData?.['tag'];
           if (tag === 'silicone-body') silicone += 1;
-          if (tag === 'print-shell') printable += 1;
+          if (tag === 'print-shell') shell += 1;
+          if (tag === 'base-slab-mesh') slab += 1;
         });
-        return silicone === 1 && printable === 1;
+        return silicone === 1 && shell === 1 && slab === 1;
       },
       undefined,
       { timeout: 10_000 },

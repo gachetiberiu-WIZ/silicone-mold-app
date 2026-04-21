@@ -33,6 +33,7 @@ interface TopbarHook {
   setMasterVolume(mm3: number | null): void;
   setSiliconeVolume(mm3: number | null): void;
   setPrintShellVolume(mm3: number | null): void;
+  setBaseSlabVolume(mm3: number | null): void;
   setResinVolume(mm3: number | null): void;
   setUnits(unit: 'mm' | 'in'): void;
   getUnits(): 'mm' | 'in';
@@ -66,19 +67,18 @@ async function openRenderer(page: Page): Promise<void> {
 }
 
 test.describe('visual — topbar with all three volumes', () => {
-  test('mm mode, master + silicone + resin populated', async ({ page }) => {
+  test('mm mode, all five volumes populated', async ({ page }) => {
     await openRenderer(page);
     await page.evaluate(() => {
       const t = (
         window as unknown as { __testHooks: { topbar: TopbarHook } }
       ).__testHooks.topbar;
       t.setUnits('mm');
-      // Canonical numbers observed from the generator's unit tests:
-      // silicone ≈ 319 914 mm³, print-shell ≈ 455 000 mm³, resin =
-      // master = 127 451.6 mm³ for the mini-figurine fixture.
+      // Canonical numbers observed from the generator's unit tests.
       t.setMasterVolume(127_451.6);
       t.setSiliconeVolume(319_914);
       t.setPrintShellVolume(455_000);
+      t.setBaseSlabVolume(88_888);
       t.setResinVolume(127_451.6);
     });
     await page.clock.runFor(50);
@@ -87,7 +87,7 @@ test.describe('visual — topbar with all three volumes', () => {
     });
   });
 
-  test('inches mode, master + silicone + resin populated', async ({ page }) => {
+  test('inches mode, all five volumes populated', async ({ page }) => {
     await openRenderer(page);
     await page.evaluate(() => {
       const t = (
@@ -97,6 +97,7 @@ test.describe('visual — topbar with all three volumes', () => {
       t.setMasterVolume(127_451.6);
       t.setSiliconeVolume(319_914);
       t.setPrintShellVolume(455_000);
+      t.setBaseSlabVolume(88_888);
       t.setResinVolume(127_451.6);
     });
     await page.clock.runFor(50);
