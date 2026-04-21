@@ -1,20 +1,27 @@
 // tests/visual/printable-parts-exploded.spec.ts
 //
-// Visual regression: mini-figurine master + silicone halves + printable
-// parts (visible) + exploded-view toggle ON. Exercises the full Wave 4
-// preview pipeline for issue #62.
+// Visual regression: mini-figurine master + silicone body + surface-
+// conforming print shell (visible) + exploded-view toggle ON. Exercises
+// the full Wave C preview pipeline for issue #72.
 //
-// The generator takes ~2-3 s on warm machines; we set an outer 90 s
-// timeout to cover cold SwiftShader runs. Determinism: Chromium is
-// launched with SwiftShader (configured in `playwright.config.ts`) and
-// the clock is frozen before snapshotting — same pattern as
-// `silicone-exploded.spec.ts`.
+// Post-Wave-C the print shell is a single mesh (`print-shell` tag), not
+// the pre-#72 six-piece rectangular-box set.
 //
-// First-run behaviour: this spec ships its first golden on the first
-// green CI run. Per ADR-003 §B visual regression is advisory for 2
-// weeks after first green, so the missing-golden failure does not block
-// PR merge. The one-shot `update-linux-goldens.yml` workflow on this
-// branch regenerates the baseline on ubuntu-latest and commits it back.
+// Generator budget is ~3-4 s on warm machines after Wave C (two levelSet
+// passes against the same SDF). Outer 90 s timeout covers cold
+// SwiftShader. Determinism: Chromium launched with SwiftShader
+// (configured in `playwright.config.ts`) + clock frozen before
+// snapshot — same pattern as `silicone-exploded.spec.ts`.
+//
+// First-run behaviour: the golden is invalidated by the Wave C pipeline
+// change (the visible mold shape is fundamentally different). The
+// one-shot `update-linux-goldens.yml` workflow on this branch regenerates
+// the baseline on ubuntu-latest and commits it back.
+//
+// `toHaveScreenshot` timeout bumped from 30 s → 60 s (QA's follow-up
+// note on PR #70): the printable-parts-exploded.png golden flaked on
+// SwiftShader stabilisation the same way `silicone-exploded.png` did
+// pre-#53.
 
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
@@ -114,9 +121,9 @@ test.describe('visual — printable parts preview + exploded view', () => {
       { timeout: 60_000 },
     );
 
-    // Wait for BOTH silicone AND printable-parts meshes to be live in
-    // the scene. Issue #67 flipped the install default to
-    // `group.visible=true`; `scene.traverse` would walk them either way.
+    // Wait for BOTH the silicone body AND the print shell to be live in
+    // the scene. Wave C: one `silicone-body` mesh + one `print-shell`
+    // mesh = 2 parts total.
     await page.waitForFunction(
       () => {
         type Obj = { userData?: Record<string, unknown> };
@@ -131,16 +138,9 @@ test.describe('visual — printable parts preview + exploded view', () => {
         hooks.scene.traverse((obj) => {
           const tag = obj.userData?.['tag'];
           if (tag === 'silicone-body') silicone += 1;
-          if (
-            tag === 'printable-base' ||
-            tag === 'printable-top-cap' ||
-            (typeof tag === 'string' && tag.startsWith('printable-side-'))
-          ) {
-            printable += 1;
-          }
+          if (tag === 'print-shell') printable += 1;
         });
-        // 1 silicone body + 1 base + 4 sides + 1 topCap = 7 parts.
-        return silicone === 1 && printable >= 4;
+        return silicone === 1 && printable === 1;
       },
       undefined,
       { timeout: 10_000 },
@@ -197,17 +197,17 @@ test.describe('visual — printable parts preview + exploded view', () => {
       { timeout: 3_000 },
     );
 
-    // `timeout: 30_000` per the #53/#54 precedent for complex visual
-    // scenes. Same rationale: SwiftShader's first-frame raster with
-    // multiple transparent + opaque meshes takes several seconds to
-    // stabilise, and toHaveScreenshot's default 5 s internal stability
-    // loop can fall just short.
+    // `timeout: 60_000` (Wave C bump — QA follow-up on PR #70). Same
+    // flake class as `silicone-exploded.png`: SwiftShader's first-frame
+    // raster of the transparent silicone + opaque shell can take longer
+    // than the default 5 s internal stability loop. Matches the
+    // silicone-exploded bound post-#53.
     await expect(page).toHaveScreenshot('printable-parts-exploded.png', {
       maxDiffPixelRatio: 0.01,
       threshold: 0.15,
       animations: 'disabled',
       fullPage: false,
-      timeout: 30_000,
+      timeout: 60_000,
     });
   });
 });
