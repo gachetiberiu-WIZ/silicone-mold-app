@@ -267,8 +267,10 @@ test('silicone preview: generate → one mesh live → exploded view tweens body
     await expect(explodedToggle).toBeEnabled();
     await expect(explodedToggle).toHaveAttribute('aria-pressed', 'false');
 
-    // Collapsed state: mesh at y ≈ 0.
-    expect(await readSiliconeMeshWorldY(page)).toBeCloseTo(0, 3);
+    // Collapsed state: mesh at y ≈ baseSlabThickness (issue #87 fix 2 —
+    // whole mold assembly lifted so the base slab sits on the bed; silicone
+    // rides on top of the slab). Default baseSlabThickness_mm = 8.
+    expect(await readSiliconeMeshWorldY(page)).toBeCloseTo(8, 3);
 
     // Click the toggle. Wait 300 ms so the 250 ms tween lands.
     await explodedToggle.click();
@@ -287,7 +289,7 @@ test('silicone preview: generate → one mesh live → exploded view tweens body
     await expect(explodedToggle).toHaveAttribute('aria-pressed', 'false');
     await page.waitForTimeout(300);
     const collapsedY = await readSiliconeMeshWorldY(page);
-    expect(collapsedY).toBeCloseTo(0, 2);
+    expect(collapsedY).toBeCloseTo(8, 2);  // + baseSlabThickness (issue #87)
 
     // Stale-invalidation: commit a different face → silicone mesh
     // disappears AND toggle returns to disabled + not-pressed.
