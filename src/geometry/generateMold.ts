@@ -330,66 +330,64 @@ export async function generateSiliconeShell(
         // silicone body we return — no horizontal split in Wave A.
         const silicone = toplevel.Manifold.difference([shell, transformedMaster]);
         const tCavity = performance.now();
-        let printableBoxParts;
         try {
           assertManifold(silicone, 'silicone body (shell − master)');
-
-          // Step 4 (Wave-A): build the printable-box parts. We read the
-          // silicone body's AABB directly — no split-halves to unify
-          // bboxes from. `buildPrintableBox` is synchronous.
-          const shellBbox = silicone.boundingBox();
-          try {
-            printableBoxParts = buildPrintableBox(toplevel, shellBbox, parameters);
-          } catch (err) {
-            silicone.delete();
-            throw err;
-          }
-          const tPrintable = performance.now();
-
-          // Step 5: volumes. With sprue + vent channels removed, the
-          // resin pour volume equals the master's volume exactly. Tests
-          // pin the identity at 1e-9 relative; kernel float noise is
-          // the only source of drift.
-          const siliconeVolume_mm3 = silicone.volume();
-          const resinVolume_mm3 = master.volume();
-          const printableVolume_mm3 = printableBoxParts.printableVolume_mm3;
-
-          console.debug(
-            `[generateSiliconeShell] step timings (ms): ` +
-              `transform=${(tTransform - t0).toFixed(1)} ` +
-              `sdf-build=${(tSdf - tTransform).toFixed(1)} ` +
-              `levelset=${(tShell - tSdf).toFixed(1)} ` +
-              `cavity=${(tCavity - tShell).toFixed(1)} ` +
-              `printable-box=${(tPrintable - tCavity).toFixed(1)} ` +
-              `total=${(tPrintable - t0).toFixed(1)} ` +
-              `(edgeLength=${edgeLength.toFixed(2)} mm, ` +
-              `sideCount=${parameters.sideCount})`,
-          );
-          console.info(
-            `[generateSiliconeShell] silicone=${siliconeVolume_mm3.toFixed(1)} mm³, ` +
-              `resin=${resinVolume_mm3.toFixed(1)} mm³, ` +
-              `printable=${printableVolume_mm3.toFixed(1)} mm³ ` +
-              `(siliconeThickness=${parameters.siliconeThickness_mm} mm, ` +
-              `printShellThickness=${parameters.printShellThickness_mm} mm, ` +
-              `sideCount=${parameters.sideCount}, ` +
-              `total=${(tPrintable - t0).toFixed(1)} ms)`,
-          );
-
-          return {
-            silicone,
-            basePart: printableBoxParts.basePart,
-            sideParts: printableBoxParts.sideParts,
-            topCapPart: printableBoxParts.topCapPart,
-            siliconeVolume_mm3,
-            resinVolume_mm3,
-            printableVolume_mm3,
-          };
         } catch (err) {
-          // silicone is released inside the `buildPrintableBox`-throw
-          // branch already; on any other throw here, nothing is owned
-          // by the result yet — safe to bail.
+          silicone.delete();
           throw err;
         }
+
+        // Step 4 (Wave-A): build the printable-box parts. We read the
+        // silicone body's AABB directly — no split-halves to unify
+        // bboxes from. `buildPrintableBox` is synchronous.
+        const shellBbox = silicone.boundingBox();
+        let printableBoxParts;
+        try {
+          printableBoxParts = buildPrintableBox(toplevel, shellBbox, parameters);
+        } catch (err) {
+          silicone.delete();
+          throw err;
+        }
+        const tPrintable = performance.now();
+
+        // Step 5: volumes. With sprue + vent channels removed, the
+        // resin pour volume equals the master's volume exactly. Tests
+        // pin the identity at 1e-9 relative; kernel float noise is
+        // the only source of drift.
+        const siliconeVolume_mm3 = silicone.volume();
+        const resinVolume_mm3 = master.volume();
+        const printableVolume_mm3 = printableBoxParts.printableVolume_mm3;
+
+        console.debug(
+          `[generateSiliconeShell] step timings (ms): ` +
+            `transform=${(tTransform - t0).toFixed(1)} ` +
+            `sdf-build=${(tSdf - tTransform).toFixed(1)} ` +
+            `levelset=${(tShell - tSdf).toFixed(1)} ` +
+            `cavity=${(tCavity - tShell).toFixed(1)} ` +
+            `printable-box=${(tPrintable - tCavity).toFixed(1)} ` +
+            `total=${(tPrintable - t0).toFixed(1)} ` +
+            `(edgeLength=${edgeLength.toFixed(2)} mm, ` +
+            `sideCount=${parameters.sideCount})`,
+        );
+        console.info(
+          `[generateSiliconeShell] silicone=${siliconeVolume_mm3.toFixed(1)} mm³, ` +
+            `resin=${resinVolume_mm3.toFixed(1)} mm³, ` +
+            `printable=${printableVolume_mm3.toFixed(1)} mm³ ` +
+            `(siliconeThickness=${parameters.siliconeThickness_mm} mm, ` +
+            `printShellThickness=${parameters.printShellThickness_mm} mm, ` +
+            `sideCount=${parameters.sideCount}, ` +
+            `total=${(tPrintable - t0).toFixed(1)} ms)`,
+        );
+
+        return {
+          silicone,
+          basePart: printableBoxParts.basePart,
+          sideParts: printableBoxParts.sideParts,
+          topCapPart: printableBoxParts.topCapPart,
+          siliconeVolume_mm3,
+          resinVolume_mm3,
+          printableVolume_mm3,
+        };
       } finally {
         shell.delete();
       }

@@ -1,22 +1,21 @@
 // tests/renderer/state/parameters.test.ts
 //
-// Unit tests for the parameter store. Covers:
+// Unit tests for the parameter store. Post-#69 scope:
 //
-//   1. Defaults match the research doc (docs/research/molding-techniques.md §6,
-//      APPROVED 2026-04-18) — guards against a drift where the table in
-//      issue #31 is silently re-applied.
-//   2. `update()` emits the new snapshot to subscribers; repeated updates
+//   1. Defaults match the new Wave-B values: siliconeThickness_mm=5,
+//      printShellThickness_mm=8, sideCount=4, draftAngle_deg=0.
+//   2. Ranges match the new Wave-B values: silicone 1–15, shell 2–30.
+//   3. `update()` emits the new snapshot to subscribers; repeated updates
 //      with unchanged values are no-ops.
-//   3. `reset()` restores every field to the default and emits.
-//   4. `subscribe()` returns an unsubscribe function that actually detaches.
-//   5. `isAtDefaults()` tracks the edit state used by the "Reset" button.
-//   6. The snapshot is frozen — mutating it does not change the store.
+//   4. `reset()` restores every field to the default and emits.
+//   5. `subscribe()` returns an unsubscribe function that actually detaches.
+//   6. `isAtDefaults()` tracks the edit state used by the "Reset" button.
+//   7. The snapshot is frozen — mutating it does not change the store.
 
 import { describe, expect, test, vi } from 'vitest';
 
 import {
   DEFAULT_PARAMETERS,
-  KEY_STYLE_OPTIONS,
   NUMERIC_CONSTRAINTS,
   SIDE_COUNT_OPTIONS,
   createParametersStore,
@@ -24,15 +23,11 @@ import {
 } from '@/renderer/state/parameters';
 
 describe('DEFAULT_PARAMETERS', () => {
-  test('matches molding-techniques.md §6 recommendation', () => {
+  test('matches the post-#69 Wave-B defaults', () => {
     expect(DEFAULT_PARAMETERS).toEqual({
-      wallThickness_mm: 10,
-      baseThickness_mm: 5,
+      siliconeThickness_mm: 5,
+      printShellThickness_mm: 8,
       sideCount: 4,
-      sprueDiameter_mm: 5,
-      ventDiameter_mm: 1.5,
-      ventCount: 2,
-      registrationKeyStyle: 'asymmetric-hemi',
       draftAngle_deg: 0,
     });
   });
@@ -43,43 +38,19 @@ describe('DEFAULT_PARAMETERS', () => {
 });
 
 describe('NUMERIC_CONSTRAINTS', () => {
-  test('wallThickness range 6–25 mm per research doc', () => {
-    expect(NUMERIC_CONSTRAINTS.wallThickness_mm).toMatchObject({
-      min: 6,
-      max: 25,
-      integer: false,
-    });
-  });
-
-  test('baseThickness range 2–15 mm per research doc', () => {
-    expect(NUMERIC_CONSTRAINTS.baseThickness_mm).toMatchObject({
-      min: 2,
+  test('siliconeThickness range 1–15 mm (post-#69 widened)', () => {
+    expect(NUMERIC_CONSTRAINTS.siliconeThickness_mm).toMatchObject({
+      min: 1,
       max: 15,
       integer: false,
     });
   });
 
-  test('sprueDiameter range 3–8 mm per research doc', () => {
-    expect(NUMERIC_CONSTRAINTS.sprueDiameter_mm).toMatchObject({
-      min: 3,
-      max: 8,
+  test('printShellThickness range 2–30 mm (post-#69 widened)', () => {
+    expect(NUMERIC_CONSTRAINTS.printShellThickness_mm).toMatchObject({
+      min: 2,
+      max: 30,
       integer: false,
-    });
-  });
-
-  test('ventDiameter range 1–3 mm per research doc', () => {
-    expect(NUMERIC_CONSTRAINTS.ventDiameter_mm).toMatchObject({
-      min: 1,
-      max: 3,
-      integer: false,
-    });
-  });
-
-  test('ventCount is integer, range 0–8 (research doc silent; issue default)', () => {
-    expect(NUMERIC_CONSTRAINTS.ventCount).toMatchObject({
-      min: 0,
-      max: 8,
-      integer: true,
     });
   });
 
@@ -103,17 +74,9 @@ describe('NUMERIC_CONSTRAINTS', () => {
   });
 });
 
-describe('SIDE_COUNT_OPTIONS / KEY_STYLE_OPTIONS', () => {
+describe('SIDE_COUNT_OPTIONS', () => {
   test('side count options are exactly 2, 3, 4', () => {
     expect([...SIDE_COUNT_OPTIONS]).toEqual([2, 3, 4]);
-  });
-
-  test('key style options are the three locked enum values', () => {
-    expect([...KEY_STYLE_OPTIONS]).toEqual([
-      'asymmetric-hemi',
-      'cone',
-      'keyhole',
-    ]);
   });
 });
 
@@ -126,13 +89,13 @@ describe('createParametersStore', () => {
 
   test('initial overrides merge shallowly over defaults', () => {
     const store = createParametersStore({
-      wallThickness_mm: 8,
+      siliconeThickness_mm: 8,
       sideCount: 2,
     });
-    expect(store.get().wallThickness_mm).toBe(8);
+    expect(store.get().siliconeThickness_mm).toBe(8);
     expect(store.get().sideCount).toBe(2);
-    expect(store.get().baseThickness_mm).toBe(
-      DEFAULT_PARAMETERS.baseThickness_mm,
+    expect(store.get().printShellThickness_mm).toBe(
+      DEFAULT_PARAMETERS.printShellThickness_mm,
     );
     expect(store.isAtDefaults()).toBe(false);
   });
@@ -142,14 +105,14 @@ describe('createParametersStore', () => {
     const spy = vi.fn((_p: Readonly<MoldParameters>) => undefined);
     store.subscribe(spy);
 
-    store.update({ wallThickness_mm: 7 });
+    store.update({ siliconeThickness_mm: 7 });
 
     expect(spy).toHaveBeenCalledTimes(1);
     const call = spy.mock.calls[0];
     expect(call).toBeDefined();
     const snapshot = call![0]!;
-    expect(snapshot.wallThickness_mm).toBe(7);
-    expect(store.get().wallThickness_mm).toBe(7);
+    expect(snapshot.siliconeThickness_mm).toBe(7);
+    expect(store.get().siliconeThickness_mm).toBe(7);
     expect(store.isAtDefaults()).toBe(false);
   });
 
@@ -158,14 +121,13 @@ describe('createParametersStore', () => {
     const spy = vi.fn();
     store.subscribe(spy);
 
-    // wallThickness defaults to 10; setting it to 10 is a no-op.
-    store.update({ wallThickness_mm: DEFAULT_PARAMETERS.wallThickness_mm });
+    store.update({ siliconeThickness_mm: DEFAULT_PARAMETERS.siliconeThickness_mm });
     expect(spy).not.toHaveBeenCalled();
   });
 
   test('reset() restores every field to defaults and emits', () => {
     const store = createParametersStore({
-      wallThickness_mm: 7,
+      siliconeThickness_mm: 7,
       sideCount: 2,
       draftAngle_deg: 3,
     });
@@ -194,11 +156,11 @@ describe('createParametersStore', () => {
     const spy = vi.fn();
     const unsubscribe = store.subscribe(spy);
 
-    store.update({ wallThickness_mm: 12 });
+    store.update({ siliconeThickness_mm: 12 });
     expect(spy).toHaveBeenCalledTimes(1);
 
     unsubscribe();
-    store.update({ wallThickness_mm: 14 });
+    store.update({ siliconeThickness_mm: 14 });
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
@@ -206,14 +168,12 @@ describe('createParametersStore', () => {
     const store = createParametersStore();
     const snap = store.get();
     expect(Object.isFrozen(snap)).toBe(true);
-    // Attempting to mutate throws in strict mode (Vitest runs ESM strict).
     expect(() => {
       // @ts-expect-error — intentionally testing the freeze contract.
-      snap.wallThickness_mm = 42;
+      snap.siliconeThickness_mm = 42;
     }).toThrow();
-    // State itself is unchanged.
-    expect(store.get().wallThickness_mm).toBe(
-      DEFAULT_PARAMETERS.wallThickness_mm,
+    expect(store.get().siliconeThickness_mm).toBe(
+      DEFAULT_PARAMETERS.siliconeThickness_mm,
     );
   });
 
@@ -223,14 +183,13 @@ describe('createParametersStore', () => {
       throw new Error('boom');
     });
     const good = vi.fn();
-    // Suppress the console.error surface while we exercise the bad listener.
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {
       /* swallow */
     });
     store.subscribe(bad);
     store.subscribe(good);
 
-    store.update({ wallThickness_mm: 11 });
+    store.update({ siliconeThickness_mm: 11 });
 
     expect(bad).toHaveBeenCalledTimes(1);
     expect(good).toHaveBeenCalledTimes(1);

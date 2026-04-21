@@ -64,7 +64,7 @@ describe('mountExplodedViewToggle — initial state', () => {
     const btn = getBtn();
     expect(btn.textContent).toBe('Exploded view');
     expect(btn.title).toBe(
-      'Show the two silicone halves moved apart so the cavity is visible',
+      'Show the silicone body lifted so the cavity is visible',
     );
   });
 });

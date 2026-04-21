@@ -130,7 +130,7 @@ test.describe('visual — printable parts preview + exploded view', () => {
         let printable = 0;
         hooks.scene.traverse((obj) => {
           const tag = obj.userData?.['tag'];
-          if (tag === 'silicone-upper' || tag === 'silicone-lower') silicone += 1;
+          if (tag === 'silicone-body') silicone += 1;
           if (
             tag === 'printable-base' ||
             tag === 'printable-top-cap' ||
@@ -139,8 +139,8 @@ test.describe('visual — printable parts preview + exploded view', () => {
             printable += 1;
           }
         });
-        // 2 silicone halves + 1 base + 4 sides + 1 topCap = 8 parts.
-        return silicone === 2 && printable >= 4;
+        // 1 silicone body + 1 base + 4 sides + 1 topCap = 7 parts.
+        return silicone === 1 && printable >= 4;
       },
       undefined,
       { timeout: 10_000 },

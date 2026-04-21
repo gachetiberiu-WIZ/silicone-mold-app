@@ -115,7 +115,8 @@ test.describe('visual — silicone preview + exploded view', () => {
       { timeout: 60_000 },
     );
 
-    // Wait for silicone to actually be in the scene.
+    // Wait for silicone to actually be in the scene. Post-#69 we
+    // expect exactly ONE silicone mesh (the horizontal split is gone).
     await page.waitForFunction(
       () => {
         type Obj = { userData?: Record<string, unknown> };
@@ -128,9 +129,9 @@ test.describe('visual — silicone preview + exploded view', () => {
         let count = 0;
         hooks.scene.traverse((obj) => {
           const tag = obj.userData?.['tag'];
-          if (tag === 'silicone-upper' || tag === 'silicone-lower') count += 1;
+          if (tag === 'silicone-body') count += 1;
         });
-        return count === 2;
+        return count === 1;
       },
       undefined,
       { timeout: 10_000 },
