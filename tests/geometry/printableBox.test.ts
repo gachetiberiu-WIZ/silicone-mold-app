@@ -93,14 +93,14 @@ describe('buildPrintableBox — validation', () => {
     ).toThrow(/sideCount=5/);
   });
 
-  test('rejects non-positive baseThickness_mm', async () => {
+  test('rejects non-positive printShellThickness_mm', async () => {
     const toplevel = await initManifold();
     const bbox = box(-1, -1, -1, 1, 1, 1);
-    expect(() => buildPrintableBox(toplevel, bbox, params({ baseThickness_mm: 0 }))).toThrow(
-      /baseThickness_mm/,
+    expect(() => buildPrintableBox(toplevel, bbox, params({ printShellThickness_mm: 0 }))).toThrow(
+      /printShellThickness_mm/,
     );
-    expect(() => buildPrintableBox(toplevel, bbox, params({ baseThickness_mm: -1 }))).toThrow(
-      /baseThickness_mm/,
+    expect(() => buildPrintableBox(toplevel, bbox, params({ printShellThickness_mm: -1 }))).toThrow(
+      /printShellThickness_mm/,
     );
   });
 
@@ -150,22 +150,21 @@ describe('buildPrintableBox — analytic unit-cube check (issue #50 AC)', () => 
   //   inner (shellBbox) = 1×1×1 → volume = 1
   //   total printable = 1331 − 1 = 1330
 
-  test('sideCount=4, baseThickness_mm=5, 1×1×1 bbox → 1330 mm³', async () => {
+  test('sideCount=4, printShellThickness_mm=5, 1×1×1 bbox → 1330 mm³', async () => {
     const toplevel = await initManifold();
     const bbox = box(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5);
-    const p = params({ sideCount: 4, baseThickness_mm: 5 });
+    const p = params({ sideCount: 4, printShellThickness_mm: 5 });
     const parts = buildPrintableBox(toplevel, bbox, p);
     try {
       // Expected: outer 11³ − inner 1³ = 1331 − 1 = 1330.
       expect(parts.printableVolume_mm3).toBeCloseTo(1330, 3);
-      // The issue AC specifies wall=10 but in the parameter schema
-      // "wall" is `baseThickness_mm` — wallThickness_mm governs the
-      // silicone, baseThickness_mm governs the printed-box walls. The
-      // test above uses baseThickness_mm=5 so the analytic number is
-      // small and easy to verify by hand; this duplicate at
-      // baseThickness_mm=10 matches the issue text exactly.
+      // Post-#69 naming: `printShellThickness_mm` governs the printed-box
+      // wall thickness; `siliconeThickness_mm` is the separate silicone-
+      // layer parameter. The test above uses printShellThickness_mm=5 so
+      // the analytic number is small and easy to verify by hand; this
+      // duplicate at printShellThickness_mm=10 pins the larger case:
       // outer = 21×21×21 = 9261, inner = 1, total = 9260.
-      const p10 = params({ sideCount: 4, baseThickness_mm: 10 });
+      const p10 = params({ sideCount: 4, printShellThickness_mm: 10 });
       const parts10 = buildPrintableBox(toplevel, bbox, p10);
       try {
         expect(parts10.printableVolume_mm3).toBeCloseTo(9260, 3);
@@ -200,7 +199,7 @@ async function withPrintableBox<R>(
   const toplevel = await initManifold();
   const bbox = box(-1.5, -2.5, -3.5, 1.5, 2.5, 3.5); // 3×5×7
   const wall = 4;
-  const p = params({ sideCount, baseThickness_mm: wall });
+  const p = params({ sideCount, printShellThickness_mm: wall });
   const parts = buildPrintableBox(toplevel, bbox, p);
   try {
     return await fn({
@@ -372,7 +371,7 @@ describe('buildPrintableBox — translated shellBbox (not origin-centred)', () =
   test('off-origin shellBbox still produces non-overlapping side parts', async () => {
     const toplevel = await initManifold();
     const bbox = box(100, 50, 200, 104, 54, 208); // 4×4×8 centred at (102, 52, 204)
-    const p = params({ sideCount: 4, baseThickness_mm: 3 });
+    const p = params({ sideCount: 4, printShellThickness_mm: 3 });
     const parts = buildPrintableBox(toplevel, bbox, p);
     try {
       expect(parts.sideParts).toHaveLength(4);

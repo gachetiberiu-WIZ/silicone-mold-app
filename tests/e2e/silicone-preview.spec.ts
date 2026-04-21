@@ -1,18 +1,19 @@
 // tests/e2e/silicone-preview.spec.ts
 //
-// End-to-end for issue #47: silicone preview + exploded-view toggle.
+// End-to-end for the silicone preview + exploded-view toggle. Post-#69
+// scope: single silicone mesh (the horizontal split is gone).
 //
 // Flow:
 //   1. Launch app, stub the Open dialog to return the mini-figurine.
 //   2. Open STL → master loads; exploded-view toggle starts disabled.
 //   3. Commit a face (camera-down-click same as `generate-wire-up.spec.ts`).
 //   4. Click Generate → wait for volumes to populate.
-//   5. Assert two silicone meshes are live in the scene (via scene.traverse).
+//   5. Assert ONE silicone mesh is live in the scene (via scene.traverse).
 //   6. Assert the exploded-view toggle is enabled + not-pressed.
 //   7. Click the exploded-view toggle.
-//   8. Wait 300 ms (past the 250 ms tween) — assert upper mesh world-Y > +20.
-//   9. Click again → halves collapse back to y ≈ 0.
-//  10. Commit a different face → silicone meshes disappear + toggle disables.
+//   8. Wait 300 ms (past the 250 ms tween) — assert mesh world-Y > +20.
+//   9. Click again → mesh collapses back to y ≈ 0.
+//  10. Commit a different face → silicone mesh disappears + toggle disables.
 //
 // Generator budget on the mini-figurine is ~2-3 s; we set the wait ceilings
 // to 15 s for CI headroom.
@@ -139,8 +140,8 @@ async function commitSideFace(page: Page): Promise<void> {
 
 /**
  * Count silicone meshes currently in the scene by walking from the
- * scene-root test-hook and checking `userData.tag`. Returns the raw
- * count so the caller can assert exactly-two.
+ * scene-root test-hook and checking `userData.tag`. Post-#69 we expect
+ * exactly-one mesh with the `silicone-body` tag.
  */
 async function countSiliconeMeshes(page: Page): Promise<number> {
   return page.evaluate(() => {
@@ -155,17 +156,17 @@ async function countSiliconeMeshes(page: Page): Promise<number> {
     let count = 0;
     hooks.scene.traverse((obj) => {
       const tag = obj.userData?.['tag'];
-      if (tag === 'silicone-upper' || tag === 'silicone-lower') count += 1;
+      if (tag === 'silicone-body') count += 1;
     });
     return count;
   });
 }
 
 /**
- * Read the world-space Y position of the upper silicone mesh. Used to
- * detect the exploded-view animation has landed at its +offset target.
+ * Read the world-space Y position of the silicone mesh. Used to detect
+ * the exploded-view animation has landed at its +offset target.
  */
-async function readUpperMeshWorldY(page: Page): Promise<number> {
+async function readSiliconeMeshWorldY(page: Page): Promise<number> {
   return page.evaluate(() => {
     type Obj = {
       userData?: Record<string, unknown>;
@@ -180,14 +181,7 @@ async function readUpperMeshWorldY(page: Page): Promise<number> {
     if (!hooks?.scene) throw new Error('scene hook missing');
     let worldY = Number.NaN;
     hooks.scene.traverse((obj) => {
-      if (obj.userData?.['tag'] === 'silicone-upper') {
-        // Read world Y directly from the 4x4 matrixWorld — element[13]
-        // is the translation.y. We can't use `getWorldPosition(v)` here
-        // because it mutates `v` via `setFromMatrixPosition`, which is
-        // a THREE.Vector3 prototype method; a plain `{y:0}` object
-        // doesn't have it and the call throws. Reading the matrix
-        // directly is equivalent AND works regardless of any future
-        // parent-group transform (mW folds the ancestor chain in).
+      if (obj.userData?.['tag'] === 'silicone-body') {
         if (obj.updateWorldMatrix) obj.updateWorldMatrix(true, false);
         if (obj.matrixWorld) {
           worldY = obj.matrixWorld.elements[13]!;
@@ -198,7 +192,7 @@ async function readUpperMeshWorldY(page: Page): Promise<number> {
   });
 }
 
-test('silicone preview: generate → two meshes live → exploded view tweens halves apart', async () => {
+test('silicone preview: generate → one mesh live → exploded view tweens body upward', async () => {
   const app = await launchApp();
   try {
     const page = await app.firstWindow();
@@ -266,37 +260,37 @@ test('silicone preview: generate → two meshes live → exploded view tweens ha
     await expect(page.locator('[data-testid="silicone-volume-value"]'))
       .not.toHaveText('Click Generate', { timeout: 5_000 });
 
-    // Two silicone meshes live in the scene.
-    expect(await countSiliconeMeshes(page)).toBe(2);
+    // One silicone mesh live in the scene.
+    expect(await countSiliconeMeshes(page)).toBe(1);
 
     // Toggle now enabled + not-pressed.
     await expect(explodedToggle).toBeEnabled();
     await expect(explodedToggle).toHaveAttribute('aria-pressed', 'false');
 
-    // Collapsed state: both halves at y ≈ 0.
-    expect(await readUpperMeshWorldY(page)).toBeCloseTo(0, 3);
+    // Collapsed state: mesh at y ≈ 0.
+    expect(await readSiliconeMeshWorldY(page)).toBeCloseTo(0, 3);
 
     // Click the toggle. Wait 300 ms so the 250 ms tween lands.
     await explodedToggle.click();
     await expect(explodedToggle).toHaveAttribute('aria-pressed', 'true');
     await page.waitForTimeout(300);
 
-    // Upper mesh pushed up along +Y by the exploded offset.
+    // Mesh pushed up along +Y by the exploded offset.
     // Offset = max(30, 0.2 * bboxHeight). For the mini-figurine the
     // bbox height is ~70 mm → 0.2 * 70 = 14, floor = 30 → offset = 30.
     // We assert > 20 mm to have tolerance for CI timing jitter.
-    const explodedY = await readUpperMeshWorldY(page);
+    const explodedY = await readSiliconeMeshWorldY(page);
     expect(explodedY).toBeGreaterThan(20);
 
     // Click again → collapse back to 0.
     await explodedToggle.click();
     await expect(explodedToggle).toHaveAttribute('aria-pressed', 'false');
     await page.waitForTimeout(300);
-    const collapsedY = await readUpperMeshWorldY(page);
+    const collapsedY = await readSiliconeMeshWorldY(page);
     expect(collapsedY).toBeCloseTo(0, 2);
 
-    // Stale-invalidation: commit a different face → silicone meshes
-    // disappear AND toggle returns to disabled + not-pressed.
+    // Stale-invalidation: commit a different face → silicone mesh
+    // disappears AND toggle returns to disabled + not-pressed.
     await commitSideFace(page);
     expect(await countSiliconeMeshes(page)).toBe(0);
     await expect(explodedToggle).toBeDisabled();

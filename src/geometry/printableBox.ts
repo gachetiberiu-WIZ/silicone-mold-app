@@ -12,8 +12,8 @@
 //
 // The box's INNER cavity is exactly `shellBbox` (no air gap in v1 — the
 // silicone hugs the printed walls). The OUTER envelope is `shellBbox`
-// expanded by `baseThickness_mm` on all 6 sides. The one
-// `baseThickness_mm` parameter therefore governs base-plate thickness,
+// expanded by `printShellThickness_mm` on all 6 sides. The one
+// `printShellThickness_mm` parameter therefore governs base-plate thickness,
 // top-cap thickness, AND printed-side wall thickness — see issue #50
 // "Containment-box geometry" and `mold-generator` SKILL §"Input contract"
 // (where `basePlateThickness_mm` is the only box-wall thickness parameter
@@ -299,15 +299,15 @@ function trimToConvexSector(
  * in — the caller already applied `viewTransform` to the master before
  * passing `shellBbox`):
  *
- *   Y:  outer.max.y = shellBbox.max.y + baseThickness_mm
+ *   Y:  outer.max.y = shellBbox.max.y + printShellThickness_mm
  *       shellBbox.max.y        ──── (top of silicone, bottom of top cap)
  *       shellBbox.min.y        ──── (bottom of silicone, top of base)
- *       outer.min.y = shellBbox.min.y − baseThickness_mm
+ *       outer.min.y = shellBbox.min.y − printShellThickness_mm
  *
- *   XZ: outer.min.x = shellBbox.min.x − baseThickness_mm
- *       outer.max.x = shellBbox.max.x + baseThickness_mm
- *       outer.min.z = shellBbox.min.z − baseThickness_mm
- *       outer.max.z = shellBbox.max.z + baseThickness_mm
+ *   XZ: outer.min.x = shellBbox.min.x − printShellThickness_mm
+ *       outer.max.x = shellBbox.max.x + printShellThickness_mm
+ *       outer.min.z = shellBbox.min.z − printShellThickness_mm
+ *       outer.max.z = shellBbox.max.z + printShellThickness_mm
  *
  * - `basePart`    occupies Y in [outer.min.y, shellBbox.min.y], full
  *                 outer XZ footprint.
@@ -321,7 +321,7 @@ function trimToConvexSector(
  *   `initManifold()`).
  * @param shellBbox AABB of the silicone body (union of upper + lower
  *   halves) in the oriented frame, in mm.
- * @param parameters Current mold parameters. Reads `baseThickness_mm` and
+ * @param parameters Current mold parameters. Reads `printShellThickness_mm` and
  *   `sideCount` only.
  * @returns Fresh owned Manifolds. See `PrintableBoxParts` for the
  *   ownership contract.
@@ -341,9 +341,9 @@ export function buildPrintableBox(
         `is not supported (must be one of ${SUPPORTED_SIDE_COUNTS.join(', ')})`,
     );
   }
-  const wall = parameters.baseThickness_mm;
+  const wall = parameters.printShellThickness_mm;
   if (!(wall > 0) || !Number.isFinite(wall)) {
-    throw new Error(`buildPrintableBox: baseThickness_mm=${wall} must be a positive finite number`);
+    throw new Error(`buildPrintableBox: printShellThickness_mm=${wall} must be a positive finite number`);
   }
 
   // Validate shellBbox is a proper AABB — the silicone pipeline produces

@@ -2,23 +2,10 @@
 //
 // @vitest-environment happy-dom
 //
-// DOM-level tests for the right-sidebar parameter panel. Uses happy-dom
-// (a lightweight DOM implementation for Vitest) — a devDependency, not a
-// runtime dep. Runtime behaviour in production is Chromium-in-Electron;
-// happy-dom is the standard Vitest choice for UI assertions that don't
-// need a real browser.
-//
-// Coverage:
-//   1. Renders one row per field (8 rows + a reset button).
-//   2. The reset button disables when all values equal defaults, and
-//      re-enables after any change.
-//   3. Out-of-range input surfaces the "Out of range" error live.
-//   4. Blur clamps the value back into [min, max] and clears the error.
-//   5. Flipping the units-changed event re-renders length fields in the
-//      new unit without mutating the store (internal mm value unchanged).
-//   6. Every visible string goes through i18n (no hardcoded English on the
-//      factories' output — verified by checking that the rendered labels
-//      equal the values we set on the i18n resource bundle).
+// DOM-level tests for the right-sidebar parameter panel. Wave-A (issue
+// #69) reduces the form to four rows: silicone thickness, print-shell
+// thickness, side count, draft angle. The sprue / vent / ventCount /
+// registration-key fields are gone.
 
 import i18next from 'i18next';
 import { beforeEach, describe, expect, test } from 'vitest';
@@ -44,16 +31,12 @@ function mount(): {
 }
 
 beforeEach(() => {
-  // happy-dom carries state between tests — scrub the document + reset i18n /
-  // persisted units so every test starts from a clean slate.
   document.body.innerHTML = '';
   try {
     window.localStorage.removeItem('units');
   } catch {
     /* ignore */
   }
-  // i18next is initialised once; if a previous test set a non-default unit,
-  // reset it explicitly.
   setUnitSystem('mm');
   initI18n();
 });
@@ -62,20 +45,15 @@ describe('parameter panel — rendering', () => {
   test('renders one field per parameter + title + reset button', () => {
     const { container } = mount();
 
-    // Title
     const title = container.querySelector('.sidebar__title');
     expect(title).toBeTruthy();
     expect(title?.textContent).toBe(i18next.t('parameters.title'));
 
-    // One field per parameter — 8 total (keyed by data-testid).
+    // Post-#69: exactly four rows.
     const fieldIds = [
-      'wallThickness',
-      'baseThickness',
+      'siliconeThickness',
+      'printShellThickness',
       'sideCount',
-      'sprueDiameter',
-      'ventDiameter',
-      'ventCount',
-      'registrationKeyStyle',
       'draftAngle',
     ];
     for (const id of fieldIds) {
@@ -87,7 +65,20 @@ describe('parameter panel — rendering', () => {
       ).toBeTruthy();
     }
 
-    // Reset button
+    // No leftover fields from pre-#69.
+    for (const deletedId of [
+      'wallThickness',
+      'baseThickness',
+      'sprueDiameter',
+      'ventDiameter',
+      'ventCount',
+      'registrationKeyStyle',
+    ]) {
+      expect(
+        container.querySelector(`[data-testid="param-field-${deletedId}"]`),
+      ).toBeNull();
+    }
+
     const reset = container.querySelector<HTMLButtonElement>(
       '[data-testid="param-reset"]',
     );
@@ -102,21 +93,15 @@ describe('parameter panel — rendering', () => {
         `[data-testid="param-input-${id}"]`,
       ) as HTMLInputElement | HTMLSelectElement).value;
 
-    // Length defaults render with 1 decimal in mm.
-    expect(val('wallThickness')).toBe('10.0');
-    expect(val('baseThickness')).toBe('5.0');
-    expect(val('sprueDiameter')).toBe('5.0');
-    expect(val('ventDiameter')).toBe('1.5');
-
-    // Count (integer) renders plain.
-    expect(val('ventCount')).toBe('2');
+    // Post-#69 Wave-B defaults: silicone=5.0, printShell=8.0.
+    expect(val('siliconeThickness')).toBe('5.0');
+    expect(val('printShellThickness')).toBe('8.0');
 
     // Angle (1 decimal).
     expect(val('draftAngle')).toBe('0.0');
 
-    // Enum selects: stringified sideCount, enum key for keyStyle.
+    // Enum select: stringified sideCount.
     expect(val('sideCount')).toBe('4');
-    expect(val('registrationKeyStyle')).toBe('asymmetric-hemi');
   });
 
   test('tab order follows DOM order (keyboard reachability)', () => {
@@ -126,15 +111,10 @@ describe('parameter panel — rendering', () => {
         '[data-testid^="param-input-"]',
       ),
     );
-    // Expected order mirrors the spec.
     const expected = [
-      'wallThickness',
-      'baseThickness',
+      'siliconeThickness',
+      'printShellThickness',
       'sideCount',
-      'sprueDiameter',
-      'ventDiameter',
-      'ventCount',
-      'registrationKeyStyle',
       'draftAngle',
     ];
     expect(inputs.map((el) => el.id)).toEqual(expected);
@@ -156,7 +136,7 @@ describe('parameter panel — reset button', () => {
       '[data-testid="param-reset"]',
     )!;
 
-    store.update({ wallThickness_mm: 12 });
+    store.update({ siliconeThickness_mm: 12 });
     expect(reset.disabled).toBe(false);
 
     store.reset();
@@ -166,8 +146,8 @@ describe('parameter panel — reset button', () => {
   test('clicking reset restores every input value to the default', () => {
     const { container, store } = mount();
     store.update({
-      wallThickness_mm: 15,
-      baseThickness_mm: 10,
+      siliconeThickness_mm: 12,
+      printShellThickness_mm: 20,
       sideCount: 2,
     });
 
@@ -177,11 +157,10 @@ describe('parameter panel — reset button', () => {
     reset.click();
 
     expect(store.get()).toEqual(DEFAULT_PARAMETERS);
-    // The inputs should have been re-rendered from the store.
-    const wall = container.querySelector<HTMLInputElement>(
-      '[data-testid="param-input-wallThickness"]',
+    const silicone = container.querySelector<HTMLInputElement>(
+      '[data-testid="param-input-siliconeThickness"]',
     );
-    expect(wall?.value).toBe('10.0');
+    expect(silicone?.value).toBe('5.0');
   });
 });
 
@@ -189,41 +168,40 @@ describe('parameter panel — validation + clamp-on-blur', () => {
   test('typing out-of-range value surfaces the error message', () => {
     const { container } = mount();
     const input = container.querySelector<HTMLInputElement>(
-      '[data-testid="param-input-wallThickness"]',
+      '[data-testid="param-input-siliconeThickness"]',
     )!;
 
     input.value = '99';
     input.dispatchEvent(new Event('input'));
 
     const err = container.querySelector<HTMLElement>(
-      '[data-testid="param-error-wallThickness"]',
+      '[data-testid="param-error-siliconeThickness"]',
     )!;
     expect(err.hidden).toBe(false);
     expect(err.textContent).toBeTruthy();
-    // Interpolated with the mm range (min=6, max=25).
-    expect(err.textContent).toMatch(/6/);
-    expect(err.textContent).toMatch(/25/);
+    // Interpolated with the mm range (post-#69: min=1, max=15).
+    expect(err.textContent).toMatch(/1/);
+    expect(err.textContent).toMatch(/15/);
 
-    // aria-invalid flag is also set for a11y.
     expect(input.getAttribute('aria-invalid')).toBe('true');
   });
 
   test('blur clamps out-of-range value AND clears the error', () => {
     const { container, store } = mount();
     const input = container.querySelector<HTMLInputElement>(
-      '[data-testid="param-input-wallThickness"]',
+      '[data-testid="param-input-siliconeThickness"]',
     )!;
 
     input.value = '100';
     input.dispatchEvent(new Event('input'));
     input.dispatchEvent(new Event('blur'));
 
-    // Clamped to max (25 mm).
-    expect(input.value).toBe('25.0');
-    expect(store.get().wallThickness_mm).toBe(25);
+    // Clamped to max (15 mm post-#69).
+    expect(input.value).toBe('15.0');
+    expect(store.get().siliconeThickness_mm).toBe(15);
 
     const err = container.querySelector<HTMLElement>(
-      '[data-testid="param-error-wallThickness"]',
+      '[data-testid="param-error-siliconeThickness"]',
     )!;
     expect(err.hidden).toBe(true);
     expect(input.getAttribute('aria-invalid')).toBeNull();
@@ -232,84 +210,68 @@ describe('parameter panel — validation + clamp-on-blur', () => {
   test('blur with an in-range value commits without error', () => {
     const { container, store } = mount();
     const input = container.querySelector<HTMLInputElement>(
-      '[data-testid="param-input-wallThickness"]',
+      '[data-testid="param-input-siliconeThickness"]',
     )!;
 
-    input.value = '12';
+    input.value = '7';
     input.dispatchEvent(new Event('input'));
     input.dispatchEvent(new Event('blur'));
 
-    expect(input.value).toBe('12.0');
-    expect(store.get().wallThickness_mm).toBe(12);
+    expect(input.value).toBe('7.0');
+    expect(store.get().siliconeThickness_mm).toBe(7);
   });
 
   test('blur on empty input clamps to min (sensible fallback)', () => {
     const { container, store } = mount();
     const input = container.querySelector<HTMLInputElement>(
-      '[data-testid="param-input-wallThickness"]',
+      '[data-testid="param-input-siliconeThickness"]',
     )!;
 
     input.value = '';
     input.dispatchEvent(new Event('blur'));
 
-    // NaN → clamped to min.
-    expect(input.value).toBe('6.0');
-    expect(store.get().wallThickness_mm).toBe(6);
-  });
-
-  test('ventCount rounds non-integer input on blur', () => {
-    const { container, store } = mount();
-    const input = container.querySelector<HTMLInputElement>(
-      '[data-testid="param-input-ventCount"]',
-    )!;
-
-    input.value = '3.7';
-    input.dispatchEvent(new Event('blur'));
-
-    // `integer: true` → trunc during parse, then clamp into [0, 8].
-    expect(input.value).toBe('3');
-    expect(store.get().ventCount).toBe(3);
+    // NaN → clamped to min (1 mm post-#69).
+    expect(input.value).toBe('1.0');
+    expect(store.get().siliconeThickness_mm).toBe(1);
   });
 });
 
 describe('parameter panel — units flip', () => {
   test('flipping to inches redisplays length fields without losing precision', () => {
     const { container, store } = mount();
-    const wall = container.querySelector<HTMLInputElement>(
-      '[data-testid="param-input-wallThickness"]',
+    const silicone = container.querySelector<HTMLInputElement>(
+      '[data-testid="param-input-siliconeThickness"]',
     )!;
 
-    // Default wallThickness_mm = 10 mm.
-    expect(wall.value).toBe('10.0');
+    // Default siliconeThickness_mm = 5 mm post-#69.
+    expect(silicone.value).toBe('5.0');
 
-    // Flip to inches.
     setUnitSystem('in');
 
-    // 10 mm / 25.4 mm·in⁻¹ ≈ 0.3937…, rendered with 3 decimals.
-    expect(wall.value).toBe('0.394');
+    // 5 mm / 25.4 mm·in⁻¹ ≈ 0.1969, rendered with 3 decimals.
+    expect(silicone.value).toBe('0.197');
 
     // Internal mm value is unchanged.
-    expect(store.get().wallThickness_mm).toBe(10);
+    expect(store.get().siliconeThickness_mm).toBe(5);
 
-    // Flip back.
     setUnitSystem('mm');
-    expect(wall.value).toBe('10.0');
-    expect(store.get().wallThickness_mm).toBe(10);
+    expect(silicone.value).toBe('5.0');
+    expect(store.get().siliconeThickness_mm).toBe(5);
   });
 
   test('typing an inches value commits the correct mm to the store', () => {
     const { container, store } = mount();
 
     setUnitSystem('in');
-    const wall = container.querySelector<HTMLInputElement>(
-      '[data-testid="param-input-wallThickness"]',
+    const silicone = container.querySelector<HTMLInputElement>(
+      '[data-testid="param-input-siliconeThickness"]',
     )!;
 
-    // User types 0.5 inches → 12.7 mm internal.
-    wall.value = '0.5';
-    wall.dispatchEvent(new Event('blur'));
+    // User types 0.25 inches → 6.35 mm internal.
+    silicone.value = '0.25';
+    silicone.dispatchEvent(new Event('blur'));
 
-    expect(store.get().wallThickness_mm).toBeCloseTo(12.7, 3);
+    expect(store.get().siliconeThickness_mm).toBeCloseTo(6.35, 3);
   });
 
   test('angle field is NOT unit-flipped (always degrees)', () => {
@@ -331,7 +293,6 @@ describe('parameter panel — i18n', () => {
   test('labels and reset button resolve through i18next (no hardcoded English)', () => {
     const { container } = mount();
 
-    // Title, reset, and the label for each field match the en bundle.
     expect(
       container.querySelector('.sidebar__title')?.textContent,
     ).toBe(i18next.t('parameters.title'));
@@ -339,16 +300,12 @@ describe('parameter panel — i18n', () => {
       container.querySelector('[data-testid="param-reset"]')?.textContent,
     ).toBe(i18next.t('parameters.reset'));
 
-    // Per-field label pairs. We assert by matching the <label> to the i18n
-    // key. If an English string is hardcoded somewhere these would diverge.
+    // Per-field label pairs. If an English string is hardcoded somewhere
+    // these diverge.
     const pairs: Array<[string, string]> = [
-      ['wallThickness', i18next.t('parameters.wall')],
-      ['baseThickness', i18next.t('parameters.base')],
+      ['siliconeThickness', i18next.t('parameters.siliconeThickness')],
+      ['printShellThickness', i18next.t('parameters.printShell')],
       ['sideCount', i18next.t('parameters.sideCount')],
-      ['sprueDiameter', i18next.t('parameters.sprue')],
-      ['ventDiameter', i18next.t('parameters.vent')],
-      ['ventCount', i18next.t('parameters.ventCount')],
-      ['registrationKeyStyle', i18next.t('parameters.keyStyle')],
       ['draftAngle', i18next.t('parameters.draft')],
     ];
     for (const [id, expected] of pairs) {
@@ -359,38 +316,20 @@ describe('parameter panel — i18n', () => {
     }
   });
 
-  test('key-style select options render through i18n', () => {
-    const { container } = mount();
-    const select = container.querySelector<HTMLSelectElement>(
-      '[data-testid="param-input-registrationKeyStyle"]',
-    )!;
-    const options = Array.from(select.options).map((o) => o.textContent);
-    expect(options).toEqual([
-      i18next.t('parameters.keyStyleOptions.asymmetric-hemi'),
-      i18next.t('parameters.keyStyleOptions.cone'),
-      i18next.t('parameters.keyStyleOptions.keyhole'),
-    ]);
-  });
-
   test('error message uses i18n key + interpolation (no literal "Out of range")', () => {
-    // If a developer hardcoded "Out of range" somewhere, this test fails
-    // when a future locale edit changes the key's format.
     const { container } = mount();
     const input = container.querySelector<HTMLInputElement>(
-      '[data-testid="param-input-wallThickness"]',
+      '[data-testid="param-input-siliconeThickness"]',
     )!;
     input.value = '99';
     input.dispatchEvent(new Event('input'));
 
     const err = container.querySelector<HTMLElement>(
-      '[data-testid="param-error-wallThickness"]',
+      '[data-testid="param-error-siliconeThickness"]',
     )!;
-    // Whatever the English text is, it must come from the i18n bundle and
-    // have the min/max interpolation applied. The bundle's canonical value
-    // is "Out of range ({{min}}–{{max}})" — after interpolation with the
-    // wallThickness constraints we expect a string ending in ")".
+    // Post-#69 silicone range is 1–15.
     expect(err.textContent).toBe(
-      i18next.t('parameters.invalid', { min: '6.0', max: '25.0' }),
+      i18next.t('parameters.invalid', { min: '1.0', max: '15.0' }),
     );
   });
 });

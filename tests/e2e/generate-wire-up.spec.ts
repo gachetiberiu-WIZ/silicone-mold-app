@@ -301,14 +301,15 @@ test('generate wire-up: click → volumes populate → re-commit → volumes sta
     expect(siliconeText).toMatch(/^[\d,]+\s+mm\u00B3$/);
     expect(resinText).toMatch(/^[\d,]+\s+mm\u00B3$/);
 
-    // Sanity: the mini-figurine's silicone shell (10 mm wall) sits around
-    // 320 000 mm³ (generator unit tests log 319 914) and resin equals the
-    // master volume (~127 452 mm³). Use ±25 % windows — we only need to
-    // catch order-of-magnitude regressions.
+    // Sanity: the mini-figurine's silicone body at the post-#69 default
+    // thickness (5 mm) sits around 155 000 mm³ (generator unit-test log:
+    // ~154 725) and resin equals the master volume (~127 452 mm³).
+    // Use ±30% windows — we only need to catch order-of-magnitude
+    // regressions, not exact values.
     const silicone_mm3 = Number(siliconeText?.replace(/[^\d]/g, '') ?? '0');
     const resin_mm3 = Number(resinText?.replace(/[^\d]/g, '') ?? '0');
-    expect(silicone_mm3).toBeGreaterThan(250_000);
-    expect(silicone_mm3).toBeLessThan(400_000);
+    expect(silicone_mm3).toBeGreaterThan(100_000);
+    expect(silicone_mm3).toBeLessThan(220_000);
     expect(resin_mm3).toBeGreaterThan(100_000);
     expect(resin_mm3).toBeLessThan(160_000);
 

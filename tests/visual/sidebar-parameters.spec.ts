@@ -50,7 +50,7 @@ async function openRenderer(page: Page): Promise<void> {
 }
 
 test.describe('visual — sidebar parameters', () => {
-  test('default state: all 8 fields + reset disabled', async ({ page }) => {
+  test('default state: all 4 fields + reset disabled', async ({ page }) => {
     await openRenderer(page);
     await expect(page).toHaveScreenshot('sidebar-parameters-defaults.png', {
       maxDiffPixelRatio: 0.01,

@@ -115,7 +115,8 @@ test.describe('visual — silicone preview + exploded view', () => {
       { timeout: 60_000 },
     );
 
-    // Wait for silicone to actually be in the scene.
+    // Wait for silicone to actually be in the scene. Post-#69 we
+    // expect exactly ONE silicone mesh (the horizontal split is gone).
     await page.waitForFunction(
       () => {
         type Obj = { userData?: Record<string, unknown> };
@@ -128,9 +129,9 @@ test.describe('visual — silicone preview + exploded view', () => {
         let count = 0;
         hooks.scene.traverse((obj) => {
           const tag = obj.userData?.['tag'];
-          if (tag === 'silicone-upper' || tag === 'silicone-lower') count += 1;
+          if (tag === 'silicone-body') count += 1;
         });
-        return count === 2;
+        return count === 1;
       },
       undefined,
       { timeout: 10_000 },
@@ -179,19 +180,22 @@ test.describe('visual — silicone preview + exploded view', () => {
       { timeout: 2_000 },
     );
 
-    // `timeout: 30_000` overrides the Playwright 5 s default for
+    // `timeout: 60_000` overrides the Playwright 5 s default for
     // `toHaveScreenshot`'s internal stability loop (back-to-back snapshots
     // until two match pixel-exactly). Empirical: even with the tween
     // idle-gate above, SwiftShader's first-frame raster of the translucent
-    // `DoubleSide + depthWrite: false` silicone material takes
-    // several seconds to converge on ubuntu-latest (issue #53 hypothesis
-    // #2). 30 s is well under the 90 s outer `setTimeout` above.
+    // `DoubleSide + depthWrite: false` silicone material takes several
+    // seconds to converge on ubuntu-latest (issue #53 hypothesis #2).
+    // 60 s gives SwiftShader more headroom; still under the 90 s outer
+    // `setTimeout` above. The first-run regen (`--update-snapshots`)
+    // took >30 s on the Wave-A rebaseline pass (issue #69 CI run
+    // 24710372003); 60 s is the post-hoc safe ceiling.
     await expect(page).toHaveScreenshot('silicone-exploded.png', {
       maxDiffPixelRatio: 0.01,
       threshold: 0.15,
       animations: 'disabled',
       fullPage: false,
-      timeout: 30_000,
+      timeout: 60_000,
     });
   });
 });

@@ -5,11 +5,11 @@
 //
 //   * NumberField  — numeric input with optional unit suffix, inline error,
 //                    and clamp-on-blur semantics. Lengths are unit-aware
-//                    (mm / inches); non-length fields (ventCount, draftAngle)
-//                    use a `unitSymbol` string rendered next to the input
+//                    (mm / inches); non-length fields (angle, count) use a
+//                    `unitSymbol` string rendered next to the input
 //                    regardless of the active unit system.
-//   * SelectField  — <select> wrapper for `sideCount` (2/3/4) and
-//                    `registrationKeyStyle` (the three enum values).
+//   * SelectField  — <select> wrapper for `sideCount` (2/3/4) and any
+//                    future enum-valued fields.
 //
 // There is no component framework. The factories return a plain
 // `{ element, setValue, setError, destroy, ... }` handle; the sidebar
@@ -40,7 +40,8 @@ export interface NumberFieldConfig {
   max: number;
   /** Keyboard step. */
   step: number;
-  /** Whether values must be integer. Only true for ventCount in practice. */
+  /** Whether values must be integer. No current Wave-A field uses this, but
+   *  the factory still honours it for future integer-valued parameters. */
   integer: boolean;
   /** Tells the formatter whether to bridge mm ↔ inches. */
   kind: NumberFieldKind;

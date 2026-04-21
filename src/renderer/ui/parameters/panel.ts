@@ -5,6 +5,10 @@
 // defaults" button, and keeps length fields in sync with the topbar's
 // mm/inches toggle via the `units-changed` CustomEvent.
 //
+// Wave-A scope (issue #69) drops the sprue / vent / ventCount /
+// registrationKeyStyle fields from the form. The remaining four rows —
+// wall, base, sideCount, draft — match the new single-silicone pipeline.
+//
 // This panel is mount-once, destroy-on-app-shutdown. It owns no geometry
 // state — downstream consumers (Phase 3c+) will read from the store the
 // panel was constructed with.
@@ -17,10 +21,6 @@
 //       <NumberField wall />
 //       <NumberField base />
 //       <SelectField sideCount />
-//       <NumberField sprue />
-//       <NumberField vent />
-//       <NumberField ventCount />
-//       <SelectField keyStyle />
 //       <NumberField draft />
 //     </form>
 //     <button class="sidebar__reset" />
@@ -29,12 +29,10 @@
 import { getUnitSystem, t, type UnitSystem } from '../../i18n';
 import {
   DEFAULT_PARAMETERS,
-  KEY_STYLE_OPTIONS,
   NUMERIC_CONSTRAINTS,
   SIDE_COUNT_OPTIONS,
   type MoldParameters,
   type ParametersStore,
-  type RegistrationKeyStyle,
 } from '../../state/parameters';
 import {
   createNumberField,
@@ -79,38 +77,34 @@ export function mountParameterPanel(
   container.appendChild(form);
 
   const handles: {
-    wallThickness_mm: NumberFieldHandle;
-    baseThickness_mm: NumberFieldHandle;
+    siliconeThickness_mm: NumberFieldHandle;
+    printShellThickness_mm: NumberFieldHandle;
     sideCount: SelectFieldHandle<string>;
-    sprueDiameter_mm: NumberFieldHandle;
-    ventDiameter_mm: NumberFieldHandle;
-    ventCount: NumberFieldHandle;
-    registrationKeyStyle: SelectFieldHandle<RegistrationKeyStyle>;
     draftAngle_deg: NumberFieldHandle;
   } = {
-    wallThickness_mm: createNumberField({
-      id: 'wallThickness',
-      label: t('parameters.wall'),
+    siliconeThickness_mm: createNumberField({
+      id: 'siliconeThickness',
+      label: t('parameters.siliconeThickness'),
       kind: 'length',
       unitSymbol: null,
-      min: NUMERIC_CONSTRAINTS.wallThickness_mm.min,
-      max: NUMERIC_CONSTRAINTS.wallThickness_mm.max,
-      step: NUMERIC_CONSTRAINTS.wallThickness_mm.step,
-      integer: NUMERIC_CONSTRAINTS.wallThickness_mm.integer,
-      initial: DEFAULT_PARAMETERS.wallThickness_mm,
-      onCommit: (value) => store.update({ wallThickness_mm: value }),
+      min: NUMERIC_CONSTRAINTS.siliconeThickness_mm.min,
+      max: NUMERIC_CONSTRAINTS.siliconeThickness_mm.max,
+      step: NUMERIC_CONSTRAINTS.siliconeThickness_mm.step,
+      integer: NUMERIC_CONSTRAINTS.siliconeThickness_mm.integer,
+      initial: DEFAULT_PARAMETERS.siliconeThickness_mm,
+      onCommit: (value) => store.update({ siliconeThickness_mm: value }),
     }),
-    baseThickness_mm: createNumberField({
-      id: 'baseThickness',
-      label: t('parameters.base'),
+    printShellThickness_mm: createNumberField({
+      id: 'printShellThickness',
+      label: t('parameters.printShell'),
       kind: 'length',
       unitSymbol: null,
-      min: NUMERIC_CONSTRAINTS.baseThickness_mm.min,
-      max: NUMERIC_CONSTRAINTS.baseThickness_mm.max,
-      step: NUMERIC_CONSTRAINTS.baseThickness_mm.step,
-      integer: NUMERIC_CONSTRAINTS.baseThickness_mm.integer,
-      initial: DEFAULT_PARAMETERS.baseThickness_mm,
-      onCommit: (value) => store.update({ baseThickness_mm: value }),
+      min: NUMERIC_CONSTRAINTS.printShellThickness_mm.min,
+      max: NUMERIC_CONSTRAINTS.printShellThickness_mm.max,
+      step: NUMERIC_CONSTRAINTS.printShellThickness_mm.step,
+      integer: NUMERIC_CONSTRAINTS.printShellThickness_mm.integer,
+      initial: DEFAULT_PARAMETERS.printShellThickness_mm,
+      onCommit: (value) => store.update({ printShellThickness_mm: value }),
     }),
     sideCount: createSelectField<string>({
       id: 'sideCount',
@@ -127,52 +121,6 @@ export function mountParameterPanel(
         }
       },
     }),
-    sprueDiameter_mm: createNumberField({
-      id: 'sprueDiameter',
-      label: t('parameters.sprue'),
-      kind: 'length',
-      unitSymbol: null,
-      min: NUMERIC_CONSTRAINTS.sprueDiameter_mm.min,
-      max: NUMERIC_CONSTRAINTS.sprueDiameter_mm.max,
-      step: NUMERIC_CONSTRAINTS.sprueDiameter_mm.step,
-      integer: NUMERIC_CONSTRAINTS.sprueDiameter_mm.integer,
-      initial: DEFAULT_PARAMETERS.sprueDiameter_mm,
-      onCommit: (value) => store.update({ sprueDiameter_mm: value }),
-    }),
-    ventDiameter_mm: createNumberField({
-      id: 'ventDiameter',
-      label: t('parameters.vent'),
-      kind: 'length',
-      unitSymbol: null,
-      min: NUMERIC_CONSTRAINTS.ventDiameter_mm.min,
-      max: NUMERIC_CONSTRAINTS.ventDiameter_mm.max,
-      step: NUMERIC_CONSTRAINTS.ventDiameter_mm.step,
-      integer: NUMERIC_CONSTRAINTS.ventDiameter_mm.integer,
-      initial: DEFAULT_PARAMETERS.ventDiameter_mm,
-      onCommit: (value) => store.update({ ventDiameter_mm: value }),
-    }),
-    ventCount: createNumberField({
-      id: 'ventCount',
-      label: t('parameters.ventCount'),
-      kind: 'count',
-      unitSymbol: '',
-      min: NUMERIC_CONSTRAINTS.ventCount.min,
-      max: NUMERIC_CONSTRAINTS.ventCount.max,
-      step: NUMERIC_CONSTRAINTS.ventCount.step,
-      integer: NUMERIC_CONSTRAINTS.ventCount.integer,
-      initial: DEFAULT_PARAMETERS.ventCount,
-      onCommit: (value) => store.update({ ventCount: value }),
-    }),
-    registrationKeyStyle: createSelectField<RegistrationKeyStyle>({
-      id: 'registrationKeyStyle',
-      label: t('parameters.keyStyle'),
-      options: KEY_STYLE_OPTIONS.map((v) => ({
-        value: v,
-        label: t(`parameters.keyStyleOptions.${v}`),
-      })),
-      initial: DEFAULT_PARAMETERS.registrationKeyStyle,
-      onChange: (value) => store.update({ registrationKeyStyle: value }),
-    }),
     draftAngle_deg: createNumberField({
       id: 'draftAngle',
       label: t('parameters.draft'),
@@ -188,13 +136,9 @@ export function mountParameterPanel(
   };
 
   // Append in spec-order. This is also tab order since the DOM is authoritative.
-  form.appendChild(handles.wallThickness_mm.element);
-  form.appendChild(handles.baseThickness_mm.element);
+  form.appendChild(handles.siliconeThickness_mm.element);
+  form.appendChild(handles.printShellThickness_mm.element);
   form.appendChild(handles.sideCount.element);
-  form.appendChild(handles.sprueDiameter_mm.element);
-  form.appendChild(handles.ventDiameter_mm.element);
-  form.appendChild(handles.ventCount.element);
-  form.appendChild(handles.registrationKeyStyle.element);
   form.appendChild(handles.draftAngle_deg.element);
 
   // ---- Reset-to-defaults button ---------------------------------------------
@@ -213,16 +157,11 @@ export function mountParameterPanel(
 
   // ---- Wire: store → fields ------------------------------------------------
   // When the store changes, push the new values into every field so the
-  // UI reflects external updates (e.g. programmatic reset). This is cheap
-  // — eight DOM assignments per update is fine at the scale we're at.
+  // UI reflects external updates (e.g. programmatic reset).
   const unsubscribeStore = store.subscribe((p) => {
-    handles.wallThickness_mm.setValue(p.wallThickness_mm);
-    handles.baseThickness_mm.setValue(p.baseThickness_mm);
+    handles.siliconeThickness_mm.setValue(p.siliconeThickness_mm);
+    handles.printShellThickness_mm.setValue(p.printShellThickness_mm);
     handles.sideCount.setValue(String(p.sideCount));
-    handles.sprueDiameter_mm.setValue(p.sprueDiameter_mm);
-    handles.ventDiameter_mm.setValue(p.ventDiameter_mm);
-    handles.ventCount.setValue(p.ventCount);
-    handles.registrationKeyStyle.setValue(p.registrationKeyStyle);
     handles.draftAngle_deg.setValue(p.draftAngle_deg);
     resetBtn.disabled = store.isAtDefaults();
   });
@@ -242,23 +181,17 @@ export function mountParameterPanel(
   document.addEventListener('units-changed', onUnitsChanged);
 
   function applyUnitToLengths(unit: UnitSystem): void {
-    handles.wallThickness_mm.setUnitSystem(unit);
-    handles.baseThickness_mm.setUnitSystem(unit);
-    handles.sprueDiameter_mm.setUnitSystem(unit);
-    handles.ventDiameter_mm.setUnitSystem(unit);
+    handles.siliconeThickness_mm.setUnitSystem(unit);
+    handles.printShellThickness_mm.setUnitSystem(unit);
   }
 
   return {
     destroy(): void {
       document.removeEventListener('units-changed', onUnitsChanged);
       unsubscribeStore();
-      handles.wallThickness_mm.destroy();
-      handles.baseThickness_mm.destroy();
+      handles.siliconeThickness_mm.destroy();
+      handles.printShellThickness_mm.destroy();
       handles.sideCount.destroy();
-      handles.sprueDiameter_mm.destroy();
-      handles.ventDiameter_mm.destroy();
-      handles.ventCount.destroy();
-      handles.registrationKeyStyle.destroy();
       handles.draftAngle_deg.destroy();
       resetBtn.remove();
       title.remove();
