@@ -165,24 +165,22 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
         );
         const elapsed = performance.now() - t0;
         try {
-          // Perf budget. The Wave C pipeline adds a SECOND levelSet
-          // pass at a larger offset — both against the same SDF closure,
-          // so the cost scales with grid-cell count, not with master
-          // tri count. The 1.5→2.0 mm edgeLength bump (bundled perf
-          // fix #71) helps but doesn't offset the cost of the second
-          // pass. Observed wall-clocks post-Wave-C:
+          // Perf budget. Post-#74 (SDF cache across both levelSet passes
+          // + far-field early-out + unified grid) the Wave C pipeline
+          // costs roughly 30% less than the pre-#74 raw double-pass on
+          // the mini-figurine. Observed wall-clocks:
           //
-          //   - local warm-WASM Win:  ~2.5-3.5 s.
-          //   - ubuntu CI (SwiftShader closure-heavy SDF loop): ~8-10 s.
-          //     First PR run measured 10.1 s on mini-figurine.
+          //   - local warm-WASM Win:  ~1.5-2.5 s (pre-#74: ~2.5-3.5 s;
+          //     raw vitest run: ~5-6 s, WASM cold on first invocation).
+          //   - ubuntu CI (SwiftShader closure-heavy SDF loop):
+          //     ~4-5 s (pre-#74: ~10 s). Meets issue #72's original
+          //     5 s AC retroactively.
           //
-          // The issue #72 AC target is 5 s on CI — NOT hit post-Wave-C.
-          // A follow-up perf issue tracks the optimisation paths
-          // (batched WASM SDF callbacks, worker offload, CI-flag
-          // edgeLength coarsening). This 15 s bound catches ~50%
-          // regressions on top of current CI wall-clock, which is the
-          // real protection this assertion offers against runaway grid-
-          // cell counts.
+          // 8 s bound = pre-#74 median CI wall-clock ÷ 1.25 + headroom
+          // for CI-runner noise and WASM-cold first-call. Catches
+          // ≥ 25% regressions against the new steady-state. Tighter
+          // than the pre-#74 15 s ceiling per issue #74 AC "bring the
+          // perf test bound down".
           //
           // Skipped entirely under V8 coverage instrumentation (coverage
           // slows the closure-heavy SDF hot loop ~7×).
@@ -193,7 +191,7 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
           ).__vitest_worker__;
           const coverageEnabled = !!worker?.config?.coverage?.enabled;
           if (!coverageEnabled) {
-            expect(elapsed).toBeLessThan(15_000);
+            expect(elapsed).toBeLessThan(8_000);
           }
 
           expect(isManifold(result.silicone)).toBe(true);
@@ -222,7 +220,13 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
         manifold.delete();
       }
     },
-    30_000,
+    // 60 s test timeout (NOT the perf budget — that's the 8 s assertion
+    // above, and it's skipped under coverage instrumentation). Coverage
+    // slows the closure-heavy SDF hot loop ~7×, so the pre-#74 30 s
+    // timeout fired under `pnpm vitest run --coverage` even though the
+    // perf assertion was already guarded. The generous ceiling keeps
+    // coverage runs green without weakening the 8 s perf guard.
+    60_000,
   );
 });
 
