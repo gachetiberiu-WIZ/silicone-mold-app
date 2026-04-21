@@ -226,6 +226,13 @@ function mountParameters(): void {
     );
     return;
   }
+  const leftContainer = document.getElementById('sidebar-left');
+  if (!leftContainer) {
+    console.error(
+      'Missing #sidebar-left container — renderer HTML is out of date.',
+    );
+    return;
+  }
   parametersStore = createParametersStore();
   dimensionsStore = createDimensionsStore();
   // Panel mounts first because `mountParameterPanel` does `container.textContent = ''`
@@ -233,25 +240,16 @@ function mountParameters(): void {
   // the panel would have it clobbered.
   parameterPanel = mountParameterPanel(container, parametersStore);
 
-  // Mount the Dimensions panel (issue #79) INTO the sidebar after the
-  // parameter panel has finished its textContent reset, then `prepend` it
-  // above every other sidebar child so the layout reads:
-  //   [Dimensions] → [MOLD PARAMETERS] → [Reset to defaults]
-  // The Generate-mold block is prepended later and lands ABOVE Dimensions
-  // (same pattern the existing parameter-form flow uses).
+  // Mount the Dimensions panel (issue #79) into the DEDICATED LEFT sidebar
+  // (issue #80 dogfood feedback — users wanted size controls visually
+  // separated from the generate flow). The left pane owns ONLY this panel
+  // for now; the right pane keeps Generate + MOLD PARAMETERS + Reset.
   if (viewport) {
     const vp = viewport;
     const dStore = dimensionsStore;
-    dimensionsPanel = mountDimensionsPanel(container, dStore, {
+    dimensionsPanel = mountDimensionsPanel(leftContainer, dStore, {
       getNativeBbox: () => vp.getNativeBbox(),
     });
-    // Move dimensions section above parameter form.
-    const dimSection = container.querySelector<HTMLElement>(
-      '[data-testid="dimensions-panel"]',
-    );
-    if (dimSection) {
-      container.prepend(dimSection);
-    }
 
     // Subscribe to the dimensions store → push every change through to
     // the Master group's scale. The viewport re-runs `recenterGroup` and

@@ -155,11 +155,17 @@
         color: #0b0d10;
         border-color: var(--accent);
       }
-      /* ---- Body layout: viewport + sidebar grid -------------------------- */
+      /* ---- Body layout: left pane + viewport + right sidebar grid -------- */
+      /*
+       * Three-column desktop layout (issue #80 dogfood):
+       *   [LEFT PANE (Dimensions)] [CENTER VIEWPORT] [RIGHT PANE (Generate + Mold)]
+       * Both panes share the same `--sidebar-w` width for visual symmetry.
+       * Desktop-only — this is Electron; no responsive collapse yet.
+       */
       #body {
         flex: 1 1 auto;
         display: grid;
-        grid-template-columns: 1fr var(--sidebar-w);
+        grid-template-columns: var(--sidebar-w) 1fr var(--sidebar-w);
         min-height: 0;
       }
       #viewport {
@@ -185,6 +191,24 @@
       /* ---- Right sidebar: mold parameters ------------------------------- */
       #sidebar {
         border-left: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--fg);
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 16px;
+        overflow-y: auto;
+      }
+      /* ---- Left sidebar: dimensions (issue #80 dogfood) ----------------- */
+      /*
+       * Mirrors #sidebar (right pane) exactly for width + padding + spacing
+       * so the two panes read as a symmetric frame around the viewport. Only
+       * the border side flips (right pane uses `border-left`; left pane uses
+       * `border-right`) so the 1 px accent separators both point toward the
+       * viewport.
+       */
+      #sidebar-left {
+        border-right: 1px solid var(--border);
         background: var(--bg);
         color: var(--fg);
         display: flex;
@@ -443,6 +467,9 @@
         <!-- Populated by src/renderer/ui/topbar.ts on DOMContentLoaded -->
       </header>
       <div id="body">
+        <aside id="sidebar-left" data-testid="sidebar-left">
+          <!-- Populated by src/renderer/ui/dimensions/panel.ts on DOMContentLoaded -->
+        </aside>
         <div id="viewport" data-testid="viewport"></div>
         <aside id="sidebar" data-testid="sidebar">
           <!-- Populated by src/renderer/ui/parameters/panel.ts on DOMContentLoaded -->
