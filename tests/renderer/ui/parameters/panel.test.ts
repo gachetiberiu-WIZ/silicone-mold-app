@@ -49,10 +49,12 @@ describe('parameter panel — rendering', () => {
     expect(title).toBeTruthy();
     expect(title?.textContent).toBe(i18next.t('parameters.title'));
 
-    // Post-#69: exactly four rows.
+    // Post-#82: six rows — Wave D adds baseSlabThickness + baseSlabOverhang.
     const fieldIds = [
       'siliconeThickness',
       'printShellThickness',
+      'baseSlabThickness',
+      'baseSlabOverhang',
       'sideCount',
       'draftAngle',
     ];
@@ -97,6 +99,10 @@ describe('parameter panel — rendering', () => {
     expect(val('siliconeThickness')).toBe('5.0');
     expect(val('printShellThickness')).toBe('8.0');
 
+    // Post-#82 Wave-D defaults.
+    expect(val('baseSlabThickness')).toBe('8.0');
+    expect(val('baseSlabOverhang')).toBe('5.0');
+
     // Angle (1 decimal).
     expect(val('draftAngle')).toBe('0.0');
 
@@ -114,6 +120,8 @@ describe('parameter panel — rendering', () => {
     const expected = [
       'siliconeThickness',
       'printShellThickness',
+      'baseSlabThickness',
+      'baseSlabOverhang',
       'sideCount',
       'draftAngle',
     ];
@@ -305,6 +313,8 @@ describe('parameter panel — i18n', () => {
     const pairs: Array<[string, string]> = [
       ['siliconeThickness', i18next.t('parameters.siliconeThickness')],
       ['printShellThickness', i18next.t('parameters.printShell')],
+      ['baseSlabThickness', i18next.t('parameters.baseSlabThickness')],
+      ['baseSlabOverhang', i18next.t('parameters.baseSlabOverhang')],
       ['sideCount', i18next.t('parameters.sideCount')],
       ['draftAngle', i18next.t('parameters.draft')],
     ];

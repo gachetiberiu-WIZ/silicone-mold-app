@@ -148,6 +148,7 @@ async function commitSideFace(page: Page): Promise<void> {
  */
 async function countPrintableMeshes(page: Page): Promise<{
   printShell: number;
+  baseSlab: number;
 }> {
   return page.evaluate(() => {
     type SceneHook = {
@@ -161,11 +162,13 @@ async function countPrintableMeshes(page: Page): Promise<{
       .__testHooks;
     if (!hooks?.scene) throw new Error('scene hook missing');
     let printShell = 0;
+    let baseSlab = 0;
     hooks.scene.traverse((obj) => {
       const tag = obj.userData?.['tag'];
       if (tag === 'print-shell') printShell += 1;
+      if (tag === 'base-slab-mesh') baseSlab += 1;
     });
-    return { printShell };
+    return { printShell, baseSlab };
   });
 }
 
@@ -280,10 +283,11 @@ test('print-shell preview: default-ON reveals shell → exploded lifts shell abo
     await expect(explodedToggle).toBeEnabled();
     await expect(explodedToggle).toHaveAttribute('aria-pressed', 'false');
 
-    // Print shell is installed AND visible (default ON per #67). Wave C:
-    // one surface-conforming mesh, not 6 rectangular pieces.
+    // Print shell + base slab installed AND visible (default ON per #67).
+    // Wave D (issue #82): two meshes in the printable-parts group.
     const counts = await countPrintableMeshes(page);
     expect(counts.printShell).toBe(1);
+    expect(counts.baseSlab).toBe(1);
 
     // Scene-level visibility flag is true without any user click.
     const visibleAfterGenerate = await page.evaluate(() => {
@@ -401,6 +405,7 @@ test('print-shell preview: default-ON reveals shell → exploded lifts shell abo
     await expect(printableToggle).toHaveAttribute('aria-pressed', 'false');
     const countsAfterStale = await countPrintableMeshes(page);
     expect(countsAfterStale.printShell).toBe(0);
+    expect(countsAfterStale.baseSlab).toBe(0);
   } finally {
     await app.close();
   }

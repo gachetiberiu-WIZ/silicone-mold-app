@@ -3,9 +3,9 @@
 // Plain-DOM topbar component. Renders (left → right):
 //
 //   [ App name + version ]  [ Open STL ]
-//   [ Master: ...  Silicone: ...  Print shell: ...  Resin: ...  [mm|in] ]
+//   [ Master: ...  Silicone: ...  Print shell: ...  Base slab: ...  Resin: ...  [mm|in] ]
 //
-// The volume section surfaces four readouts:
+// The volume section surfaces five readouts:
 //
 //   - "Master" — the loaded STL's watertight volume. Resets only on a new
 //     STL load (orientation-agnostic; invariant under rigid transform).
@@ -14,6 +14,9 @@
 //     (lay-flat commit, reset orientation) or new STL load.
 //   - "Print shell" — volume of the rigid surface-conforming print shell
 //     produced by Wave C (issue #72). Staleness rules match "Silicone".
+//   - "Base slab" — volume of the printable base slab (with step-pocket
+//     interlock plug) produced by Wave D (issue #82). Staleness rules
+//     match "Silicone".
 //   - "Resin" — resin pour volume, equal to the master's volume (Wave A
 //     stripped the sprue + vent channel contributions).
 //
@@ -53,6 +56,12 @@ export interface TopbarApi {
    * `setSiliconeVolume`.
    */
   setPrintShellVolume(mm3: number | null): void;
+  /**
+   * Set the computed base-slab volume in mm³ (Wave D, issue #82). Pass
+   * `null` for the placeholder. Same staleness semantics as
+   * `setSiliconeVolume`.
+   */
+  setBaseSlabVolume(mm3: number | null): void;
   /**
    * Set the resin pour volume in mm³. Pass `null` for the placeholder.
    * Same staleness semantics as `setSiliconeVolume`.
@@ -179,6 +188,11 @@ export function mountTopbar(
     'print-shell-volume-readout',
     'print-shell-volume-value',
   );
+  const baseSlab = createVolumeReadout(
+    'topbar.volumeBaseSlab',
+    'base-slab-volume-readout',
+    'base-slab-volume-value',
+  );
   const resin = createVolumeReadout(
     'topbar.volumeResin',
     'resin-volume-readout',
@@ -188,6 +202,7 @@ export function mountTopbar(
   right.appendChild(master.wrap);
   right.appendChild(silicone.wrap);
   right.appendChild(printShell.wrap);
+  right.appendChild(baseSlab.wrap);
   right.appendChild(resin.wrap);
 
   const togglePanel = document.createElement('div');
@@ -202,6 +217,7 @@ export function mountTopbar(
   let currentMaster: number | null = null;
   let currentSilicone: number | null = null;
   let currentPrintShell: number | null = null;
+  let currentBaseSlab: number | null = null;
   let currentResin: number | null = null;
   let currentUnits: UnitSystem = getUnitSystem();
   // Issue #64 — "stale" flag for silicone / print-shell / resin. When
@@ -215,10 +231,12 @@ export function mountTopbar(
     if (volumesStale) {
       silicone.wrap.classList.add(STALE_CLASS);
       printShell.wrap.classList.add(STALE_CLASS);
+      baseSlab.wrap.classList.add(STALE_CLASS);
       resin.wrap.classList.add(STALE_CLASS);
     } else {
       silicone.wrap.classList.remove(STALE_CLASS);
       printShell.wrap.classList.remove(STALE_CLASS);
+      baseSlab.wrap.classList.remove(STALE_CLASS);
       resin.wrap.classList.remove(STALE_CLASS);
     }
   }
@@ -238,6 +256,11 @@ export function mountTopbar(
     );
     printShell.valueEl.textContent = formatVolume(
       currentPrintShell,
+      currentUnits,
+      'volume.notGenerated',
+    );
+    baseSlab.valueEl.textContent = formatVolume(
+      currentBaseSlab,
       currentUnits,
       'volume.notGenerated',
     );
@@ -280,6 +303,14 @@ export function mountTopbar(
       currentPrintShell = mm3;
       printShell.valueEl.textContent = formatVolume(
         currentPrintShell,
+        currentUnits,
+        'volume.notGenerated',
+      );
+    },
+    setBaseSlabVolume(mm3: number | null): void {
+      currentBaseSlab = mm3;
+      baseSlab.valueEl.textContent = formatVolume(
+        currentBaseSlab,
         currentUnits,
         'volume.notGenerated',
       );

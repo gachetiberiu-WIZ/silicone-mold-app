@@ -15,12 +15,15 @@
     "volumeMaster": "Master",
     "volumeSilicone": "Silicone",
     "volumePrintShell": "Print shell",
+    "volumeBaseSlab": "Base slab",
     "volumeResin": "Resin"
   },
   "parameters": {
     "title": "Mold parameters",
     "siliconeThickness": "Silicone thickness",
     "printShell": "Print shell thickness",
+    "baseSlabThickness": "Base slab thickness",
+    "baseSlabOverhang": "Base slab overhang",
     "sideCount": "Side count",
     "draft": "Draft angle",
     "reset": "Reset to defaults",

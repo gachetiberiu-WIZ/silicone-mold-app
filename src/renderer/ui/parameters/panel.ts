@@ -79,6 +79,8 @@ export function mountParameterPanel(
   const handles: {
     siliconeThickness_mm: NumberFieldHandle;
     printShellThickness_mm: NumberFieldHandle;
+    baseSlabThickness_mm: NumberFieldHandle;
+    baseSlabOverhang_mm: NumberFieldHandle;
     sideCount: SelectFieldHandle<string>;
     draftAngle_deg: NumberFieldHandle;
   } = {
@@ -105,6 +107,30 @@ export function mountParameterPanel(
       integer: NUMERIC_CONSTRAINTS.printShellThickness_mm.integer,
       initial: DEFAULT_PARAMETERS.printShellThickness_mm,
       onCommit: (value) => store.update({ printShellThickness_mm: value }),
+    }),
+    baseSlabThickness_mm: createNumberField({
+      id: 'baseSlabThickness',
+      label: t('parameters.baseSlabThickness'),
+      kind: 'length',
+      unitSymbol: null,
+      min: NUMERIC_CONSTRAINTS.baseSlabThickness_mm.min,
+      max: NUMERIC_CONSTRAINTS.baseSlabThickness_mm.max,
+      step: NUMERIC_CONSTRAINTS.baseSlabThickness_mm.step,
+      integer: NUMERIC_CONSTRAINTS.baseSlabThickness_mm.integer,
+      initial: DEFAULT_PARAMETERS.baseSlabThickness_mm,
+      onCommit: (value) => store.update({ baseSlabThickness_mm: value }),
+    }),
+    baseSlabOverhang_mm: createNumberField({
+      id: 'baseSlabOverhang',
+      label: t('parameters.baseSlabOverhang'),
+      kind: 'length',
+      unitSymbol: null,
+      min: NUMERIC_CONSTRAINTS.baseSlabOverhang_mm.min,
+      max: NUMERIC_CONSTRAINTS.baseSlabOverhang_mm.max,
+      step: NUMERIC_CONSTRAINTS.baseSlabOverhang_mm.step,
+      integer: NUMERIC_CONSTRAINTS.baseSlabOverhang_mm.integer,
+      initial: DEFAULT_PARAMETERS.baseSlabOverhang_mm,
+      onCommit: (value) => store.update({ baseSlabOverhang_mm: value }),
     }),
     sideCount: createSelectField<string>({
       id: 'sideCount',
@@ -138,6 +164,8 @@ export function mountParameterPanel(
   // Append in spec-order. This is also tab order since the DOM is authoritative.
   form.appendChild(handles.siliconeThickness_mm.element);
   form.appendChild(handles.printShellThickness_mm.element);
+  form.appendChild(handles.baseSlabThickness_mm.element);
+  form.appendChild(handles.baseSlabOverhang_mm.element);
   form.appendChild(handles.sideCount.element);
   form.appendChild(handles.draftAngle_deg.element);
 
@@ -161,6 +189,8 @@ export function mountParameterPanel(
   const unsubscribeStore = store.subscribe((p) => {
     handles.siliconeThickness_mm.setValue(p.siliconeThickness_mm);
     handles.printShellThickness_mm.setValue(p.printShellThickness_mm);
+    handles.baseSlabThickness_mm.setValue(p.baseSlabThickness_mm);
+    handles.baseSlabOverhang_mm.setValue(p.baseSlabOverhang_mm);
     handles.sideCount.setValue(String(p.sideCount));
     handles.draftAngle_deg.setValue(p.draftAngle_deg);
     resetBtn.disabled = store.isAtDefaults();
@@ -183,6 +213,8 @@ export function mountParameterPanel(
   function applyUnitToLengths(unit: UnitSystem): void {
     handles.siliconeThickness_mm.setUnitSystem(unit);
     handles.printShellThickness_mm.setUnitSystem(unit);
+    handles.baseSlabThickness_mm.setUnitSystem(unit);
+    handles.baseSlabOverhang_mm.setUnitSystem(unit);
   }
 
   return {
@@ -191,6 +223,8 @@ export function mountParameterPanel(
       unsubscribeStore();
       handles.siliconeThickness_mm.destroy();
       handles.printShellThickness_mm.destroy();
+      handles.baseSlabThickness_mm.destroy();
+      handles.baseSlabOverhang_mm.destroy();
       handles.sideCount.destroy();
       handles.draftAngle_deg.destroy();
       resetBtn.remove();

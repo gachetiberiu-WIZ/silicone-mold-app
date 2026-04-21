@@ -23,10 +23,12 @@ import {
 } from '@/renderer/state/parameters';
 
 describe('DEFAULT_PARAMETERS', () => {
-  test('matches the post-#69 Wave-B defaults', () => {
+  test('matches the post-#82 Wave-D defaults', () => {
     expect(DEFAULT_PARAMETERS).toEqual({
       siliconeThickness_mm: 5,
       printShellThickness_mm: 8,
+      baseSlabThickness_mm: 8,
+      baseSlabOverhang_mm: 5,
       sideCount: 4,
       draftAngle_deg: 0,
     });
