@@ -14,6 +14,7 @@
     "appName": "Silicone Mold App",
     "volumeMaster": "Master",
     "volumeSilicone": "Silicone",
+    "volumePrintShell": "Print shell",
     "volumeResin": "Resin"
   },
   "parameters": {
@@ -37,7 +38,7 @@
   },
   "printableParts": {
     "toggle": "Show printable parts",
-    "toggleHint": "Show the printable 3D-print parts (base, sides, top cap) around the silicone"
+    "toggleHint": "Show the surface-conforming print shell around the silicone"
   },
   "generate": {
     "button": "Generate mold",

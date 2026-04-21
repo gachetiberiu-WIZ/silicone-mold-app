@@ -24,5 +24,5 @@ export {
   InvalidParametersError,
   type MoldGenerationResult,
 } from './generateMold';
-export { buildPrintableBox, SIDE_CUT_ANGLES, type PrintableBoxParts } from './printableBox';
+export { SIDE_CUT_ANGLES } from './sideAngles';
 export { CIRCULAR_SEGMENTS, verticalCylinder } from './primitives';

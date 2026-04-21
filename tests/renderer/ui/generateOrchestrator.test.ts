@@ -3,18 +3,19 @@
 // @vitest-environment happy-dom
 //
 // Race-condition + ownership unit tests for the Generate-mold orchestrator.
-// Wave-A (issue #69) updates the mock shape to the single-silicone result:
-// `silicone: Manifold` replaces the pre-#69 pair `{ siliconeUpperHalf,
-// siliconeLowerHalf }`, and the `warnings` field is gone.
+// Wave C (issue #72) updates the mock shape to the surface-conforming
+// result: `{silicone, printShell}` replaces the Wave-A `{silicone,
+// basePart, sideParts[], topCapPart}` shape, and `printShellVolume_mm3`
+// replaces `printableVolume_mm3`.
 //
 // Coverage:
 //
-//   - Happy path: volumes pushed, silicone + printable parts disposed (or
+//   - Happy path: volumes pushed, silicone + print-shell disposed (or
 //     handed off to the scene sink), busy cleared, success hook fired.
 //   - Staleness: mid-flight `LAY_FLAT_COMMITTED_EVENT` bumps the epoch;
 //     the stale resolve drops every Manifold and skips the topbar push.
-//   - Scene sink: silicone + printable hand-off transfers ownership; sink
-//     rejection surfaces via button.setError without a double-dispose.
+//   - Scene sink: silicone + print-shell hand-off transfers ownership;
+//     sink rejection surfaces via button.setError without a double-dispose.
 //   - Pre-flight: missing master / missing view transform surface errors
 //     without raising busy.
 
@@ -51,6 +52,7 @@ function makeMocks() {
   const topbar = {
     setSiliconeVolume: vi.fn<(v: number | null) => void>(),
     setResinVolume: vi.fn<(v: number | null) => void>(),
+    setPrintShellVolume: vi.fn<(v: number | null) => void>(),
   };
   const button = {
     setBusy: vi.fn<(v: boolean) => void>(),
@@ -66,7 +68,7 @@ function makeMocks() {
  */
 const STALE_SILICONE_MM3 = 319_914;
 const STALE_RESIN_MM3 = 127_452;
-const STALE_PRINTABLE_MM3 = 455_000;
+const STALE_PRINT_SHELL_MM3 = 455_000;
 
 /** A fake Manifold whose only exercised method is `.delete()`. */
 function fakeManifold(): Manifold {
@@ -74,7 +76,7 @@ function fakeManifold(): Manifold {
 }
 
 /**
- * Build a minimal-but-complete Wave-A `MoldGenerationResult` populated
+ * Build a minimal-but-complete Wave-C `MoldGenerationResult` populated
  * with spy-`.delete()` Manifolds. Every path of the orchestrator calls
  * `.delete()` on each one (happy, stale, error) or hands them off to the
  * scene sink, so the mock must supply a `.delete` spy on EVERY Manifold.
@@ -82,12 +84,10 @@ function fakeManifold(): Manifold {
 function makeResult(): MoldGenerationResult {
   return {
     silicone: fakeManifold(),
+    printShell: fakeManifold(),
     siliconeVolume_mm3: STALE_SILICONE_MM3,
     resinVolume_mm3: STALE_RESIN_MM3,
-    basePart: fakeManifold(),
-    sideParts: [fakeManifold(), fakeManifold(), fakeManifold(), fakeManifold()],
-    topCapPart: fakeManifold(),
-    printableVolume_mm3: STALE_PRINTABLE_MM3,
+    printShellVolume_mm3: STALE_PRINT_SHELL_MM3,
   };
 }
 
@@ -97,7 +97,7 @@ beforeEach(() => {
 });
 
 describe('generateOrchestrator — happy path', () => {
-  test('pushes volumes to the topbar and disposes silicone on success', async () => {
+  test('pushes volumes to the topbar and disposes both Manifolds on success', async () => {
     const { topbar, button } = makeMocks();
     const master = {} as Manifold;
     const d = deferred<MoldGenerationResult>();
@@ -117,6 +117,7 @@ describe('generateOrchestrator — happy path', () => {
     expect(button.setError).toHaveBeenCalledWith(null);
     expect(topbar.setSiliconeVolume).toHaveBeenNthCalledWith(1, null);
     expect(topbar.setResinVolume).toHaveBeenNthCalledWith(1, null);
+    expect(topbar.setPrintShellVolume).toHaveBeenNthCalledWith(1, null);
 
     const result = makeResult();
     d.resolve(result);
@@ -124,8 +125,10 @@ describe('generateOrchestrator — happy path', () => {
 
     expect(topbar.setSiliconeVolume).toHaveBeenCalledWith(STALE_SILICONE_MM3);
     expect(topbar.setResinVolume).toHaveBeenCalledWith(STALE_RESIN_MM3);
-    // Single silicone → single .delete() on the volume-only path.
+    expect(topbar.setPrintShellVolume).toHaveBeenCalledWith(STALE_PRINT_SHELL_MM3);
+    // Volume-only path (no scene sink): both Manifolds are .delete()'d.
     expect(result.silicone.delete).toHaveBeenCalledTimes(1);
+    expect(result.printShell.delete).toHaveBeenCalledTimes(1);
     expect(button.setBusy).toHaveBeenLastCalledWith(false);
   });
 });
@@ -162,13 +165,7 @@ describe('generateOrchestrator — onGenerateSuccess hook', () => {
       .fn<(payload: { silicone: Manifold }) => Promise<unknown>>()
       .mockResolvedValue({ bbox: null });
     const sceneSetPrintableParts = vi
-      .fn<
-        (parts: {
-          base: Manifold;
-          sides: readonly Manifold[];
-          topCap: Manifold;
-        }) => Promise<unknown>
-      >()
+      .fn<(parts: { printShell: Manifold }) => Promise<unknown>>()
       .mockResolvedValue({ bbox: null });
     const onGenerateSuccess = vi.fn<() => void>();
 
@@ -270,7 +267,7 @@ describe('generateOrchestrator — onGenerateSuccess hook', () => {
     expect(button.setError).toHaveBeenLastCalledWith('silicone adapter boom');
   });
 
-  test('does NOT fire onGenerateSuccess when printable-parts sink rejects', async () => {
+  test('does NOT fire onGenerateSuccess when print-shell sink rejects', async () => {
     const { topbar, button } = makeMocks();
     const master = {} as Manifold;
     const d = deferred<MoldGenerationResult>();
@@ -278,14 +275,8 @@ describe('generateOrchestrator — onGenerateSuccess hook', () => {
       .fn<(payload: { silicone: Manifold }) => Promise<unknown>>()
       .mockResolvedValue({ bbox: null });
     const sceneSetPrintableParts = vi
-      .fn<
-        (parts: {
-          base: Manifold;
-          sides: readonly Manifold[];
-          topCap: Manifold;
-        }) => Promise<unknown>
-      >()
-      .mockRejectedValue(new Error('printable adapter boom'));
+      .fn<(parts: { printShell: Manifold }) => Promise<unknown>>()
+      .mockRejectedValue(new Error('print-shell adapter boom'));
     const onGenerateSuccess = vi.fn<() => void>();
 
     const orchestrator = createGenerateOrchestrator({
@@ -308,7 +299,7 @@ describe('generateOrchestrator — onGenerateSuccess hook', () => {
     await runPromise;
 
     expect(onGenerateSuccess).not.toHaveBeenCalled();
-    expect(button.setError).toHaveBeenLastCalledWith('printable adapter boom');
+    expect(button.setError).toHaveBeenLastCalledWith('print-shell adapter boom');
   });
 
   test('hook is optional — absence does not throw on the happy path', async () => {
@@ -355,12 +346,14 @@ describe('generateOrchestrator — mid-flight LAY_FLAT_COMMITTED_EVENT race', ()
 
     const siliconeCallsBefore = topbar.setSiliconeVolume.mock.calls.length;
     const resinCallsBefore = topbar.setResinVolume.mock.calls.length;
+    const printShellCallsBefore = topbar.setPrintShellVolume.mock.calls.length;
 
     document.dispatchEvent(new CustomEvent(LAY_FLAT_COMMITTED_EVENT, { detail: true }));
 
     expect(getGenerateEpoch()).toBe(epochAtStart + 2);
     expect(topbar.setSiliconeVolume).toHaveBeenNthCalledWith(siliconeCallsBefore + 1, null);
     expect(topbar.setResinVolume).toHaveBeenNthCalledWith(resinCallsBefore + 1, null);
+    expect(topbar.setPrintShellVolume).toHaveBeenNthCalledWith(printShellCallsBefore + 1, null);
 
     const result = makeResult();
     d.resolve(result);
@@ -368,17 +361,24 @@ describe('generateOrchestrator — mid-flight LAY_FLAT_COMMITTED_EVENT race', ()
 
     const siliconeArgs = topbar.setSiliconeVolume.mock.calls.map((c) => c[0]);
     const resinArgs = topbar.setResinVolume.mock.calls.map((c) => c[0]);
+    const printShellArgs = topbar.setPrintShellVolume.mock.calls.map((c) => c[0]);
     expect(siliconeArgs, `setSiliconeVolume args: ${JSON.stringify(siliconeArgs)}`).not.toContain(
       STALE_SILICONE_MM3,
     );
     expect(resinArgs, `setResinVolume args: ${JSON.stringify(resinArgs)}`).not.toContain(
       STALE_RESIN_MM3,
     );
+    expect(
+      printShellArgs,
+      `setPrintShellVolume args: ${JSON.stringify(printShellArgs)}`,
+    ).not.toContain(STALE_PRINT_SHELL_MM3);
     for (const v of siliconeArgs) expect(v).toBeNull();
     for (const v of resinArgs) expect(v).toBeNull();
+    for (const v of printShellArgs) expect(v).toBeNull();
 
-    // Single silicone Manifold was .delete()'d on the stale-drop path.
+    // Both Manifolds were .delete()'d on the stale-drop path.
     expect(result.silicone.delete).toHaveBeenCalledTimes(1);
+    expect(result.printShell.delete).toHaveBeenCalledTimes(1);
 
     const busyArgs = button.setBusy.mock.calls.map((c) => c[0]);
     expect(busyArgs, `setBusy args: ${JSON.stringify(busyArgs)}`).toEqual([true]);
@@ -450,17 +450,20 @@ describe('generateOrchestrator — scene hand-off', () => {
     expect(sceneSetSilicone).toHaveBeenCalledWith({
       silicone: result.silicone,
     });
-    // Ownership transferred → orchestrator does NOT .delete().
+    // Ownership transferred → orchestrator does NOT .delete() silicone.
     expect(result.silicone.delete).not.toHaveBeenCalled();
+    // No printable-parts sink → orchestrator disposes the print-shell.
+    expect(result.printShell.delete).toHaveBeenCalledTimes(1);
     expect(onSiliconeInstalled).toHaveBeenCalledTimes(1);
     expect(onSiliconeInstalled).toHaveBeenCalledWith({
       bbox: { min: [0, 0, 0], max: [1, 1, 1] },
     });
     expect(topbar.setSiliconeVolume).toHaveBeenCalledWith(STALE_SILICONE_MM3);
     expect(topbar.setResinVolume).toHaveBeenCalledWith(STALE_RESIN_MM3);
+    expect(topbar.setPrintShellVolume).toHaveBeenCalledWith(STALE_PRINT_SHELL_MM3);
   });
 
-  test('stale drop still .delete()s the silicone even with scene sink wired', async () => {
+  test('stale drop still .delete()s every Manifold even with scene sink wired', async () => {
     const { topbar, button } = makeMocks();
     const master = {} as Manifold;
     const d = deferred<MoldGenerationResult>();
@@ -488,6 +491,7 @@ describe('generateOrchestrator — scene hand-off', () => {
     await runPromise;
 
     expect(result.silicone.delete).toHaveBeenCalledTimes(1);
+    expect(result.printShell.delete).toHaveBeenCalledTimes(1);
     expect(sceneSetSilicone).not.toHaveBeenCalled();
   });
 
@@ -586,13 +590,13 @@ describe('generateOrchestrator — error path', () => {
   });
 });
 
-describe('generateOrchestrator — printable-box disposal', () => {
-  // The orchestrator is the sole owner of the printable-box parts when
-  // the scene sink doesn't supply `setPrintableParts`. Every path that
-  // sees a `MoldGenerationResult` without the sink MUST `.delete()` basePart,
-  // every sideParts[i], AND topCapPart, or we leak WASM heap.
+describe('generateOrchestrator — print-shell disposal', () => {
+  // The orchestrator is the sole owner of the print shell when the scene
+  // sink doesn't supply `setPrintableParts`. Every path that sees a
+  // `MoldGenerationResult` without the sink MUST `.delete()` it, or we
+  // leak WASM heap.
 
-  test('happy path (volume-only) disposes base + every side + top cap', async () => {
+  test('happy path (volume-only) disposes the print shell', async () => {
     const { topbar, button } = makeMocks();
     const master = {} as Manifold;
     const d = deferred<MoldGenerationResult>();
@@ -611,15 +615,10 @@ describe('generateOrchestrator — printable-box disposal', () => {
     d.resolve(result);
     await runPromise;
 
-    expect(result.basePart.delete).toHaveBeenCalledTimes(1);
-    expect(result.topCapPart.delete).toHaveBeenCalledTimes(1);
-    expect(result.sideParts).toHaveLength(4);
-    for (const side of result.sideParts) {
-      expect(side.delete).toHaveBeenCalledTimes(1);
-    }
+    expect(result.printShell.delete).toHaveBeenCalledTimes(1);
   });
 
-  test('happy path with only setSilicone sink still disposes printable parts', async () => {
+  test('happy path with only setSilicone sink still disposes the print shell', async () => {
     const { topbar, button } = makeMocks();
     const master = {} as Manifold;
     const d = deferred<MoldGenerationResult>();
@@ -644,14 +643,10 @@ describe('generateOrchestrator — printable-box disposal', () => {
     await runPromise;
 
     expect(result.silicone.delete).not.toHaveBeenCalled();
-    expect(result.basePart.delete).toHaveBeenCalledTimes(1);
-    expect(result.topCapPart.delete).toHaveBeenCalledTimes(1);
-    for (const side of result.sideParts) {
-      expect(side.delete).toHaveBeenCalledTimes(1);
-    }
+    expect(result.printShell.delete).toHaveBeenCalledTimes(1);
   });
 
-  test('stale-drop path disposes silicone AND printable parts', async () => {
+  test('stale-drop path disposes silicone AND the print shell', async () => {
     const { topbar, button } = makeMocks();
     const master = {} as Manifold;
     const d = deferred<MoldGenerationResult>();
@@ -675,11 +670,7 @@ describe('generateOrchestrator — printable-box disposal', () => {
     await runPromise;
 
     expect(result.silicone.delete).toHaveBeenCalledTimes(1);
-    expect(result.basePart.delete).toHaveBeenCalledTimes(1);
-    expect(result.topCapPart.delete).toHaveBeenCalledTimes(1);
-    for (const side of result.sideParts) {
-      expect(side.delete).toHaveBeenCalledTimes(1);
-    }
+    expect(result.printShell.delete).toHaveBeenCalledTimes(1);
   });
 
   test('happy path with BOTH scene sinks hands off every Manifold', async () => {
@@ -690,13 +681,7 @@ describe('generateOrchestrator — printable-box disposal', () => {
       .fn<(payload: { silicone: Manifold }) => Promise<unknown>>()
       .mockResolvedValue({ bbox: { min: [0, 0, 0], max: [1, 1, 1] } });
     const sceneSetPrintableParts = vi
-      .fn<
-        (parts: {
-          base: Manifold;
-          sides: readonly Manifold[];
-          topCap: Manifold;
-        }) => Promise<unknown>
-      >()
+      .fn<(parts: { printShell: Manifold }) => Promise<unknown>>()
       .mockResolvedValue({ bbox: { min: [0, 0, 0], max: [1, 1, 1] } });
 
     const orchestrator = createGenerateOrchestrator({
@@ -723,18 +708,12 @@ describe('generateOrchestrator — printable-box disposal', () => {
 
     expect(sceneSetPrintableParts).toHaveBeenCalledTimes(1);
     expect(sceneSetPrintableParts).toHaveBeenCalledWith({
-      base: result.basePart,
-      sides: result.sideParts,
-      topCap: result.topCapPart,
+      printShell: result.printShell,
     });
-    expect(result.basePart.delete).not.toHaveBeenCalled();
-    expect(result.topCapPart.delete).not.toHaveBeenCalled();
-    for (const s of result.sideParts) {
-      expect(s.delete).not.toHaveBeenCalled();
-    }
+    expect(result.printShell.delete).not.toHaveBeenCalled();
   });
 
-  test('printable-parts sink rejection surfaces via button.setError; silicone stays installed', async () => {
+  test('print-shell sink rejection surfaces via button.setError', async () => {
     const { topbar, button } = makeMocks();
     const master = {} as Manifold;
     const d = deferred<MoldGenerationResult>();
@@ -742,14 +721,8 @@ describe('generateOrchestrator — printable-box disposal', () => {
       .fn<(payload: { silicone: Manifold }) => Promise<unknown>>()
       .mockResolvedValue({ bbox: { min: [0, 0, 0], max: [1, 1, 1] } });
     const sceneSetPrintableParts = vi
-      .fn<
-        (parts: {
-          base: Manifold;
-          sides: readonly Manifold[];
-          topCap: Manifold;
-        }) => Promise<unknown>
-      >()
-      .mockRejectedValue(new Error('printable adapter boom'));
+      .fn<(parts: { printShell: Manifold }) => Promise<unknown>>()
+      .mockRejectedValue(new Error('print-shell adapter boom'));
 
     const orchestrator = createGenerateOrchestrator({
       getMaster: () => master,
@@ -771,45 +744,7 @@ describe('generateOrchestrator — printable-box disposal', () => {
 
     expect(sceneSetSilicone).toHaveBeenCalledTimes(1);
     expect(sceneSetPrintableParts).toHaveBeenCalledTimes(1);
-    expect(button.setError).toHaveBeenLastCalledWith('printable adapter boom');
+    expect(button.setError).toHaveBeenLastCalledWith('print-shell adapter boom');
     expect(button.setBusy).toHaveBeenLastCalledWith(false);
-  });
-
-  test('sideCount=2 result disposes both sides', async () => {
-    const { topbar, button } = makeMocks();
-    const master = {} as Manifold;
-    const d = deferred<MoldGenerationResult>();
-    const orchestrator = createGenerateOrchestrator({
-      getMaster: () => master,
-      getParameters: () => ({ ...DEFAULT_PARAMETERS, sideCount: 2 }),
-      getViewTransform: () => new Matrix4(),
-      generate: () => d.promise,
-      topbar,
-      button,
-      logger: { error: () => {} },
-    });
-
-    const base = fakeManifold();
-    const topCap = fakeManifold();
-    const side1 = fakeManifold();
-    const side2 = fakeManifold();
-    const result: MoldGenerationResult = {
-      silicone: fakeManifold(),
-      siliconeVolume_mm3: STALE_SILICONE_MM3,
-      resinVolume_mm3: STALE_RESIN_MM3,
-      basePart: base,
-      sideParts: [side1, side2],
-      topCapPart: topCap,
-      printableVolume_mm3: STALE_PRINTABLE_MM3,
-    };
-
-    const runPromise = orchestrator.run();
-    d.resolve(result);
-    await runPromise;
-
-    expect(base.delete).toHaveBeenCalledTimes(1);
-    expect(topCap.delete).toHaveBeenCalledTimes(1);
-    expect(side1.delete).toHaveBeenCalledTimes(1);
-    expect(side2.delete).toHaveBeenCalledTimes(1);
   });
 });

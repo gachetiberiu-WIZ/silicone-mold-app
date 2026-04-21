@@ -12,7 +12,7 @@
 //     getParameters,   // read the current mold parameters
 //     getViewTransform,// capture the Master group's matrixWorld
 //     generate,        // the geometry kernel's `generateSiliconeShell`
-//     topbar,          // `setSiliconeVolume` / `setResinVolume`
+//     topbar,          // setSiliconeVolume / setResinVolume / setPrintShellVolume
 //     button,          // `setBusy` / `setError`
 //   });
 //
@@ -28,31 +28,32 @@
 // event (via `attachGenerateInvalidation`), a new STL load, or an explicit
 // test-driven bump. In that case we:
 //
-//   - dispose the silicone + printable-box Manifolds on the dropped
+//   - dispose the silicone + print-shell Manifolds on the dropped
 //     result (no WASM leak),
 //   - return WITHOUT touching the topbar (the invalidation listener already
 //     nulled the readouts; re-pushing our stale numbers would be wrong),
 //   - skip `setBusy(false)` (a later run is still current and owns busy).
 //
-// Manifold ownership (issue #47 + #62, updated Wave A for single silicone)
-// ------------------------------------------------------------------------
+// Manifold ownership (issue #47 + #62 + #72)
+// ------------------------------------------
 //
-// The `silicone` Manifold in `MoldGenerationResult` is generator-owned
-// until the orchestrator decides what to do with it:
+// Both Manifolds in `MoldGenerationResult` are generator-owned until the
+// orchestrator decides what to do with them:
 //
 //   - Happy path + `scene` supplied:  ownership HANDS OFF to the scene
-//     sink via `scene.setSilicone({silicone})`. The orchestrator must NOT
-//     `.delete()` it afterwards — the sink does so on its next
-//     replacement / clear cycle.
+//     sinks via `scene.setSilicone({silicone})` + `scene.setPrintableParts
+//     ({printShell})`. The orchestrator must NOT `.delete()` them
+//     afterwards — the sinks do so on their next replacement / clear
+//     cycle.
 //   - Happy path + no `scene`:  fall back to the original behaviour of
 //     `.delete()`-ing here. Kept so pre-scene orchestrator tests (and
 //     any callers that only want volumes) still work.
-//   - Stale-drop path:  silicone NEVER reached the scene → orchestrator
+//   - Stale-drop path:  Manifolds NEVER reached the scene → orchestrator
 //     is still the owner → `.delete()` before returning.
-//   - Error path (generate rejected):  silicone never existed (the
-//     Promise rejected before producing it) → nothing to delete.
-//   - scene.setSilicone rejects:  the scene sink is contracted to have
-//     disposed the silicone on its error branch before re-throwing.
+//   - Error path (generate rejected):  Manifolds never existed (the
+//     Promise rejected before producing them) → nothing to delete.
+//   - sink rejects:  the sink is contracted to have disposed the input
+//     Manifold on its error branch before re-throwing.
 
 import type { Manifold } from 'manifold-3d';
 import type { Matrix4 } from 'three';
@@ -61,35 +62,16 @@ import type { MoldParameters } from '../state/parameters';
 import type { MoldGenerationResult } from '@/geometry/generateMold';
 import { bumpGenerateEpoch, getGenerateEpoch } from './generateEpoch';
 
-/**
- * Dispose every printable-box Manifold in a `MoldGenerationResult`
- * (base + every side + top cap). Factored out because the orchestrator
- * has to dispose them on multiple code paths — happy (volume-only),
- * stale, generator-rejection, and scene-setSilicone-rejection — so
- * inlining would drift.
- *
- * Resilient to missing fields / legacy mocks: a simple truthy + method
- * check covers both the production-shaped result (always populated) and
- * pre-Wave-A tests whose mocks omit them.
- */
-function disposePrintableParts(result: MoldGenerationResult): void {
-  if (result.basePart && typeof result.basePart.delete === 'function') {
-    result.basePart.delete();
-  }
-  if (result.topCapPart && typeof result.topCapPart.delete === 'function') {
-    result.topCapPart.delete();
-  }
-  if (Array.isArray(result.sideParts)) {
-    for (const s of result.sideParts) {
-      if (s && typeof s.delete === 'function') s.delete();
-    }
-  }
-}
-
 /** Minimal topbar surface the orchestrator writes to. */
 export interface OrchestratorTopbar {
   setSiliconeVolume(mm3: number | null): void;
   setResinVolume(mm3: number | null): void;
+  /**
+   * Set the print-shell volume in mm³. Optional on the interface so
+   * legacy callers / tests that don't wire the 4th readout still work;
+   * production wires a real implementation.
+   */
+  setPrintShellVolume?(mm3: number | null): void;
 }
 
 /** Minimal Generate-button surface the orchestrator drives. */
@@ -106,7 +88,7 @@ export interface OrchestratorButton {
  *
  * Contract: from the moment `setSilicone` resolves, the sink owns the
  * silicone Manifold's lifetime. From the moment `setPrintableParts`
- * resolves (if supplied), the sink owns the printable-box Manifolds too.
+ * resolves (if supplied), the sink owns the print-shell Manifold too.
  * The orchestrator MUST NOT `.delete()` them on the happy path. The
  * stale-drop / error paths predate this ownership transfer — they still
  * `.delete()` everything.
@@ -114,26 +96,22 @@ export interface OrchestratorButton {
 export interface OrchestratorSceneSink {
   setSilicone(payload: { silicone: Manifold }): Promise<unknown>;
   /**
-   * Hand the printable-box parts (base + N sides + top cap) to the
-   * scene. Optional so legacy call sites can wire only `setSilicone`
-   * and fall back to disposing printable parts immediately.
+   * Hand the surface-conforming print shell to the scene. Optional so
+   * legacy call sites can wire only `setSilicone` and fall back to
+   * disposing the print-shell immediately.
    *
    * Contract: same as `setSilicone` — from the moment this resolves,
-   * the sink owns every Manifold in `parts`. The orchestrator MUST NOT
-   * `.delete()` them. On rejection the sink is responsible for having
-   * disposed every input Manifold before throwing.
+   * the sink owns the Manifold. The orchestrator MUST NOT `.delete()`
+   * it. On rejection the sink is responsible for having disposed the
+   * input Manifold before throwing.
    */
-  setPrintableParts?(parts: {
-    base: Manifold;
-    sides: readonly Manifold[];
-    topCap: Manifold;
-  }): Promise<unknown>;
+  setPrintableParts?(parts: { printShell: Manifold }): Promise<unknown>;
 }
 
 /**
  * Callback fired on the happy path, after the topbar volumes have been
  * pushed and the scene sinks (if present) have accepted the silicone +
- * printable parts. Used to flip the Generate button's `generated` flag
+ * print shell. Used to flip the Generate button's `generated` flag
  * so the hint reads `generate.done`. Not called on stale / error paths.
  */
 export type OrchestratorOnGenerateSuccess = () => void;
@@ -163,6 +141,16 @@ export interface GenerateOrchestratorDeps {
 /** Handle returned by `createGenerateOrchestrator`. */
 export interface GenerateOrchestratorApi {
   run(): Promise<void>;
+}
+
+/**
+ * Safely `.delete()` a Manifold if it exposes the method. Resilient to
+ * partial mocks in tests.
+ */
+function safeDelete(m: Manifold | undefined | null): void {
+  if (m && typeof m.delete === 'function') {
+    m.delete();
+  }
 }
 
 /**
@@ -211,33 +199,31 @@ export function createGenerateOrchestrator(
       button.setBusy(true);
       topbar.setSiliconeVolume(null);
       topbar.setResinVolume(null);
+      topbar.setPrintShellVolume?.(null);
 
       try {
         const result = await generate(master, parameters, viewTransform);
 
         if (epoch !== getEpoch()) {
           // Staleness drop: an invalidation (commit, reset, new STL) or a
-          // later click bumped the epoch while we were awaiting. The
-          // silicone + printable parts NEVER reached the scene, so the
-          // orchestrator is still the owner — release them here.
-          result.silicone.delete();
-          disposePrintableParts(result);
+          // later click bumped the epoch while we were awaiting. Neither
+          // Manifold reached the scene, so the orchestrator is still the
+          // owner — release them here.
+          safeDelete(result.silicone);
+          safeDelete(result.printShell);
           return;
         }
 
         topbar.setSiliconeVolume(result.siliconeVolume_mm3);
         topbar.setResinVolume(result.resinVolume_mm3);
-
-        if (typeof result.printableVolume_mm3 === 'number') {
-          console.debug(`[generate] printableVolume=${result.printableVolume_mm3.toFixed(1)} mm³`);
-        }
+        topbar.setPrintShellVolume?.(result.printShellVolume_mm3);
 
         // Track sink failures so the post-run success hook (below) can
         // skip firing when any downstream sink surfaced an error.
         let siliconeSinkFailed = false;
         if (scene) {
-          // Happy path: hand ownership of the SINGLE silicone Manifold
-          // to the scene sink. `scene.setSilicone` is responsible for
+          // Happy path: hand ownership of the silicone Manifold to the
+          // scene sink. `scene.setSilicone` is responsible for
           // `.delete()`-ing it on its next replacement / clear cycle —
           // the orchestrator must NOT touch it again or we'd double-
           // free. If `setSilicone` throws (geometry adapter failure),
@@ -261,36 +247,34 @@ export function createGenerateOrchestrator(
           // No scene sink wired (legacy call sites, some tests) — fall
           // back to disposing the silicone here for volume-compute-only
           // mode.
-          result.silicone.delete();
+          safeDelete(result.silicone);
         }
 
-        // Printable-box parts hand-off. Mirror of the silicone hand-off
-        // above: if the scene sink supplies `setPrintableParts`,
-        // ownership transfers; the orchestrator must NOT `.delete()` the
-        // printable Manifolds. If the sink is absent, fall back to
-        // disposing the parts immediately.
-        let printablePartsFailed = false;
+        // Print-shell hand-off. Mirror of the silicone hand-off above:
+        // if the scene sink supplies `setPrintableParts`, ownership
+        // transfers; the orchestrator must NOT `.delete()` the Manifold.
+        // If the sink is absent, fall back to disposing the shell
+        // immediately.
+        let printShellFailed = false;
         if (scene?.setPrintableParts) {
           try {
             await scene.setPrintableParts({
-              base: result.basePart,
-              sides: result.sideParts,
-              topCap: result.topCapPart,
+              printShell: result.printShell,
             });
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             logger.error('[generate] setPrintableParts failed:', err);
             button.setError(message);
-            printablePartsFailed = true;
+            printShellFailed = true;
           }
         } else {
-          disposePrintableParts(result);
+          safeDelete(result.printShell);
         }
 
         if (
           epoch === getEpoch() &&
           !siliconeSinkFailed &&
-          !printablePartsFailed &&
+          !printShellFailed &&
           onGenerateSuccess
         ) {
           onGenerateSuccess();

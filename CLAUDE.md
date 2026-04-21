@@ -4,9 +4,9 @@ Instructions for Claude Code sessions working in this repo. Read this first.
 
 ## What this app is
 
-Desktop app (Electron + Three.js, Windows-first) that takes a 3D master STL (miniature, figurine, object) and generates printable silicone-mold parts: base + sides + top cap + sprue/vent. Computes silicone volume and resin pour volume. Exports binary STL.
+Desktop app (Electron + Three.js, Windows-first) that takes a 3D master STL (miniature, figurine, object) and generates a silicone-glove mold wrapped in a rigid 3D-printed shell. Computes silicone volume, resin pour volume, and print-shell volume. Exports binary STL.
 
-**v1 scope (locked at Phase 0 gate, 2026-04-18):** two-halves-in-box mold strategy only. 2/3/4 side count parameter. mm default, inches toggle. Sleeve+shell, multi-part (3–5), brush-on, and cut molds are explicitly out of scope — do not add them without user approval.
+**v1 scope (redirected 2026-04-20 after dogfood):** rigid-shell + silicone-glove mold strategy. Surface-conforming silicone offset + surface-conforming print shell, open-top pour edge, optional radial slicing + brims (Waves E/F). 2/3/4 side count parameter reserved for radial slicing of the shell in Wave E. mm default, inches toggle. Sleeve+shell variations, multi-part (3–5), brush-on, and cut molds are explicitly out of scope — do not add them without user approval.
 
 ## Architecture at a glance
 

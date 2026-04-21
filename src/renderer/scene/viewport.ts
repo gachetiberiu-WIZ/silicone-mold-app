@@ -130,15 +130,13 @@ export interface MountedViewport {
    */
   isExplodedViewIdle: () => boolean;
   /**
-   * Install a freshly-generated printable-parts set (issue #62). Transfers
-   * ownership of all Manifolds to the scene — caller must NOT `.delete()`
-   * them after this call. After installing, re-frames the camera to the
-   * union of master + silicone + printable bboxes.
+   * Install a freshly-generated print-shell Manifold (Wave-C single-mesh
+   * contract, issue #72). Transfers ownership to the scene — caller must
+   * NOT `.delete()` it after this call. After installing, re-frames the
+   * camera to the union of master + silicone + print-shell bboxes.
    */
   setPrintableParts: (parts: {
-    base: Manifold;
-    sides: readonly Manifold[];
-    topCap: Manifold;
+    printShell: Manifold;
   }) => Promise<PrintablePartsResult>;
   /**
    * Tear down any printable parts currently in the scene and release
@@ -325,18 +323,18 @@ export function mount(container: HTMLElement): MountedViewport {
   };
 
   /**
-   * Install a freshly-generated printable-parts set (issue #62). Transfers
-   * ownership of every Manifold (base + N sides + topCap) to the scene
-   * module. After the adapter finishes, re-frames the camera to the
-   * union of the master + silicone + printable bboxes so the whole
-   * assembly is visible.
+   * Install a freshly-generated print-shell Manifold (Wave-C single-mesh
+   * contract, issue #72). Transfers ownership to the scene module. After
+   * the adapter finishes, re-frames the camera to the union of the
+   * master + silicone + print-shell bboxes so the whole assembly is
+   * visible.
    *
-   * On throw: `scene/printableParts.ts::setPrintableParts` disposes every
+   * On throw: `scene/printableParts.ts::setPrintableParts` disposes the
    * input Manifold before re-throwing, so the error branch preserves the
    * lifetime contract without a second dispose here.
    */
   const setPrintableParts = async (
-    parts: { base: Manifold; sides: readonly Manifold[]; topCap: Manifold },
+    parts: { printShell: Manifold },
   ): Promise<PrintablePartsResult> => {
     const installed = await sceneSetPrintableParts(scene, parts);
 

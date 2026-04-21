@@ -1,90 +1,142 @@
 ---
 name: mold-generator
-description: Generate the printable mold parts (base + sides + top cap + sprue/vent) from a master STL + parameters. v1 supports two-halves-in-box only.
+description: Generate the silicone body + surface-conforming rigid print shell from a master STL + parameters. v1 supports rigid-shell + silicone-glove only.
 ---
 
 # mold-generator skill
 
 ## When to invoke
 
-Tasks that produce the mold parts themselves — base plate, printed sides (2/3/4), top cap, sprue, vent, registration keys, parting surface. Not general mesh ops (that's `mesh-operations`), not viewport rendering (that's `three-js-viewer`).
+Tasks that produce the mold itself — the silicone body and the rigid
+surface-conforming print shell around it. Not general mesh ops (that's
+`mesh-operations`), not viewport rendering (that's `three-js-viewer`).
 
 ## Locked scope (do not expand)
 
-**v1 strategy:** two-halves-in-box only. Sleeve+shell, multi-part (3–5), brush-on, cut molds are **out of scope**. If the user asks for them, escalate; do not build speculatively.
+**v1 strategy (redirected 2026-04-20):** rigid-shell + silicone-glove.
+Sleeve+shell variations, multi-part (3–5), brush-on, cut molds are **out
+of scope**. If the user asks for them, escalate; do not build
+speculatively.
 
-See `docs/research/molding-techniques.md` for domain background and `docs/adr/002-geometry-stack.md` for the stack.
+See `docs/research/molding-techniques.md` for domain background and
+`docs/adr/002-geometry-stack.md` for the stack.
 
 ## Input contract
 
 ```ts
 interface MoldInputs {
   master: Manifold;              // master mesh, already loaded + repaired
-  wallThickness_mm: number;      // 6–25, default 10
-  basePlateThickness_mm: number; // 2–15, default 5
-  sideCount: 2 | 3 | 4;          // default 4
-  sprueDiameter_mm: number;      // 3–8, default 5
-  ventDiameter_mm: number;       // 1–3, default 1.5
-  ventCount: number;             // derive from master high-points, min 1
-  registrationKeyStyle: 'hemi-asymmetric' | 'cone-asymmetric' | 'keyhole';
-  draftAngle_deg: number;        // 0–3, default 0 (silicone stretches)
-  partingPlane: { normal: Vec3; originOffset: number }; // user-picked
+  siliconeThickness_mm: number;  // 1–15, default 5
+  printShellThickness_mm: number;// 2–30, default 8
+  sideCount: 2 | 3 | 4;          // default 4 — reserved for Wave E radial slicing
+  draftAngle_deg: number;        // 0–3, default 0 (silicone stretches) — reserved
+  // viewTransform: Matrix4      // Master group's world matrix (applied inside kernel)
 }
 ```
 
 ## Output contract
 
 ```ts
-interface MoldParts {
-  basePart: BufferGeometry;        // printable
-  sideParts: BufferGeometry[];     // length = sideCount
-  topCapPart: BufferGeometry;      // printable, has sprue hole + vent holes
-  siliconeUpperHalf: Manifold;     // for volume compute + preview only (not printed)
-  siliconeLowerHalf: Manifold;     // same
-  siliconeVolume_mm3: number;      // = both halves combined
-  resinVolume_mm3: number;         // master volume + sprue + vent channels
+interface MoldGenerationResult {
+  silicone: Manifold;              // surface-conforming silicone body (shell − master)
+  printShell: Manifold;            // surface-conforming rigid shell hugging the silicone
+  siliconeVolume_mm3: number;
+  resinVolume_mm3: number;         // === master.volume() at 1e-9 relative
+  printShellVolume_mm3: number;
 }
 ```
 
-## Generation algorithm (high level)
+Ownership: both Manifolds are caller-owned. Call `.delete()` on each when
+done.
 
-1. **Bound the master**: compute AABB, expand by `wallThickness_mm` on all sides → `shellBox`.
-2. **Compute silicone shell**: `shell = levelSet(master, wallThickness_mm)` — outer surface of silicone body.
-3. **Subtract master from shell**: `silicone = shell − master`. This is the cavity.
-4. **Split by parting plane**: `[siliconeUpperHalf, siliconeLowerHalf] = splitByPlane(silicone, partingPlane)`.
-5. **Build containment box**: printed outer box wrapping `shellBox` with `basePlateThickness_mm` wall. Subdivide into base + N sides + top cap.
-6. **Generate registration keys**: place along parting line, asymmetric (one larger key or one offset key) to enforce orientation.
-7. **Cut sprue + vents**: cylindrical subtractions through top cap into the upper silicone half. Sprue from lowest point of master (in casting orientation); vents from all local high points.
-8. **Assert manifoldness** of every output `BufferGeometry` before returning.
-9. **Compute volumes**: silicone = sum of both halves; resin = master volume + sprue channel volume + vent channel volume.
+## Generation algorithm (Wave C, issue #72)
 
-## Helpers expected in `src/mold/`
+1. **Apply the viewport transform** to the master so all downstream
+   operations live in the oriented frame the user sees.
+2. **Build an SDF closure** from the transformed master via
+   `three-mesh-bvh` (`closestPointToPoint` distance + axis-aligned
+   ray-parity sign). The SDF is stateless w.r.t. the iso-level, so the
+   same closure feeds both levelSet passes below.
+3. **First `Manifold.levelSet`** at `level = -siliconeThickness_mm`
+   with bounds = master bbox expanded by `silicone + 2 × edgeLength` →
+   silicone outer body.
+4. **`silicone = siliconeOuter.difference(master)`** — carve the cavity.
+   Single piece.
+5. **Second `Manifold.levelSet`** at
+   `level = -(siliconeThickness_mm + printShellThickness_mm)` with
+   bounds expanded by `total + 2 × edgeLength` → print-shell outer body.
+6. **`printShellRaw = shellOuter.difference(siliconeOuter)`** — hollow
+   surface-conforming shell with silicone fitting exactly inside.
+7. **`trimByPlane`** twice:
+   - Top trim at `y = master.max.y + siliconeThickness + 3 mm` — open
+     pour edge.
+   - Bottom trim at `y = master.min.y` — flat base where Wave D will
+     attach the base slab.
+8. **Assert `isManifold()` + `genus() === 0`** on silicone and
+   printShell before returning.
+9. **Compute volumes**: `silicone.volume()`, `master.volume()` (≡
+   resinVolume_mm3 at 1e-9), `printShell.volume()`.
 
-- `computeShell.ts` — master → silicone outer body.
-- `partingSurface.ts` — takes master + plane, returns split surfaces. Use `three-mesh-bvh` for preview; `Manifold.splitByPlane` for final.
-- `containmentBox.ts` — shellBox → base + N sides + cap.
-- `registrationKeys.ts` — parting line + keyStyle → stamps on both halves.
-- `sprueVent.ts` — top cap + master orientation → cylindrical channels.
-- `volume.ts` — thin wrapper around `manifold.volume()` with resin-specific additions.
+`edgeLength = max(2.0 mm, siliconeThickness_mm / 4)`. The 2.0 mm floor
+is the Wave-C perf bump bundled from issue #71 — at the default
+silicone=5 mm this yields a 2.0 mm BCC grid (0.4 × thickness), well
+within the `mesh-operations` skill's 0.3 × thickness preview-fidelity
+budget.
+
+## Out of scope for Wave C — deferred to Waves D/E/F
+
+- **Wave D** — Base slab below the shell (45° interlock, 2 mm overlap,
+  0.2 mm tolerance).
+- **Wave E** — Radial slicing of the print shell into 2/3/4 pieces
+  (angles in `src/geometry/sideAngles.ts::SIDE_CUT_ANGLES`).
+- **Wave F** — Brims on the sliced shell pieces; optional registration
+  keys on the brim interfaces.
+- Draft-angle application (separate wave).
+- Sprue + vent channels — removed in Wave A; the open-top pour edge
+  replaces them.
+
+## Implementation layout
+
+- `src/geometry/generateMold.ts` — pipeline entrypoint
+  (`generateSiliconeShell`).
+- `src/geometry/sideAngles.ts` — `SIDE_CUT_ANGLES` constant (pure data,
+  reserved for Wave E).
+- `src/geometry/adapters.ts` — `manifoldToBufferGeometry` /
+  `bufferGeometryToManifold` / `isManifold`.
+- `src/geometry/volume.ts` — thin wrappers around `manifold.volume()`.
 
 ## Parameter validation
 
-Reject at input, with a clear error the UI can show:
+Reject at input with a clear error the UI can show:
 
-- `wallThickness_mm < 6` → warn ("tearing likely"); < 3 → reject.
-- `basePlateThickness_mm < 2` → reject ("base will warp during print").
-- `sprueDiameter_mm < ventDiameter_mm` → reject ("sprue must be larger than vents").
-- `partingPlane` that doesn't intersect the master → reject ("parting plane misses part").
+- `siliconeThickness_mm < 1` → reject ("silicone layer too thin").
+- `printShellThickness_mm ≤ 0` or non-finite → reject.
+- `sideCount ∉ {2, 3, 4}` → reject.
+- `viewTransform.elements.length !== 16` → reject.
 
 ## Anti-patterns
 
-- Hardcoding numeric defaults in the generator. Defaults live in `src/config/defaults.ts`.
-- Coupling UI concerns into generation code (no i18n strings, no alerts, no DOM).
-- Generating parts in millimetres *and* inches. Inches is a display-only conversion; internal units are always mm.
-- Skipping the `isManifold()` assertion on output "because it worked last time."
+- Hardcoding numeric defaults in the generator. Defaults live in
+  `src/renderer/state/parameters.ts::DEFAULT_PARAMETERS`.
+- Coupling UI concerns into generation code (no i18n strings, no alerts,
+  no DOM).
+- Generating parts in millimetres *and* inches. Inches is a display-only
+  conversion; internal units are always mm.
+- Skipping `isManifold()` assertion on output "because it worked last
+  time."
+- Letting an intermediate Manifold (`siliconeOuter`, `shellOuter`,
+  `shellRaw`, `shellTrimTop`) leak past the `finally` block. Every
+  intermediate `.delete()`s before return.
 
 ## Testing
 
-- Unit test each helper against `unit-cube`, `unit-sphere-icos-3`, `torus-32x16`, and `mini-figurine` fixtures.
-- Integration test the full generation pipeline: `mini-figurine.stl` + default params → 4 side parts + 1 base + 1 cap, all watertight, silicone volume within 3 % of hand-computed value.
-- Visual-regression snapshot: exploded view of all 7 parts from a fixed camera.
+- Unit tests against `unit-cube`, `unit-sphere-icos-3`, `torus-32x16`,
+  and `mini-figurine` fixtures.
+- Integration: full pipeline produces a watertight silicone AND a
+  watertight `genus === 0` print shell. Print-shell bbox contained
+  within the expanded master AABB (+silicone+printShell+edgeLength
+  slack) with exact Y cuts from `trimByPlane`.
+- Perf: mini-figurine full pipeline ≤ 5 s on CI (issue #72 AC).
+- Generate-×3 leak check: volumes stable across three successive runs.
+- Visual regression: `silicone-exploded.png` (silicone-only view) +
+  `printable-parts-exploded.png` (silicone + shell exploded view).

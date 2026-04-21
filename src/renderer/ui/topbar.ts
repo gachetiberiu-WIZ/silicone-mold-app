@@ -3,24 +3,26 @@
 // Plain-DOM topbar component. Renders (left → right):
 //
 //   [ App name + version ]  [ Open STL ]
-//   [ Master: ...  Silicone: ...  Resin: ...  [mm|in] ]
+//   [ Master: ...  Silicone: ...  Print shell: ...  Resin: ...  [mm|in] ]
 //
-// The volume section surfaces three readouts (issue #40):
+// The volume section surfaces four readouts:
 //
 //   - "Master" — the loaded STL's watertight volume. Resets only on a new
 //     STL load (orientation-agnostic; invariant under rigid transform).
-//   - "Silicone" — combined volume of both silicone halves, populated by
-//     a successful `generateSiliconeShell` call. Stale after any orientation
-//     change (lay-flat commit, reset orientation) or new STL load.
-//   - "Resin" — resin pour volume, equal to the master's volume at Phase
-//     3c wave 2 (sprue/vent channel contributions land in Phase 3d/e).
-//     Staleness rules match "Silicone".
+//   - "Silicone" — volume of the silicone body, populated by a successful
+//     `generateSiliconeShell` call. Stale after any orientation change
+//     (lay-flat commit, reset orientation) or new STL load.
+//   - "Print shell" — volume of the rigid surface-conforming print shell
+//     produced by Wave C (issue #72). Staleness rules match "Silicone".
+//   - "Resin" — resin pour volume, equal to the master's volume (Wave A
+//     stripped the sprue + vent channel contributions).
 //
 // Exposes a small imperative API:
 //   - `setVolume(mm3)` / `setMasterVolume(mm3)` — master-volume readout.
 //     `setVolume` is preserved as an alias of `setMasterVolume` so existing
 //     call-sites and tests that use the original name keep working.
 //   - `setSiliconeVolume(mm3)` — silicone readout.
+//   - `setPrintShellVolume(mm3)` — print-shell readout.
 //   - `setResinVolume(mm3)` — resin readout.
 //   - `setUnits(u)` / `getUnits()` — as before.
 //
@@ -46,17 +48,24 @@ export interface TopbarApi {
    */
   setSiliconeVolume(mm3: number | null): void;
   /**
+   * Set the computed print-shell volume in mm³ (Wave C, issue #72). Pass
+   * `null` for the placeholder. Same staleness semantics as
+   * `setSiliconeVolume`.
+   */
+  setPrintShellVolume(mm3: number | null): void;
+  /**
    * Set the resin pour volume in mm³. Pass `null` for the placeholder.
    * Same staleness semantics as `setSiliconeVolume`.
    */
   setResinVolume(mm3: number | null): void;
   /**
-   * Flip the "stale" muted-display state for the silicone + resin
-   * readouts (issue #64 — Option A). When true, both readouts render in
-   * italic + reduced opacity so the user sees that the displayed volumes
-   * are for a prior parameter set. Master volume is NOT muted — it is
-   * invariant under parameter change. Called by `main.ts` when the
-   * parameters store fires a change event after a successful generate.
+   * Flip the "stale" muted-display state for the silicone + print-shell +
+   * resin readouts (issue #64 — Option A). When true, all three generated
+   * readouts render in italic + reduced opacity so the user sees that the
+   * displayed volumes are for a prior parameter set. Master volume is NOT
+   * muted — it is invariant under parameter change. Called by `main.ts`
+   * when the parameters store fires a change event after a successful
+   * generate.
    */
   setVolumesStale(stale: boolean): void;
   /** Read the current "stale" flag for the volume readouts (useful for tests). */
@@ -147,12 +156,11 @@ export function mountTopbar(
 
   // ---- Right: volume readouts + units toggle -------------------------------
   //
-  // Three readouts side-by-side (issue #40). Each is an independent
-  // `.topbar__volume` wrap so we can toggle them individually and the
-  // existing CSS keeps the spacing consistent. The original single readout
-  // used `data-testid="volume-readout"` / `"volume-value"`; we keep those
-  // ids on the MASTER readout so existing tests (topbar-units visual spec,
-  // E2E load-stl flow) continue to pass.
+  // Four readouts side-by-side. Each is an independent `.topbar__volume`
+  // wrap so we can toggle them individually and the existing CSS keeps
+  // the spacing consistent. The master readout retains its legacy
+  // `data-testid="volume-readout"` / `"volume-value"` ids so existing
+  // visual + unit tests keep passing.
   const right = document.createElement('div');
   right.className = 'topbar__right';
 
@@ -166,6 +174,11 @@ export function mountTopbar(
     'silicone-volume-readout',
     'silicone-volume-value',
   );
+  const printShell = createVolumeReadout(
+    'topbar.volumePrintShell',
+    'print-shell-volume-readout',
+    'print-shell-volume-value',
+  );
   const resin = createVolumeReadout(
     'topbar.volumeResin',
     'resin-volume-readout',
@@ -174,6 +187,7 @@ export function mountTopbar(
 
   right.appendChild(master.wrap);
   right.appendChild(silicone.wrap);
+  right.appendChild(printShell.wrap);
   right.appendChild(resin.wrap);
 
   const togglePanel = document.createElement('div');
@@ -187,20 +201,24 @@ export function mountTopbar(
   // ---- State + rendering ---------------------------------------------------
   let currentMaster: number | null = null;
   let currentSilicone: number | null = null;
+  let currentPrintShell: number | null = null;
   let currentResin: number | null = null;
   let currentUnits: UnitSystem = getUnitSystem();
-  // Issue #64 — "stale" flag for silicone + resin. When true, both
-  // readouts carry `is-stale` (italic + 50 % opacity via CSS). Master
-  // readout is never stale — it's invariant under parameter change.
+  // Issue #64 — "stale" flag for silicone / print-shell / resin. When
+  // true, all three readouts carry `is-stale` (italic + 50 % opacity via
+  // CSS). Master readout is never stale — it's invariant under parameter
+  // change.
   let volumesStale = false;
 
   const STALE_CLASS = 'is-stale';
   function applyStaleClass(): void {
     if (volumesStale) {
       silicone.wrap.classList.add(STALE_CLASS);
+      printShell.wrap.classList.add(STALE_CLASS);
       resin.wrap.classList.add(STALE_CLASS);
     } else {
       silicone.wrap.classList.remove(STALE_CLASS);
+      printShell.wrap.classList.remove(STALE_CLASS);
       resin.wrap.classList.remove(STALE_CLASS);
     }
   }
@@ -209,12 +227,17 @@ export function mountTopbar(
 
   function renderAll(): void {
     // Master uses the default "No master loaded" placeholder — a null value
-    // genuinely means no STL is open. Silicone + resin use "Click Generate"
-    // because they are null whenever the user hasn't run Generate yet,
-    // regardless of master state (loaded or not).
+    // genuinely means no STL is open. Silicone / print-shell / resin use
+    // "Click Generate" because they are null whenever the user hasn't run
+    // Generate yet, regardless of master state.
     master.valueEl.textContent = formatVolume(currentMaster, currentUnits);
     silicone.valueEl.textContent = formatVolume(
       currentSilicone,
+      currentUnits,
+      'volume.notGenerated',
+    );
+    printShell.valueEl.textContent = formatVolume(
+      currentPrintShell,
       currentUnits,
       'volume.notGenerated',
     );
@@ -226,7 +249,7 @@ export function mountTopbar(
   }
 
   // Listen for unit changes fired by the toggle (or by another component)
-  // and re-render all three readouts so their unit labels stay in sync.
+  // and re-render all readouts so their unit labels stay in sync.
   document.addEventListener('units-changed', (ev) => {
     const detail = (ev as CustomEvent<UnitSystem>).detail;
     if (detail === 'mm' || detail === 'in') {
@@ -249,6 +272,14 @@ export function mountTopbar(
       currentSilicone = mm3;
       silicone.valueEl.textContent = formatVolume(
         currentSilicone,
+        currentUnits,
+        'volume.notGenerated',
+      );
+    },
+    setPrintShellVolume(mm3: number | null): void {
+      currentPrintShell = mm3;
+      printShell.valueEl.textContent = formatVolume(
+        currentPrintShell,
         currentUnits,
         'volume.notGenerated',
       );
