@@ -119,6 +119,15 @@ export interface OrchestratorSceneSink {
     shellPieces: readonly Manifold[];
     basePart: Manifold;
     xzCenter?: { x: number; z: number };
+    /**
+     * Issue #87 dogfood fix (Fix 2): how far to lift the entire mold
+     * assembly (master + silicone + printable parts) on Y so the base
+     * slab's underside sits on the print bed (Y=0). Passed through
+     * from the current parameters' `baseSlabThickness_mm`. When
+     * omitted the scene sink falls back to no offset (legacy
+     * tests / call-sites that don't care about slab positioning).
+     */
+    baseSlabThickness_mm?: number;
   }): Promise<unknown>;
 }
 
@@ -279,6 +288,10 @@ export function createGenerateOrchestrator(
             await scene.setPrintableParts({
               shellPieces: result.shellPieces,
               basePart: result.basePart,
+              // Issue #87 Fix 2: forward the slab thickness so the
+              // viewport can lift the master + silicone + parts
+              // groups by that much and put the slab on the bed.
+              baseSlabThickness_mm: parameters.baseSlabThickness_mm,
             });
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
