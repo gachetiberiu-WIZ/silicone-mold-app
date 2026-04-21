@@ -30,6 +30,7 @@ const TOPBAR_CLIP = { x: 0, y: 0, width: 1280, height: 48 } as const;
 interface TopbarHook {
   setMasterVolume(mm3: number | null): void;
   setSiliconeVolume(mm3: number | null): void;
+  setPrintShellVolume(mm3: number | null): void;
   setResinVolume(mm3: number | null): void;
   setVolumesStale(stale: boolean): void;
   setUnits(unit: 'mm' | 'in'): void;
@@ -73,9 +74,10 @@ test.describe('visual — topbar stale silicone + resin readouts', () => {
       // so the diff reads cleanly — only the muted style differs).
       t.setMasterVolume(127_451.6);
       t.setSiliconeVolume(319_914);
+      t.setPrintShellVolume(455_000);
       t.setResinVolume(127_451.6);
-      // Flip to the stale state — silicone + resin should now render
-      // italic + 50 % opacity; master unchanged.
+      // Flip to the stale state — silicone + print-shell + resin should
+      // now render italic + 50 % opacity; master unchanged.
       t.setVolumesStale(true);
     });
     await page.clock.runFor(50);

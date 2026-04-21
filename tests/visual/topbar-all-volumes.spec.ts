@@ -1,24 +1,25 @@
 // tests/visual/topbar-all-volumes.spec.ts
 //
-// Visual regression: the topbar with all three volume readouts populated
-// (issue #40). The existing `topbar-units.spec.ts` covers the single-
+// Visual regression: the topbar with all four volume readouts populated
+// (Wave C, issue #72 extends the Wave-A three-readout set with
+// "Print shell"). The existing `topbar-units.spec.ts` covers the single-
 // readout (master-only) baseline; this spec adds the post-generate view.
 //
 // Two states:
 //   1. mm mode with the mini-figurine's master volume (~127 451.6 mm³)
-//      plus the generator's canonical silicone (~319 914 mm³) and resin
-//      (~127 451.6 mm³) outputs.
-//   2. Same values, inches mode — verifies all three readouts re-format
+//      plus canonical silicone (~319 914 mm³), print-shell (~455 000 mm³)
+//      and resin (~127 451.6 mm³) outputs.
+//   2. Same values, inches mode — verifies all four readouts re-format
 //      coherently in a single unit flip.
 //
-// The master-volume readout uses the pre-existing `data-testid="volume-
-// value"` (unchanged); the two new readouts live at `silicone-volume-
-// value` and `resin-volume-value`.
+// Test-id layout: `volume-value` (master, unchanged), `silicone-volume-
+// value`, `print-shell-volume-value`, `resin-volume-value`.
 //
-// First-run note: this spec produces new goldens on its first green CI
-// run. Per ADR-003 §B the visual-regression job is advisory for 2 weeks
-// after first green, so the missing-golden failure does not block PR
-// merge.
+// Goldens are regenerated on this branch via the one-shot
+// `update-linux-goldens.yml` workflow (the 4th readout shifts the layout
+// enough that the Wave-A baselines no longer match). Per ADR-003 §B the
+// visual-regression job is advisory for 2 weeks after first green, so
+// the missing-golden failure does not block PR merge.
 
 import { expect, test, type Page } from '@playwright/test';
 
@@ -31,6 +32,7 @@ interface TopbarHook {
   setVolume(mm3: number | null): void;
   setMasterVolume(mm3: number | null): void;
   setSiliconeVolume(mm3: number | null): void;
+  setPrintShellVolume(mm3: number | null): void;
   setResinVolume(mm3: number | null): void;
   setUnits(unit: 'mm' | 'in'): void;
   getUnits(): 'mm' | 'in';
@@ -72,10 +74,11 @@ test.describe('visual — topbar with all three volumes', () => {
       ).__testHooks.topbar;
       t.setUnits('mm');
       // Canonical numbers observed from the generator's unit tests:
-      // silicone ≈ 319 914 mm³, resin = master = 127 451.6 mm³ for the
-      // mini-figurine fixture with default 10 mm wall thickness.
+      // silicone ≈ 319 914 mm³, print-shell ≈ 455 000 mm³, resin =
+      // master = 127 451.6 mm³ for the mini-figurine fixture.
       t.setMasterVolume(127_451.6);
       t.setSiliconeVolume(319_914);
+      t.setPrintShellVolume(455_000);
       t.setResinVolume(127_451.6);
     });
     await page.clock.runFor(50);
@@ -93,6 +96,7 @@ test.describe('visual — topbar with all three volumes', () => {
       t.setUnits('in');
       t.setMasterVolume(127_451.6);
       t.setSiliconeVolume(319_914);
+      t.setPrintShellVolume(455_000);
       t.setResinVolume(127_451.6);
     });
     await page.clock.runFor(50);
