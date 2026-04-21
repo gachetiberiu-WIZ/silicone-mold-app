@@ -34,23 +34,24 @@
 //     nulled the readouts; re-pushing our stale numbers would be wrong),
 //   - skip `setBusy(false)` (a later run is still current and owns busy).
 //
-// Manifold ownership (issues #47, #62, #72, #82)
-// ----------------------------------------------
+// Manifold ownership (issues #47, #62, #72, #82, #84)
+// ---------------------------------------------------
 //
-// The three Manifolds in `MoldGenerationResult` (silicone, printShell,
+// The Manifolds in `MoldGenerationResult` (silicone, N shellPieces,
 // basePart) are generator-owned until the orchestrator decides what to
 // do with them:
 //
 //   - Happy path + `scene` supplied:  ownership HANDS OFF to the scene
-//     sinks via `scene.setSilicone({silicone})` + `scene.setPrintableParts
-//     ({printShell, basePart})`. The orchestrator must NOT `.delete()`
-//     them afterwards — the sinks do so on their next replacement / clear
-//     cycle.
+//     sinks via `scene.setSilicone({silicone})` +
+//     `scene.setPrintableParts({shellPieces, basePart})`. The
+//     orchestrator must NOT `.delete()` them afterwards — the sinks do
+//     so on their next replacement / clear cycle.
 //   - Happy path + no `scene`:  fall back to the original behaviour of
 //     `.delete()`-ing here. Kept so pre-scene orchestrator tests (and
 //     any callers that only want volumes) still work.
 //   - Stale-drop path:  no Manifold reached the scene → orchestrator
-//     is still the owner → `.delete()` every one before returning.
+//     is still the owner → `.delete()` every one (silicone, every shell
+//     piece, basePart) before returning.
 //   - Error path (generate rejected):  Manifolds never existed (the
 //     Promise rejected before producing them) → nothing to delete.
 //   - sink rejects:  the sink is contracted to have disposed every input
@@ -103,19 +104,21 @@ export interface OrchestratorButton {
 export interface OrchestratorSceneSink {
   setSilicone(payload: { silicone: Manifold }): Promise<unknown>;
   /**
-   * Hand the surface-conforming print shell + base slab to the scene
-   * (Wave D, issue #82). Optional so legacy call sites can wire only
-   * `setSilicone` and fall back to disposing the print-shell + base-slab
-   * immediately.
+   * Hand the sliced shell pieces + base slab to the scene (Wave E + F,
+   * issue #84). Optional so legacy call sites can wire only
+   * `setSilicone` and fall back to disposing the shell pieces + base
+   * slab immediately.
    *
    * Contract: same as `setSilicone` — from the moment this resolves,
-   * the sink owns BOTH Manifolds. The orchestrator MUST NOT `.delete()`
-   * them. On rejection the sink is responsible for having disposed both
-   * input Manifolds before throwing.
+   * the sink owns EVERY Manifold (N shell pieces + the base slab). The
+   * orchestrator MUST NOT `.delete()` them. On rejection the sink is
+   * responsible for having disposed every input Manifold before
+   * throwing.
    */
   setPrintableParts?(parts: {
-    printShell: Manifold;
+    shellPieces: readonly Manifold[];
     basePart: Manifold;
+    xzCenter?: { x: number; z: number };
   }): Promise<unknown>;
 }
 
@@ -220,16 +223,16 @@ export function createGenerateOrchestrator(
           // Staleness drop: an invalidation (commit, reset, new STL) or a
           // later click bumped the epoch while we were awaiting. None of
           // the Manifolds reached the scene, so the orchestrator is still
-          // the owner — release them here.
+          // the owner — release every one here.
           safeDelete(result.silicone);
-          safeDelete(result.printShell);
+          for (const p of result.shellPieces) safeDelete(p);
           safeDelete(result.basePart);
           return;
         }
 
         topbar.setSiliconeVolume(result.siliconeVolume_mm3);
         topbar.setResinVolume(result.resinVolume_mm3);
-        topbar.setPrintShellVolume?.(result.printShellVolume_mm3);
+        topbar.setPrintShellVolume?.(result.totalShellVolume_mm3);
         topbar.setBaseSlabVolume?.(result.baseSlabVolume_mm3);
 
         // Track sink failures so the post-run success hook (below) can
@@ -264,16 +267,17 @@ export function createGenerateOrchestrator(
           safeDelete(result.silicone);
         }
 
-        // Print-shell + base-slab hand-off (Wave D). Mirror of the
-        // silicone hand-off above: if the scene sink supplies
-        // `setPrintableParts`, ownership of BOTH Manifolds transfers;
-        // the orchestrator must NOT `.delete()` them. If the sink is
-        // absent, fall back to disposing both immediately.
+        // Shell-pieces + base-slab hand-off (Wave E + F, issue #84).
+        // Mirror of the silicone hand-off above: if the scene sink
+        // supplies `setPrintableParts`, ownership of EVERY Manifold (N
+        // shell pieces + base slab) transfers; the orchestrator must
+        // NOT `.delete()` them. If the sink is absent, fall back to
+        // disposing every one immediately.
         let printShellFailed = false;
         if (scene?.setPrintableParts) {
           try {
             await scene.setPrintableParts({
-              printShell: result.printShell,
+              shellPieces: result.shellPieces,
               basePart: result.basePart,
             });
           } catch (err) {
@@ -283,7 +287,7 @@ export function createGenerateOrchestrator(
             printShellFailed = true;
           }
         } else {
-          safeDelete(result.printShell);
+          for (const p of result.shellPieces) safeDelete(p);
           safeDelete(result.basePart);
         }
 

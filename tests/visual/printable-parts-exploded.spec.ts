@@ -4,8 +4,10 @@
 // conforming print shell (visible) + exploded-view toggle ON. Exercises
 // the full Wave C preview pipeline for issue #72.
 //
-// Post-Wave-C the print shell is a single mesh (`print-shell` tag), not
-// the pre-#72 six-piece rectangular-box set.
+// Post-Wave-E (issue #84) the print shell is sliced into N pieces tagged
+// `shell-piece-0..N-1` — default sideCount=4 → 4 pieces. Each piece
+// translates RADIALLY outward from the master's XZ center under the
+// exploded-view toggle.
 //
 // Generator budget is ~3-4 s on warm machines after Wave C (two levelSet
 // passes against the same SDF). Outer 90 s timeout covers cold
@@ -121,9 +123,10 @@ test.describe('visual — printable parts preview + exploded view', () => {
       { timeout: 60_000 },
     );
 
-    // Wait for the silicone body AND the print shell AND the base slab
-    // to be live in the scene. Wave D (issue #82): one `silicone-body`
-    // mesh + one `print-shell` + one `base-slab-mesh` = 3 parts total.
+    // Wait for the silicone body AND the sliced shell pieces AND the
+    // base slab to be live in the scene. Wave E (issue #84): one
+    // `silicone-body` mesh + N `shell-piece-{i}` meshes (default N=4) +
+    // one `base-slab-mesh`.
     await page.waitForFunction(
       () => {
         type Obj = { userData?: Record<string, unknown> };
@@ -134,15 +137,17 @@ test.describe('visual — printable parts preview + exploded view', () => {
           .__testHooks;
         if (!hooks?.scene) return false;
         let silicone = 0;
-        let shell = 0;
+        let shellPieces = 0;
         let slab = 0;
         hooks.scene.traverse((obj) => {
           const tag = obj.userData?.['tag'];
           if (tag === 'silicone-body') silicone += 1;
-          if (tag === 'print-shell') shell += 1;
+          if (typeof tag === 'string' && tag.startsWith('shell-piece-')) {
+            shellPieces += 1;
+          }
           if (tag === 'base-slab-mesh') slab += 1;
         });
-        return silicone === 1 && shell === 1 && slab === 1;
+        return silicone === 1 && shellPieces === 4 && slab === 1;
       },
       undefined,
       { timeout: 10_000 },

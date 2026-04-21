@@ -49,12 +49,14 @@ describe('parameter panel — rendering', () => {
     expect(title).toBeTruthy();
     expect(title?.textContent).toBe(i18next.t('parameters.title'));
 
-    // Post-#82: six rows — Wave D adds baseSlabThickness + baseSlabOverhang.
+    // Post-#84: eight rows — Wave E+F adds brimWidth + brimThickness.
     const fieldIds = [
       'siliconeThickness',
       'printShellThickness',
       'baseSlabThickness',
       'baseSlabOverhang',
+      'brimWidth',
+      'brimThickness',
       'sideCount',
       'draftAngle',
     ];
@@ -103,6 +105,10 @@ describe('parameter panel — rendering', () => {
     expect(val('baseSlabThickness')).toBe('8.0');
     expect(val('baseSlabOverhang')).toBe('5.0');
 
+    // Post-#84 Wave-E+F defaults.
+    expect(val('brimWidth')).toBe('10.0');
+    expect(val('brimThickness')).toBe('3.0');
+
     // Angle (1 decimal).
     expect(val('draftAngle')).toBe('0.0');
 
@@ -122,6 +128,8 @@ describe('parameter panel — rendering', () => {
       'printShellThickness',
       'baseSlabThickness',
       'baseSlabOverhang',
+      'brimWidth',
+      'brimThickness',
       'sideCount',
       'draftAngle',
     ];

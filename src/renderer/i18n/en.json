@@ -24,6 +24,8 @@
     "printShell": "Print shell thickness",
     "baseSlabThickness": "Base slab thickness",
     "baseSlabOverhang": "Base slab overhang",
+    "brimWidth": "Brim width",
+    "brimThickness": "Brim thickness",
     "sideCount": "Side count",
     "draft": "Draft angle",
     "reset": "Reset to defaults",

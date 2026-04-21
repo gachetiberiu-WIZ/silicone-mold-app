@@ -10,7 +10,7 @@
 import { expect, test } from '@playwright/test';
 import { launchApp } from './fixtures/app';
 
-test('sidebar renders with 6 fields + reset button on app launch', async () => {
+test('sidebar renders with 8 fields + reset button on app launch', async () => {
   const app = await launchApp();
   try {
     const page = await app.firstWindow();
@@ -25,6 +25,8 @@ test('sidebar renders with 6 fields + reset button on app launch', async () => {
       'printShellThickness',
       'baseSlabThickness',
       'baseSlabOverhang',
+      'brimWidth',
+      'brimThickness',
       'sideCount',
       'draftAngle',
     ];

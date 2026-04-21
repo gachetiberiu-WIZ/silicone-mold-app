@@ -31,3 +31,10 @@ export {
   BASE_SLAB_PLUG_HEIGHT_MM,
   type BuildBaseSlabArgs,
 } from './baseSlab';
+export {
+  sliceShellRadial,
+  pieceMidAngleRad,
+  radialUnit,
+  type XzCenter,
+} from './shellSlicer';
+export { addBrim, pieceOutwardDir, type AddBrimArgs, type WorldBbox } from './brim';
