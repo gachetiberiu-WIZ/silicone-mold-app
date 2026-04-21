@@ -8,8 +8,8 @@
 // registration-key fields entirely — they belonged to the two-halves-in-box
 // strategy that's been replaced by rigid-shell + silicone-glove. The
 // remaining four fields — wall thickness, base thickness, side count,
-// draft angle — stay in this commit; `wallThickness_mm` is renamed to
-// `siliconeThickness_mm` and `baseThickness_mm` to `printShellThickness_mm`
+// draft angle — stay in this commit; `siliconeThickness_mm` is renamed to
+// `siliconeThickness_mm` and `printShellThickness_mm` to `printShellThickness_mm`
 // in a follow-up commit on the same branch so the rename is reviewable
 // independently from the deletion.
 //
@@ -33,10 +33,19 @@
 //   importing a schema library.
 
 export interface MoldParameters {
-  /** Silicone wall thickness in mm. */
-  wallThickness_mm: number;
-  /** Printed base plate thickness in mm. */
-  baseThickness_mm: number;
+  /**
+   * Silicone layer thickness in mm. Post-#69 range 1–15, default 5.
+   * Replaces the pre-#69 `wallThickness_mm` (range 6–25, default 10).
+   */
+  siliconeThickness_mm: number;
+  /**
+   * Printed-shell thickness in mm. Post-#69 range 2–30, default 8.
+   * Replaces the pre-#69 `baseThickness_mm` (range 2–15, default 5).
+   * The field governs the printed-box wall thickness today; when Wave C
+   * lands the surface-conforming shell, this will remain the
+   * thickness parameter for the new shell geometry.
+   */
+  printShellThickness_mm: number;
   /** Number of printed side walls: 2, 3, or 4. */
   sideCount: 2 | 3 | 4;
   /** Draft angle in degrees. Always unit-agnostic. */
@@ -55,14 +64,14 @@ export interface NumericConstraint {
 }
 
 /**
- * Defaults for the Wave-A parameter set. `wallThickness_mm` + `baseThickness_mm`
- * keep their pre-#69 ranges and defaults in this commit; the follow-up
- * Wave-B rename commit shifts them to the new range (silicone 1–15
- * default 5, print-shell 2–30 default 8).
+ * Defaults post-Wave-B rename (issue #69). The user widened the usable
+ * range for the silicone layer (thinner silicone prints now that the
+ * surface-conforming strategy hugs the master) and the print shell
+ * (thicker shell for user mechanical clamps).
  */
 export const DEFAULT_PARAMETERS: Readonly<MoldParameters> = Object.freeze({
-  wallThickness_mm: 10,
-  baseThickness_mm: 5,
+  siliconeThickness_mm: 5,
+  printShellThickness_mm: 8,
   sideCount: 4,
   draftAngle_deg: 0,
 });
@@ -75,13 +84,13 @@ export const DEFAULT_PARAMETERS: Readonly<MoldParameters> = Object.freeze({
  */
 export const NUMERIC_CONSTRAINTS: Readonly<
   Record<keyof Pick<MoldParameters,
-    | 'wallThickness_mm'
-    | 'baseThickness_mm'
+    | 'siliconeThickness_mm'
+    | 'printShellThickness_mm'
     | 'draftAngle_deg'
   >, NumericConstraint>
 > = Object.freeze({
-  wallThickness_mm: { min: 6, max: 25, step: 0.5, integer: false },
-  baseThickness_mm: { min: 2, max: 15, step: 0.5, integer: false },
+  siliconeThickness_mm: { min: 1, max: 15, step: 0.5, integer: false },
+  printShellThickness_mm: { min: 2, max: 30, step: 0.5, integer: false },
   draftAngle_deg: { min: 0, max: 3, step: 0.5, integer: false },
 });
 
@@ -125,8 +134,8 @@ export interface ParametersStore {
  */
 function equals(a: MoldParameters, b: MoldParameters): boolean {
   return (
-    a.wallThickness_mm === b.wallThickness_mm &&
-    a.baseThickness_mm === b.baseThickness_mm &&
+    a.siliconeThickness_mm === b.siliconeThickness_mm &&
+    a.printShellThickness_mm === b.printShellThickness_mm &&
     a.sideCount === b.sideCount &&
     a.draftAngle_deg === b.draftAngle_deg
   );

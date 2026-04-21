@@ -44,17 +44,11 @@
 //                  well-defined.
 //
 //   `edgeLength` governs both the BCC grid spacing AND the output mesh
-//   resolution. We coarsen to `max(1.5 mm, wallThickness / 4)` — ~2.5 mm
-//   on the default 10 mm silicone thickness. This keeps the mini-figurine
-//   well under the 3 000 ms budget. When a future wave ships printable
-//   silicone (currently only rendered for preview + volume), we tighten
-//   edgeLength back toward the skill default.
-//
-// Note on parameter names: this Wave-A commit still reads the legacy
-// `wallThickness_mm` / `baseThickness_mm` fields. The Wave-B rename
-// ("wall"→"silicone", "base"→"printShell") lands in a separate commit on
-// the same branch so the diff for the deletion is trivially separable
-// from the diff for the rename — reviewers can trace each independently.
+//   resolution. We coarsen to `max(1.5 mm, siliconeThickness / 4)` —
+//   ~1.5 mm on the post-#69 default 5 mm silicone thickness. This keeps
+//   the mini-figurine well under the 3 000 ms budget. When a future wave
+//   ships printable silicone (currently only rendered for preview +
+//   volume), tighten edgeLength back toward the skill default.
 
 import { DoubleSide, Ray, Vector3 } from 'three';
 import type { BufferGeometry, Matrix4 } from 'three';
@@ -144,22 +138,22 @@ export interface MoldGenerationResult {
 }
 
 /**
- * Hard lower bound on the silicone wall thickness the generator will
- * accept, in mm. Kept at 3 mm in the Wave-A commit (the legacy value);
- * the Wave-B rename commit relaxes the range to 1–15 mm and drops this
- * floor to 1 mm to match the user-requested parameter range widening.
+ * Hard lower bound on the silicone thickness the generator will accept,
+ * in mm. The parameter store clamps to ≥ 1 mm; this defence-in-depth
+ * floor matches so a kernel caller bypassing the UI still gets rejected
+ * on the pre-#69 "wall too thin" condition.
  */
-const MIN_WALL_THICKNESS_MM = 3;
+const MIN_SILICONE_THICKNESS_MM = 1;
 
 /**
  * LevelSet grid spacing (mm). Tuned for the mini-figurine to land under
- * the issue's 3 000 ms budget while still giving a visually plausible
- * silicone body. When a future wave ships printable silicone, tighten
- * this back toward `min(0.3 × wallThickness, 1 mm)` per the
- * `mesh-operations` skill default.
+ * the 3 000 ms budget while still giving a visually plausible silicone
+ * body. When a future wave ships printable silicone, tighten this back
+ * toward `min(0.3 × siliconeThickness, 1 mm)` per the `mesh-operations`
+ * skill default.
  */
-function resolveEdgeLength(wallThickness_mm: number): number {
-  return Math.max(1.5, wallThickness_mm / 4);
+function resolveEdgeLength(siliconeThickness_mm: number): number {
+  return Math.max(1.5, siliconeThickness_mm / 4);
 }
 
 /**
@@ -272,11 +266,10 @@ export async function generateSiliconeShell(
   // future non-UI caller, so the kernel validates its own inputs. Every
   // check here runs BEFORE the first Manifold allocation so a rejection
   // costs zero WASM heap.
-  if (parameters.wallThickness_mm < MIN_WALL_THICKNESS_MM) {
+  if (parameters.siliconeThickness_mm < MIN_SILICONE_THICKNESS_MM) {
     throw new InvalidParametersError(
-      `generateSiliconeShell: wallThickness_mm=${parameters.wallThickness_mm} ` +
-        `is below the minimum of ${MIN_WALL_THICKNESS_MM} mm ` +
-        `(silicone would tear on demould)`,
+      `generateSiliconeShell: siliconeThickness_mm=${parameters.siliconeThickness_mm} ` +
+        `is below the minimum of ${MIN_SILICONE_THICKNESS_MM} mm`,
     );
   }
   if (!SIDE_COUNT_OPTIONS.includes(parameters.sideCount)) {
@@ -285,9 +278,9 @@ export async function generateSiliconeShell(
         `is not supported (must be one of ${SIDE_COUNT_OPTIONS.join(', ')})`,
     );
   }
-  if (!(parameters.baseThickness_mm > 0) || !Number.isFinite(parameters.baseThickness_mm)) {
+  if (!(parameters.printShellThickness_mm > 0) || !Number.isFinite(parameters.printShellThickness_mm)) {
     throw new InvalidParametersError(
-      `generateSiliconeShell: baseThickness_mm=${parameters.baseThickness_mm} ` +
+      `generateSiliconeShell: printShellThickness_mm=${parameters.printShellThickness_mm} ` +
         `must be a positive finite number`,
     );
   }
@@ -308,25 +301,25 @@ export async function generateSiliconeShell(
     const sdfHandles = await buildMasterSdf(transformedMaster);
     const tSdf = performance.now();
     try {
-      const edgeLength = resolveEdgeLength(parameters.wallThickness_mm);
+      const edgeLength = resolveEdgeLength(parameters.siliconeThickness_mm);
 
       // Step 2b: bounds for the levelSet grid. Expand the master's bbox
-      // by wallThickness + 2 × edgeLength margin. The +2 × edgeLength
+      // by siliconeThickness + 2 × edgeLength margin. The +2 × edgeLength
       // pad keeps the iso-surface comfortably inside the grid.
       const masterBbox = transformedMaster.boundingBox();
-      const pad = parameters.wallThickness_mm + 2 * edgeLength;
+      const pad = parameters.siliconeThickness_mm + 2 * edgeLength;
       const bounds: Box = {
         min: [masterBbox.min[0] - pad, masterBbox.min[1] - pad, masterBbox.min[2] - pad],
         max: [masterBbox.max[0] + pad, masterBbox.max[1] + pad, masterBbox.max[2] + pad],
       };
 
-      // Step 2c: outer silicone shell via levelSet. `level = -wallThickness`
+      // Step 2c: outer silicone shell via levelSet. `level = -siliconeThickness`
       // outsets the master by that distance.
       const shell = toplevel.Manifold.levelSet(
         sdfHandles.sdf,
         bounds,
         edgeLength,
-        -parameters.wallThickness_mm,
+        -parameters.siliconeThickness_mm,
       );
       const tShell = performance.now();
       try {
@@ -376,8 +369,8 @@ export async function generateSiliconeShell(
             `[generateSiliconeShell] silicone=${siliconeVolume_mm3.toFixed(1)} mm³, ` +
               `resin=${resinVolume_mm3.toFixed(1)} mm³, ` +
               `printable=${printableVolume_mm3.toFixed(1)} mm³ ` +
-              `(wall=${parameters.wallThickness_mm} mm, ` +
-              `base=${parameters.baseThickness_mm} mm, ` +
+              `(siliconeThickness=${parameters.siliconeThickness_mm} mm, ` +
+              `printShellThickness=${parameters.printShellThickness_mm} mm, ` +
               `sideCount=${parameters.sideCount}, ` +
               `total=${(tPrintable - t0).toFixed(1)} ms)`,
           );

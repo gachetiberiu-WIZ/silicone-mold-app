@@ -18,8 +18,8 @@
   },
   "parameters": {
     "title": "Mold parameters",
-    "wall": "Wall thickness",
-    "base": "Base thickness",
+    "siliconeThickness": "Silicone thickness",
+    "printShell": "Print shell thickness",
     "sideCount": "Side count",
     "draft": "Draft angle",
     "reset": "Reset to defaults",
