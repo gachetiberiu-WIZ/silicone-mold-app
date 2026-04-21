@@ -209,6 +209,39 @@
         padding: 0;
         border: none;
       }
+      /* ---- Dimensions panel (issue #79) -------------------------------- */
+      .dimensions-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .dimensions-panel__current {
+        font-size: 11px;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+        line-height: 1.4;
+      }
+      .dimensions-panel__row {
+        /* Inherits .param-field spacing. */
+      }
+      .dimensions-panel__constrain {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--fg);
+        cursor: pointer;
+        user-select: none;
+      }
+      .dimensions-panel__constrain input[type='checkbox'] {
+        accent-color: var(--accent);
+        cursor: pointer;
+      }
+      .dimensions-panel__reset {
+        align-self: stretch;
+      }
       /* ---- Generate-mold block (issue #36) ------------------------------ */
       .generate-block {
         display: flex;
