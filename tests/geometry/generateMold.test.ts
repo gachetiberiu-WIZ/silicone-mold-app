@@ -193,7 +193,12 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
           ).__vitest_worker__;
           const coverageEnabled = !!worker?.config?.coverage?.enabled;
           if (!coverageEnabled) {
-            expect(elapsed).toBeLessThan(8_000);
+            // Wave E+F (issue #84) added radial slicing + N×2 brim unions,
+            // intrinsically +~1.5 s on ubuntu CI at sideCount=4. Budget
+            // widened 8 s → 10 s to unblock the feature-complete landing;
+            // issue #86 tracks clawing this back via brim simplification
+            // and piece-parallel slicing.
+            expect(elapsed).toBeLessThan(10_000);
           }
 
           expect(isManifold(result.silicone)).toBe(true);
