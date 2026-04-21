@@ -459,6 +459,55 @@
         opacity: 0.5;
         font-style: italic;
       }
+      /* Issue #87 Fix 1 — Generate progress banner. Non-modal pill at
+         the top-center of the viewport that appears during a Generate
+         run and updates with the current phase label. Hidden by
+         default via `.is-hidden`; fades in via `.is-visible`. Mounted
+         into `#viewport` so positioning is relative to the canvas
+         area, not the window. */
+      .generate-status {
+        position: absolute;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 14px;
+        border-radius: 999px;
+        background: rgba(74, 158, 255, 0.14);
+        border: 1px solid rgba(74, 158, 255, 0.35);
+        color: var(--fg);
+        font-size: 12px;
+        font-weight: 500;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.15s ease-out;
+        z-index: 900;
+      }
+      .generate-status.is-hidden {
+        display: none;
+      }
+      .generate-status.is-visible {
+        opacity: 1;
+      }
+      .generate-status__spinner {
+        width: 12px;
+        height: 12px;
+        border: 2px solid rgba(74, 158, 255, 0.3);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: generate-status-spin 0.8s linear infinite;
+        flex: 0 0 auto;
+      }
+      .generate-status__label {
+        line-height: 1;
+      }
+      @keyframes generate-status-spin {
+        from { transform: rotate(0deg); }
+        to   { transform: rotate(360deg); }
+      }
     </style>
   </head>
   <body>

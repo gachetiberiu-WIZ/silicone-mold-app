@@ -54,6 +54,11 @@ import {
   setPrintablePartsVisible as sceneSetPrintablePartsVisible,
   type PrintablePartsResult,
 } from './printableParts';
+import {
+  applyMoldBaseOffset,
+  clearMoldBaseOffset,
+  reapplyMoldBaseOffsetToMaster,
+} from './moldBaseOffset';
 
 function hasTestQueryFlag(): boolean {
   if (typeof window === 'undefined') return false;
@@ -143,6 +148,13 @@ export interface MountedViewport {
     shellPieces: readonly Manifold[];
     basePart: Manifold;
     xzCenter?: { x: number; z: number };
+    /**
+     * Issue #87 Fix 2: baseSlabThickness used to lift the whole
+     * master + silicone + parts assembly by that much on Y so the
+     * slab underside sits on the print bed. Omitted → no offset
+     * (legacy tests + volume-only call sites).
+     */
+    baseSlabThickness_mm?: number;
   }) => Promise<PrintablePartsResult>;
   /**
    * Tear down any printable parts currently in the scene and release
@@ -366,12 +378,46 @@ export function mount(container: HTMLElement): MountedViewport {
     shellPieces: readonly Manifold[];
     basePart: Manifold;
     xzCenter?: { x: number; z: number };
+    baseSlabThickness_mm?: number;
   }): Promise<PrintablePartsResult> => {
     const installed = await sceneSetPrintableParts(scene, parts);
 
+    // Issue #87 Fix 2: lift the master + silicone + printable-parts
+    // groups by `baseSlabThickness_mm` so the slab's underside sits
+    // on the print bed (world Y=0). Applied BEFORE camera framing so
+    // the union bbox below reflects the lifted positions. Every
+    // staleness signal (commit, reset, new STL) clears this via
+    // `clearSilicone` / `clearPrintableParts` below.
+    if (
+      typeof parts.baseSlabThickness_mm === 'number' &&
+      parts.baseSlabThickness_mm > 0
+    ) {
+      applyMoldBaseOffset(scene, parts.baseSlabThickness_mm);
+    }
+
     // Union with master + silicone bboxes for camera framing. Same
     // traversal pattern as `setSilicone` above.
-    const union = installed.bbox.clone();
+    //
+    // Using `setFromObject` here means the framer sees the world-
+    // space bbox AFTER the mold-base offset has been applied above —
+    // the master + silicone groups both have `position.y += offset`
+    // already. The printable-parts installed.bbox, however, is the
+    // local-AABB of each mesh (the scene module calls
+    // `computeBoundingBox()` on geometry-space vertex buffers), so
+    // it DOES NOT include the group-level offset. Re-compute it from
+    // the group via setFromObject so all three bboxes share a frame.
+    const union = new Box3();
+    const printableGroup = scene.children.find(
+      (c) => c.userData['tag'] === 'printableParts',
+    );
+    if (printableGroup && printableGroup.visible) {
+      const printableBbox = new Box3().setFromObject(printableGroup);
+      if (!printableBbox.isEmpty()) union.union(printableBbox);
+    } else if (!installed.bbox.isEmpty()) {
+      // Fallback for the invisible-group case (shouldn't happen in
+      // current UI but keeps framing sensible).
+      union.union(installed.bbox);
+    }
     const masterGroup = scene.children.find(
       (c) => c.userData['tag'] === 'master',
     );
@@ -399,6 +445,14 @@ export function mount(container: HTMLElement): MountedViewport {
     // mesh (and its BVH) is about to be disposed, and stale cursor listeners
     // would point at freed GPU resources.
     if (layFlat.isActive()) layFlat.disable();
+    // Issue #87 Fix 2: drop any prior mold-base offset BEFORE scene-
+    // level setMaster runs. `setMaster` writes `group.position.y`
+    // absolutely via the auto-center pass; a stale offset in
+    // userData would otherwise survive past the load and mismatch
+    // the fresh geometry. `loadMasterFromBuffer` in main.ts already
+    // calls `clearSilicone` + `clearPrintableParts` (which clear the
+    // offset), but belt-and-braces for any future loader path.
+    clearMoldBaseOffset(scene);
     const result = await sceneSetMaster(scene, buffer);
     layFlatMasterMesh = result.mesh;
     // `scene/master.ts` resets the group quaternion to identity on every
@@ -482,6 +536,14 @@ export function mount(container: HTMLElement): MountedViewport {
     // mesh sits on Y=0 centered on X=0/Z=0. Same code path that
     // `layFlatController::commit` runs after a rotation.
     recenterGroup(masterGroup, mesh);
+    // Issue #87 Fix 2: `recenterGroup` wrote `position.y` absolutely
+    // and clobbered any active mold-base offset. If a mold is
+    // currently displayed (the staleness path tears the offset down
+    // on commit / reset / new-STL, but a dimensions-change is just a
+    // "stale" marker — the scene-side mold stays visible), re-apply
+    // the offset to the master so it still rides on top of the slab
+    // instead of snapping back to Y=0.
+    reapplyMoldBaseOffsetToMaster(scene);
 
     // Re-frame the camera to the new world bbox so the user sees the
     // scaled mesh in full without a manual zoom-out. `Box3.setFromObject`
@@ -556,11 +618,24 @@ export function mount(container: HTMLElement): MountedViewport {
     resetOrientation: () => layFlat.reset(),
     isOrientationCommitted: () => layFlat.isCommitted(),
     setSilicone,
-    clearSilicone: () => sceneClearSilicone(scene),
+    clearSilicone: () => {
+      sceneClearSilicone(scene);
+      // Issue #87 Fix 2: clearing the silicone is part of every
+      // staleness signal (commit, reset, new STL, generate-error).
+      // Drop the mold-base offset so the master snaps back to its
+      // lay-flat rest (mesh.min.y == 0) until the next Generate.
+      clearMoldBaseOffset(scene);
+    },
     setExplodedView: (exploded: boolean) => sceneSetExplodedView(scene, exploded),
     isExplodedViewIdle: () => sceneIsExplodedViewIdle(scene),
     setPrintableParts,
-    clearPrintableParts: () => sceneClearPrintableParts(scene),
+    clearPrintableParts: () => {
+      sceneClearPrintableParts(scene);
+      // Parallel of `clearSilicone` above: the mold is gone, the
+      // offset goes with it. Idempotent if the silicone-clear path
+      // already cleared it.
+      clearMoldBaseOffset(scene);
+    },
     setPrintablePartsVisible: (visible: boolean) =>
       sceneSetPrintablePartsVisible(scene, visible),
     setPrintablePartsExplodedView: (exploded: boolean) =>

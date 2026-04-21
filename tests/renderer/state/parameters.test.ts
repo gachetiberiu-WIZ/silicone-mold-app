@@ -23,14 +23,18 @@ import {
 } from '@/renderer/state/parameters';
 
 describe('DEFAULT_PARAMETERS', () => {
-  test('matches the post-#84 Wave-E+F defaults', () => {
+  test('matches the post-#87 dogfood defaults', () => {
     expect(DEFAULT_PARAMETERS).toEqual({
       siliconeThickness_mm: 5,
       printShellThickness_mm: 8,
       baseSlabThickness_mm: 8,
       baseSlabOverhang_mm: 5,
       brimWidth_mm: 10,
-      brimThickness_mm: 3,
+      // Issue #87 dogfood fix: default bumped 3→8 to match the
+      // default print-shell thickness so the brim reads visually
+      // substantial next to the shell wall. Range 2–8 is unchanged;
+      // users can still pick thinner for small masters.
+      brimThickness_mm: 8,
       sideCount: 4,
       draftAngle_deg: 0,
     });

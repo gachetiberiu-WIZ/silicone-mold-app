@@ -69,6 +69,10 @@ import {
   mountPrintablePartsToggle,
   type PrintablePartsToggleApi,
 } from './ui/printablePartsToggle';
+import {
+  mountGenerateStatus,
+  type GenerateStatusApi,
+} from './ui/generateStatus';
 
 let topbar: TopbarApi | null = null;
 let viewport: MountedViewport | null = null;
@@ -81,6 +85,7 @@ let explodedView: ExplodedViewToggleApi | null = null;
 let printablePartsToggle: PrintablePartsToggleApi | null = null;
 let generateButton: GenerateButtonApi | null = null;
 let generateOrchestrator: GenerateOrchestratorApi | null = null;
+let generateStatus: GenerateStatusApi | null = null;
 
 /**
  * Canonical "is the exploded view currently ON" flag at the UI layer
@@ -208,6 +213,20 @@ function mountViewport(): void {
     return;
   }
   viewport = mount(container);
+  // Issue #87 Fix 1: progress-banner lives inside the viewport
+  // container so it positions relative to the canvas, not the
+  // window. Mounted after the viewport so the canvas is already in
+  // the DOM and the banner appends after it (z-order naturally
+  // places it above). Hidden by default until the orchestrator
+  // fires its first `setPhase`.
+  generateStatus = mountGenerateStatus(container);
+  if (process.env.NODE_ENV === 'test') {
+    const w = window as unknown as {
+      __testHooks?: Record<string, unknown>;
+    };
+    const hooks = (w.__testHooks ??= {});
+    hooks['generateStatus'] = generateStatus;
+  }
 }
 
 /**
@@ -295,6 +314,7 @@ function mountParameters(): void {
     const pStore = parametersStore;
     const tbar = topbar;
     const btn = generateButton;
+    const statusApi = generateStatus;
     generateOrchestrator = createGenerateOrchestrator({
       getMaster: () => getMasterManifold(vp.scene),
       getParameters: () => pStore.get(),
@@ -325,6 +345,18 @@ function mountParameters(): void {
         setSilicone: (payload) => vp.setSilicone(payload),
         setPrintableParts: (parts) => vp.setPrintableParts(parts),
       },
+      // Issue #87 Fix 1 — progress banner sink. Wired only when the
+      // status module successfully mounted (guards test bundles that
+      // skip the viewport). `translatePhase` routes the phase key
+      // through i18n so the banner label honours the locale.
+      ...(statusApi
+        ? {
+            status: {
+              setPhase: (label: string | null) => statusApi.setPhase(label),
+            },
+            translatePhase: (key: string) => t('status.phase.' + key),
+          }
+        : {}),
       onSiliconeInstalled() {
         // Silicone is in the scene → the exploded-view toggle can be
         // used. Start collapsed (setActive(false)) because every fresh

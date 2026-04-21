@@ -74,5 +74,14 @@
     "singleFile": "Drop one file at a time",
     "fileTooLarge": "File too large",
     "readFailed": "Could not read file"
+  },
+  "status": {
+    "phase": {
+      "silicone": "Building silicone…",
+      "shell": "Building print shell…",
+      "slicing": "Slicing shell pieces…",
+      "brims": "Adding brims…",
+      "slab": "Building base slab…"
+    }
   }
 }

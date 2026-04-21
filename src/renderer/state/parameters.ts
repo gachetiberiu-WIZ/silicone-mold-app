@@ -68,7 +68,10 @@ export interface MoldParameters {
    * Brim thickness in mm (Wave F, issue #84). Perpendicular thickness of
    * each brim flange — the thickness of material that sits against the
    * cut-plane interface between adjacent shell pieces. Range 2–8 mm,
-   * default 3 mm.
+   * default 8 mm (dogfood fix 2026-04-21, issue #87 — bumped from 3 mm
+   * to match the default print-shell thickness so the brim reads
+   * visually substantial next to the shell wall; override allowed for
+   * small masters where a thinner brim is wanted).
    */
   brimThickness_mm: number;
   /** Number of printed side walls: 2, 3, or 4. */
@@ -100,7 +103,7 @@ export const DEFAULT_PARAMETERS: Readonly<MoldParameters> = Object.freeze({
   baseSlabThickness_mm: 8,
   baseSlabOverhang_mm: 5,
   brimWidth_mm: 10,
-  brimThickness_mm: 3,
+  brimThickness_mm: 8,
   sideCount: 4,
   draftAngle_deg: 0,
 });

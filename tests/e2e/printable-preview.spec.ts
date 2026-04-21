@@ -334,12 +334,15 @@ test('printable-parts preview: default-ON reveals shell pieces → exploded fans
     });
     expect(visibleAfterToggle).toBe(true);
 
-    // Every shell piece currently at its origin (not exploded yet).
+    // Every shell piece at its generate-position (not exploded yet).
+    // Issue #87 fix 2 lifted the whole mold assembly by baseSlabThickness_mm
+    // (default 8) so the base slab sits on the bed. Shell pieces ride up
+    // with the assembly.
     for (let i = 0; i < 4; i++) {
       const pos = await readPrintableMeshWorldPos(page, `shell-piece-${i}`);
       if (!pos) throw new Error(`shell-piece-${i} missing from scene`);
       expect(pos.x).toBeCloseTo(0, 3);
-      expect(pos.y).toBeCloseTo(0, 3);
+      expect(pos.y).toBeCloseTo(8, 3);
       expect(pos.z).toBeCloseTo(0, 3);
     }
 
@@ -379,8 +382,9 @@ test('printable-parts preview: default-ON reveals shell pieces → exploded fans
       const pos = await readPrintableMeshWorldPos(page, `shell-piece-${i}`);
       if (!pos) throw new Error(`shell-piece-${i} missing from scene`);
       const xzNorm = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
-      // Y stays at ~0 — no +Y lift for sliced pieces.
-      expect(Math.abs(pos.y)).toBeLessThan(5);
+      // Y stays at ~baseSlabThickness — no +Y lift for sliced pieces beyond
+      // the assembly's baseline offset (issue #87 fix 2).
+      expect(Math.abs(pos.y - 8)).toBeLessThan(5);
       if (xzNorm > 20) anyPieceMovedRadially = true;
     }
     expect(anyPieceMovedRadially).toBe(true);
@@ -410,7 +414,7 @@ test('printable-parts preview: default-ON reveals shell pieces → exploded fans
       const pos = await readPrintableMeshWorldPos(page, `shell-piece-${i}`);
       if (!pos) throw new Error(`shell-piece-${i} missing from scene`);
       expect(pos.x).toBeCloseTo(0, 2);
-      expect(pos.y).toBeCloseTo(0, 2);
+      expect(pos.y).toBeCloseTo(8, 2);  // + baseSlabThickness (issue #87)
       expect(pos.z).toBeCloseTo(0, 2);
     }
 

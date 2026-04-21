@@ -3,7 +3,11 @@
 // Mold generator — Phase 3d Wave C (issue #72). Produces:
 //
 //   1. a surface-conforming silicone body (shell − master) around the
-//      master via BVH-accelerated `Manifold.levelSet`,
+//      master via BVH-accelerated `Manifold.levelSet`. Trimmed open at
+//      `master.max.y` (issue #87 dogfood fix) so the master's top face
+//      is exposed as the pour opening — the user pours liquid silicone
+//      from above into the pour well that the shell rim forms above
+//      the silicone.
 //   2. a surface-conforming print shell hugging that silicone, computed
 //      by a second levelSet at a larger negative offset then subtracting
 //      the silicone outer body and trimming top + bottom to produce an
@@ -455,6 +459,34 @@ async function buildMasterSdf(
 
 
 /**
+ * Phase identifier emitted by `generateSiliconeShell` via its optional
+ * `onPhase` callback (issue #87 Fix 1). Used by the renderer to update
+ * a progress banner during the generate pipeline so the user sees
+ * something besides a frozen canvas on a 10–60 s run.
+ *
+ * Emitted at each phase boundary BEFORE the work for that phase begins;
+ * the callback caller can `await` a RAF tick between emissions so the
+ * DOM paints before the next synchronous manifold op blocks the UI
+ * thread.
+ */
+export type GeneratePhase =
+  | 'silicone'
+  | 'shell'
+  | 'slicing'
+  | 'brims'
+  | 'slab';
+
+/**
+ * Optional progress callback signature. Typed as `Promise<void> | void`
+ * so the orchestrator can return a RAF-yield promise and the generator
+ * will await it — that's what buys us "DOM paints between phases"
+ * without restructuring the pipeline into an async generator.
+ */
+export type OnGeneratePhase = (
+  phase: GeneratePhase,
+) => void | Promise<void>;
+
+/**
  * Compute the silicone body + the surface-conforming print shell + the
  * associated volumes for the given master Manifold and parameter set.
  *
@@ -471,11 +503,15 @@ async function buildMasterSdf(
  * @param master Master Manifold, owned by the caller. Not consumed.
  * @param parameters Current mold parameters.
  * @param viewTransform The Master group's current world matrix.
+ * @param onPhase Optional progress callback fired BEFORE each heavy
+ *   phase begins. The return value (sync or Promise) is awaited, so
+ *   the caller can yield to RAF between phases — see issue #87 Fix 1.
  */
 export async function generateSiliconeShell(
   master: Manifold,
   parameters: MoldParameters,
   viewTransform: Matrix4,
+  onPhase?: OnGeneratePhase,
 ): Promise<MoldGenerationResult> {
   // Defence-in-depth validation. The UI's parameters panel already clamps
   // to legal ranges, but this function is reachable from tests and any
@@ -653,6 +689,12 @@ export async function generateSiliconeShell(
       const siliconeBounds = unifiedBounds;
       const shellBounds = unifiedBounds;
 
+      // Issue #87 Fix 1: fire the per-phase progress callback BEFORE
+      // each heavy step starts. Awaiting the return value lets the
+      // caller yield to RAF so the progress banner repaints before
+      // the synchronous manifold op blocks the UI thread.
+      if (onPhase) await onPhase('silicone');
+
       // Step 3a: outer silicone shell via levelSet. `level = -siliconeThickness`
       // outsets the master by that distance.
       const siliconeOuter = toplevel.Manifold.levelSet(
@@ -671,9 +713,55 @@ export async function generateSiliconeShell(
         // Step 3b: carve the cavity. `difference` is guaranteed-manifold
         // on two manifold inputs (ADR-002). The result is the SINGLE
         // silicone body we return.
-        silicone = toplevel.Manifold.difference([siliconeOuter, transformedMaster]);
-        assertManifold(silicone, 'silicone body (silicone outer − master)');
+        const siliconeClosed = toplevel.Manifold.difference([
+          siliconeOuter,
+          transformedMaster,
+        ]);
+        let siliconeClosedDisposed = false;
+        try {
+          assertManifold(
+            siliconeClosed,
+            'silicone body (silicone outer − master)',
+          );
+
+          // Step 3c (issue #87 dogfood fix): trim the silicone top so
+          // the master's upper face is EXPOSED — the user pours liquid
+          // silicone from above through this opening. Pre-fix the
+          // silicone fully enclosed the master (genus ≥ 1, sealed
+          // jacket) and there was no visible pour path.
+          //
+          // Trim plane: y = masterMaxYInWorld. `trimByPlane(n, d)` keeps
+          // the half where `dot(p, n) >= d`. For `n = [0, -1, 0]`,
+          // `d = -masterMaxY` keeps `-y >= -masterMaxY`, i.e.
+          // `y <= masterMaxY`. The result is a silicone body whose top
+          // surface lies at the master's top Y with the master's top
+          // outline as a hole — the pour opening.
+          //
+          // The shell's top trim still sits at
+          // `masterMaxY + siliconeThickness + PRINT_SHELL_POUR_EDGE_MM`,
+          // so the shell now forms a rim `siliconeThickness + 3 mm`
+          // above the silicone → a pour well the user pours liquid
+          // silicone into.
+          const siliconeTrimY = masterBbox.max[1];
+          silicone = siliconeClosed.trimByPlane([0, -1, 0], -siliconeTrimY);
+          // Release the closed-top silicone immediately — ownership of
+          // the trimmed result transfers to `silicone` for the rest of
+          // the pipeline.
+          siliconeClosed.delete();
+          siliconeClosedDisposed = true;
+          assertManifold(silicone, 'silicone body (top-trimmed for pour)');
+        } finally {
+          // Defence-in-depth: if `trimByPlane` throws or `assertManifold`
+          // rejects the trimmed result, make sure we release the
+          // pre-trim Manifold. `silicone` itself is released by the
+          // broader error path already in place below.
+          if (!siliconeClosedDisposed) {
+            try { siliconeClosed.delete(); } catch { /* already dead */ }
+          }
+        }
         const tCavity = performance.now();
+
+        if (onPhase) await onPhase('shell');
 
         // Step 4a: SECOND levelSet for the print-shell outer at a larger
         // offset. Same SDF closure, bigger bounds to hold the bigger
@@ -748,6 +836,7 @@ export async function generateSiliconeShell(
               z: shellBbox.max[2],
             },
           };
+          if (onPhase) await onPhase('slicing');
           const rawPieces = sliceShellRadial(
             toplevel,
             printShellFull,
@@ -760,6 +849,7 @@ export async function generateSiliconeShell(
           printShellFull = undefined;
           const tSlice = performance.now();
 
+          if (onPhase) await onPhase('brims');
           // Add brim to each piece. `addBrim` consumes its input and
           // returns a fresh Manifold; we swap the array entry in-place
           // so the failure path can release all currently-owned pieces
@@ -797,6 +887,7 @@ export async function generateSiliconeShell(
           }
           const tBrim = performance.now();
 
+          if (onPhase) await onPhase('slab');
           // Step 6: Wave D base slab + plug. Slice the transformed
           // master at its lowest Y, offset the footprint twice (outer
           // slab ring, inner plug ring), extrude each, union into one

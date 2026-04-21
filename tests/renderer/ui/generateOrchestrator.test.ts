@@ -30,8 +30,14 @@ import type { MoldGenerationResult } from '@/geometry/generateMold';
 import { LAY_FLAT_COMMITTED_EVENT } from '@/renderer/scene/layFlatController';
 import { __resetGenerateEpochForTests, getGenerateEpoch } from '@/renderer/ui/generateEpoch';
 import { attachGenerateInvalidation } from '@/renderer/ui/generateInvalidation';
-import { createGenerateOrchestrator } from '@/renderer/ui/generateOrchestrator';
-import { DEFAULT_PARAMETERS } from '@/renderer/state/parameters';
+import {
+  createGenerateOrchestrator,
+  type GenerateOrchestratorDeps,
+} from '@/renderer/ui/generateOrchestrator';
+import {
+  DEFAULT_PARAMETERS,
+  type MoldParameters,
+} from '@/renderer/state/parameters';
 
 /**
  * Build a hand-resolvable promise so the test can interleave the
@@ -744,6 +750,10 @@ describe('generateOrchestrator — print-shell + base-slab disposal', () => {
     expect(sceneSetPrintableParts).toHaveBeenCalledWith({
       shellPieces: result.shellPieces,
       basePart: result.basePart,
+      // Issue #87 Fix 2: orchestrator forwards the slab thickness
+      // through to the scene sink so the viewport can lift the
+      // assembly.
+      baseSlabThickness_mm: DEFAULT_PARAMETERS.baseSlabThickness_mm,
     });
     for (const p of result.shellPieces) {
       expect(p.delete).not.toHaveBeenCalled();
@@ -784,5 +794,140 @@ describe('generateOrchestrator — print-shell + base-slab disposal', () => {
     expect(sceneSetPrintableParts).toHaveBeenCalledTimes(1);
     expect(button.setError).toHaveBeenLastCalledWith('print-shell adapter boom');
     expect(button.setBusy).toHaveBeenLastCalledWith(false);
+  });
+});
+
+describe('generateOrchestrator — progress status (issue #87 Fix 1)', () => {
+  test('forwards every onPhase call through status.setPhase with translated labels', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const status = {
+      setPhase: vi.fn<(label: string | null) => void>(),
+    };
+    const translatePhase = vi.fn<(key: string) => string>((k) => `label:${k}`);
+
+    // Fake generate that walks through each phase, awaiting onPhase.
+    const generate = async (
+      _m: Manifold,
+      _p: MoldParameters,
+      _t: Matrix4,
+      onPhase?: (k: string) => void | Promise<void>,
+    ): Promise<MoldGenerationResult> => {
+      if (onPhase) {
+        await onPhase('silicone');
+        await onPhase('shell');
+        await onPhase('slicing');
+        await onPhase('brims');
+        await onPhase('slab');
+      }
+      return makeResult();
+    };
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: generate as GenerateOrchestratorDeps['generate'],
+      topbar,
+      button,
+      status,
+      translatePhase,
+      logger: { error: () => {} },
+    });
+
+    await orchestrator.run();
+
+    // Every phase translated + forwarded through the sink.
+    expect(translatePhase).toHaveBeenCalledWith('silicone');
+    expect(translatePhase).toHaveBeenCalledWith('shell');
+    expect(translatePhase).toHaveBeenCalledWith('slicing');
+    expect(translatePhase).toHaveBeenCalledWith('brims');
+    expect(translatePhase).toHaveBeenCalledWith('slab');
+    expect(status.setPhase).toHaveBeenCalledWith('label:silicone');
+    expect(status.setPhase).toHaveBeenCalledWith('label:shell');
+    expect(status.setPhase).toHaveBeenCalledWith('label:slicing');
+    expect(status.setPhase).toHaveBeenCalledWith('label:brims');
+    expect(status.setPhase).toHaveBeenCalledWith('label:slab');
+    // Final setPhase(null) fires on the happy-path terminal branch.
+    expect(status.setPhase).toHaveBeenLastCalledWith(null);
+  });
+
+  test('setPhase(null) fires on generate rejection', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const status = {
+      setPhase: vi.fn<(label: string | null) => void>(),
+    };
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => Promise.reject(new Error('boom')),
+      topbar,
+      button,
+      status,
+      logger: { error: () => {} },
+    });
+
+    await orchestrator.run();
+
+    expect(status.setPhase).toHaveBeenLastCalledWith(null);
+  });
+
+  test('setPhase(null) fires on stale-drop', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const status = {
+      setPhase: vi.fn<(label: string | null) => void>(),
+    };
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      status,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    const { bumpGenerateEpoch } = await import('@/renderer/ui/generateEpoch');
+    bumpGenerateEpoch(); // make current run stale
+    d.resolve(makeResult());
+    await runPromise;
+
+    expect(status.setPhase).toHaveBeenLastCalledWith(null);
+  });
+
+  test('generate runs without onPhase when status is not wired', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const capturedOnPhase = vi.fn();
+
+    const generate = (
+      _m: Manifold,
+      _p: MoldParameters,
+      _t: Matrix4,
+      onPhase?: (k: string) => void | Promise<void>,
+    ): Promise<MoldGenerationResult> => {
+      capturedOnPhase(onPhase);
+      return Promise.resolve(makeResult());
+    };
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: generate as GenerateOrchestratorDeps['generate'],
+      topbar,
+      button,
+      logger: { error: () => {} },
+    });
+
+    await orchestrator.run();
+
+    expect(capturedOnPhase).toHaveBeenCalledWith(undefined);
   });
 });
