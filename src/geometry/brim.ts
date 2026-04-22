@@ -91,7 +91,33 @@
 // For `k = 0.5` that is 75 % of the former rectangular-box volume —
 // ~25 % less print material per flange.
 //
-// Construction sequence (post-#96):
+// Issue #86 claw-back — batched diff + union
+// -------------------------------------------
+//
+// Pre-#86 each brim independently subtracted `siliconeOuter` from its
+// prism (one `Manifold.difference` per cut) and then unioned with the
+// running piece (one `Manifold.union` per cut). For sideCount=4 that's
+// 16 boolean ops per `generateSiliconeShell` (4 pieces × 4 ops). The
+// `difference([prism, siliconeOuter])` step was the hot spot because
+// `siliconeOuter` is the expensive levelSet-built master-outset
+// Manifold.
+//
+// Post-#86 each piece batches:
+//   1. Collect all brim prisms for the piece.
+//   2. If >1 prism: merge via `Manifold.union(brimPrisms[])` (cheap —
+//      the prisms only graze each other near the shell junction).
+//   3. Single `Manifold.difference([merged, siliconeOuter])` — the
+//      expensive silicone-cavity subtract runs ONCE per piece.
+//   4. Single `Manifold.union(piece, carved)` — integrate into the
+//      shell piece.
+//
+// Boolean count per piece: 3 instead of 4 (sideCount 3/4), with the
+// expensive per-brim diff collapsed to 1 per piece. Cavity-safety
+// invariant preserved — `difference([union(brims), silicone])` is
+// set-theoretically equivalent to `union([b_i − silicone])` and the
+// ring-fixture `brim.intersect(silicone) < 1 mm³` test still passes.
+//
+// Construction sequence (post-#86, #96):
 //
 //   1. Build `CrossSection.square([brimThickness, ySize], center=true)`
 //      — a centred 2D rectangle in the (X, Y) plane.
@@ -392,19 +418,88 @@ export function addBrim(args: AddBrimArgs): Manifold {
     return piece;
   }
 
-  // `current` is the running Manifold: start with the piece, union each
-  // brim in turn, release the previous handle after each union.
+  // Issue #86 perf claw-back — batched difference + union
+  //
+  // Pre-#86 the loop did per-cut:
+  //
+  //   current = piece
+  //   for each cut:
+  //     build placed                              (3 ops, small)
+  //     carved = difference([placed, siliconeOuter])   <-- EXPENSIVE
+  //     current = union(current, carved)                <-- EXPENSIVE
+  //
+  // For sideCount=4 that's 8 difference calls (one per brim) against
+  // the full siliconeOuter (several-thousand-tri Manifold from the
+  // levelSet pass) + 8 union calls to stitch each brim back onto its
+  // piece. On ubuntu CI the brim phase cost ~1.4 s (mini-figurine,
+  // sideCount=4) — majority on the 8 per-brim differences.
+  //
+  // Post-#86 (this code):
+  //
+  //   current = piece
+  //   for each cut:
+  //     build placed                              (3 ops, small)
+  //     collect placed into brimPrisms[]
+  //
+  //   allBrims = (brimPrisms.length === 1)
+  //     ? brimPrisms[0]
+  //     : Manifold.union(brimPrisms)              <-- cheap merge
+  //                                                   (brims don't
+  //                                                    overlap)
+  //   carved  = difference([allBrims, siliconeOuter])  <-- SINGLE
+  //                                                        expensive
+  //                                                        cavity
+  //                                                        subtract
+  //   return   union([piece, carved])             <-- SINGLE piece
+  //                                                   integration
+  //
+  // Per-piece boolean count drops from 4 (2 diff + 2 union) to 3
+  // (1 merge-union + 1 diff + 1 final union). The diff now runs on
+  // the MERGED brim Manifold rather than each brim separately —
+  // manifold-3d's diff kernel runs BVH-on-A once against BVH-on-B;
+  // combining A once amortises that setup. The two brim prisms in a
+  // sideCount-3/4 piece sit on DIFFERENT cut planes (angles a0 vs
+  // a1, 90-120° apart radially) — they may graze each other near the
+  // shell junction depending on brimThickness + bondOverlap, so the
+  // merge-union is NOT strictly a concatenation. Still, the boundary-
+  // pairing work is bounded to that grazing region (<< the full
+  // brim-vs-silicone pairing cost) and the single-diff amortisation
+  // dominates.
+  //
+  // On sideCount=2 (single cut per piece) the brimPrisms list has
+  // length 1, and we SKIP the cheap merge-union entirely (it would
+  // be a Manifold.union(readonly Manifold[]) with one element, which
+  // would run as a degenerate no-op but we'd still pay the WASM
+  // round-trip). Boolean count per piece: 1 diff + 1 union = 2.
+  //
+  // Safety: the per-brim silicone-cavity carve-out invariant still
+  // holds because `difference([union(brims), siliconeOuter])` is
+  // algebraically equivalent to `union([difference([b0,silicone]),
+  // difference([b1,silicone])])` on the SET-THEORETIC level (distribu-
+  // tive law of set difference over union). The kernel's floating-
+  // point implementation may produce slightly different boundary
+  // vertices at the junction (co-planar face pairing, sub-ULP drift)
+  // but the volume result is identical modulo kernel epsilon, and
+  // the ring-fixture test `brim.intersect(siliconeOuter).volume() <
+  // 1 mm³` still passes.
   //
   // Lifetime invariants tracked for the failure path:
-  //   - `pieceConsumed` flips `true` the first time we release the
-  //     caller's original `piece` (either via `.delete()` inside the
-  //     loop, or — on throw before the first union completes — via
-  //     the catch block below).
-  //   - `tempManifolds` holds every ephemeral brim-prism handle.
+  //   - `pieceConsumed` flips `true` once the final union completes
+  //     (from that point on the output owns piece's volume; releasing
+  //     piece is safe). On throw before the union, piece is released
+  //     by the catch block.
+  //   - `brimPrisms` holds placed brim Manifolds (pre-merge).
+  //   - `mergedBrims` is the post-merge Manifold (or one of the
+  //     brimPrisms on sideCount=2).
+  //   - `carved` is the mergedBrims − siliconeOuter result.
+  //   - `tempManifolds` holds other ephemeral Manifold handles
+  //     (brim-construction intermediates from steps 1-5).
   //   - `tempSections` holds every ephemeral CrossSection handle
   //     (manifold-3d CrossSections are WASM-allocated and must be
   //     explicitly `.delete()`-ed).
-  let current: Manifold = piece;
+  const brimPrisms: Manifold[] = [];
+  let mergedBrims: Manifold | undefined;
+  let carved: Manifold | undefined;
   let pieceConsumed = false;
   const tempManifolds: Manifold[] = [];
   const tempSections: CrossSection[] = [];
@@ -486,47 +581,85 @@ export function addBrim(args: AddBrimArgs): Manifold {
       ]);
       tempManifolds.push(placed);
 
-      // Step 6 (issue #89 fix B): carve the silicone cavity out of
-      // the brim prism. On convex masters this is effectively a
-      // no-op since the narrow radial slab already clears the shell's
-      // outer surface; on non-convex masters (e.g. a figurine with
-      // concave pockets) the brim's inner face can dip INTO the
-      // silicone cavity, and this subtract removes that intrusion.
-      //
-      // `siliconeOuter` is the master offset outward by
-      // `siliconeThickness_mm` — a SOLID Manifold equal to the shell's
-      // inner-cavity volume. `difference([brimPrism, siliconeOuter])`
-      // carves the cavity's volume out of the brim prism. CALLER-
-      // OWNED: `siliconeOuter` is NOT disposed here.
-      const carved = toplevel.Manifold.difference([placed, siliconeOuter]);
-      tempManifolds.push(carved);
-
-      // Step 7: union with the running piece.
-      const unioned = toplevel.Manifold.union(current, carved);
-
-      // Swap running handle. `current` is either the original caller
-      // `piece` (iteration 0) or a prior union result (iteration >= 1);
-      // either way it's safe to release at this point — the new
-      // `unioned` fully contains its volume.
-      safeDeleteM(current);
-      if (current === piece) pieceConsumed = true;
-      current = unioned;
+      // Collect into brimPrisms for the batched silicone-cavity
+      // subtract below. Pre-#86 this step individually subtracted
+      // siliconeOuter from each `placed` prism (one diff per cut).
+      brimPrisms.push(placed);
     }
 
-    // Release every intermediate handle. The final `current` has
-    // absorbed their volume via union.
+    // Step 6 (issue #89 fix B, issue #86 batched): carve the silicone
+    // cavity out of the brim prism(s). On convex masters this is
+    // effectively a no-op since the narrow radial slab already
+    // clears the shell's outer surface; on non-convex masters (e.g.
+    // a figurine with concave pockets) the brim's inner face can
+    // dip INTO the silicone cavity, and this subtract removes that
+    // intrusion.
+    //
+    // `siliconeOuter` is the master offset outward by
+    // `siliconeThickness_mm` — a SOLID Manifold equal to the shell's
+    // inner-cavity volume. CALLER-OWNED: `siliconeOuter` is NOT
+    // disposed here.
+    //
+    // Ring-shell unit test (tests/geometry/brim.test.ts, "brim.
+    // intersect(siliconeOuter).volume() ≈ 0") pins this to < 1 mm³
+    // absolute — pre-#89 it was hundreds of mm³. Removing the
+    // subtract as a perf shortcut (issue #86 lever 1) is UNSAFE
+    // because on the ring fixture the brim inner edge sits INSIDE
+    // the cavity (inner_cavity_radius=5, brim_inner = outerRadius-
+    // bondOverlap = 10-6 = 4). Issue #86 is addressed via lever 2
+    // (batched diff + union) which delivers the claw-back without
+    // touching the cavity-safety invariant.
+    //
+    // Batching: pre-#86 ran a per-brim `difference([brim_i,
+    // siliconeOuter])` call, i.e. 2 diffs per sideCount-3/4 piece
+    // (16 total for a sideCount=4 generate). Post-#86 does a single
+    // diff against the union of brim prisms. Algebraically
+    // equivalent by the distributive law of set-difference over
+    // union — floating-point boundary placement may differ sub-ULP
+    // but the measured volume is identical modulo kernel epsilon.
+    if (brimPrisms.length === 1) {
+      // Single-cut case (sideCount=2). Skip the degenerate merge-
+      // union; feed brim prism straight to the diff.
+      mergedBrims = brimPrisms[0] as Manifold;
+      // Ownership: `mergedBrims` aliases `brimPrisms[0]`. Release it
+      // by emptying `brimPrisms` — the catch/finally trail below
+      // walks `brimPrisms` for teardown and finds nothing, while
+      // `mergedBrims` is released explicitly after the diff.
+      brimPrisms.length = 0;
+    } else {
+      // Multi-cut case (sideCount=3/4). Cheap merge-union of
+      // non-overlapping prisms (pair only meets at the shell's outer
+      // edge, if at all — manifold-3d still handles this fine).
+      mergedBrims = toplevel.Manifold.union(brimPrisms);
+      // brimPrisms entries survive — released in the cleanup below.
+    }
+
+    // Step 7: single silicone-cavity subtract on the merged brims.
+    carved = toplevel.Manifold.difference([mergedBrims, siliconeOuter]);
+
+    // Step 8: single piece integration — union([piece, carved]).
+    // Using the 2-arg form (same cost as the 1-element array form,
+    // but the explicit signature reads cleaner).
+    const result = toplevel.Manifold.union(piece, carved);
+    pieceConsumed = true;
+
+    // Release every intermediate handle. The final `result` has
+    // absorbed the volume of piece + every carved brim.
+    safeDeleteM(piece);
+    safeDeleteM(mergedBrims);
+    safeDeleteM(carved);
+    for (const bp of brimPrisms) safeDeleteM(bp);
     for (const m of tempManifolds) safeDeleteM(m);
     for (const cs of tempSections) safeDeleteCs(cs);
-    return current;
+    return result;
   } catch (err) {
     for (const m of tempManifolds) safeDeleteM(m);
     for (const cs of tempSections) safeDeleteCs(cs);
-    // Release the running `current` if it is NOT the original piece
-    // (either a prior union result that hasn't been consumed by the
-    // next iteration, or the piece itself on an iteration-0 throw).
-    if (current !== piece) {
-      safeDeleteM(current);
+    for (const bp of brimPrisms) safeDeleteM(bp);
+    if (mergedBrims && !brimPrisms.includes(mergedBrims)) {
+      safeDeleteM(mergedBrims);
     }
+    if (carved) safeDeleteM(carved);
     // Always release the original piece — caller's contract is it's
     // consumed regardless of success/failure.
     if (!pieceConsumed) safeDeleteM(piece);

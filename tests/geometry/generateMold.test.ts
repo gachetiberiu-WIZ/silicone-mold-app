@@ -37,6 +37,7 @@ import {
   manifoldToBufferGeometry,
 } from '@/geometry';
 import type { MoldGenerationResult } from '@/geometry/generateMold';
+import { resolveEdgeLength } from '@/geometry/generateMold';
 import { DEFAULT_PARAMETERS, type MoldParameters } from '@/renderer/state/parameters';
 import { fixtureExists, fixturePaths } from '@fixtures/meshes/loader';
 import { readFileSync } from 'node:fs';
@@ -1047,6 +1048,142 @@ describe('generateSiliconeShell — resinVolume tracks viewTransform (issue #81)
       master.delete();
     }
   }, 30_000);
+});
+
+describe('resolveEdgeLength — adaptive floor for large masters (issue #76)', () => {
+  // Pure-function coverage: `resolveEdgeLength` takes a silicone
+  // thickness and a manifold-3d `Box` (min/max 3-tuples) and returns
+  // the edgeLength to feed `Manifold.levelSet`. The adaptive floor is
+  // `cbrt(bboxVol / ADAPTIVE_EDGELENGTH_TARGET_BBOX_VOL_MM3)`
+  // (150_000 mm³ target). Max of three floors: 2.0 static,
+  // siliconeThickness/4, and the adaptive floor.
+  //
+  // These tests pin the example calculations documented in the
+  // `resolveEdgeLength` docstring — if someone tweaks the target
+  // volume, these assertions must be re-derived.
+  test('mini-figurine-sized bbox (~50×70×40 mm) stays at the 2.0 mm static floor', () => {
+    // bboxVol = 140_000; adaptive ≈ cbrt(0.93) ≈ 0.98 → static wins.
+    const bbox = {
+      min: [0, 0, 0] as [number, number, number],
+      max: [50, 70, 40] as [number, number, number],
+    };
+    const el = resolveEdgeLength(5, bbox);
+    expect(el).toBeCloseTo(2.0, 6);
+  });
+
+  test('testing-mold-sized bbox (~100×80×160 mm) gently raises past 2.0 mm', () => {
+    // bboxVol = 1.28M; adaptive ≈ cbrt(8.53) ≈ 2.04.
+    const bbox = {
+      min: [0, 0, 0] as [number, number, number],
+      max: [100, 80, 160] as [number, number, number],
+    };
+    const el = resolveEdgeLength(5, bbox);
+    // Adaptive floor should win — expect > 2.0 mm but under 3.0 mm.
+    expect(el).toBeGreaterThan(2.0);
+    expect(el).toBeLessThan(3.0);
+    // Explicit cbrt value to ±1 %.
+    expect(el).toBeCloseTo(Math.cbrt((100 * 80 * 160) / 150_000), 4);
+  });
+
+  test('large 200×200×200 mm bbox reaches edgeLength >= 3.0 mm', () => {
+    // bboxVol = 8M; adaptive ≈ cbrt(53.3) ≈ 3.77.
+    const bbox = {
+      min: [-100, -100, -100] as [number, number, number],
+      max: [100, 100, 100] as [number, number, number],
+    };
+    const el = resolveEdgeLength(5, bbox);
+    expect(el).toBeGreaterThanOrEqual(3.0);
+    expect(el).toBeCloseTo(Math.cbrt((200 * 200 * 200) / 150_000), 4);
+  });
+
+  test('thick-wall master: siliconeThickness/4 floor wins when adaptive is low', () => {
+    // Silicone thickness = 20 mm → static thin-wall floor = 20/4 = 5 mm.
+    // Small bbox (10×10×10 = 1000 mm³) → adaptive = cbrt(1000/150_000)
+    // ≈ 0.187 mm (dormant). Static 2.0 and silicone/4 = 5 compete;
+    // silicone/4 wins.
+    const bbox = {
+      min: [0, 0, 0] as [number, number, number],
+      max: [10, 10, 10] as [number, number, number],
+    };
+    const el = resolveEdgeLength(20, bbox);
+    expect(el).toBeCloseTo(5.0, 6);
+  });
+
+  test('degenerate (zero-volume) bbox falls back to the static 2.0 floor', () => {
+    // Empty-bbox path: min == max → bboxVol = 0. Adaptive floor =
+    // cbrt(0) = 0. Static 2.0 wins.
+    const bbox = {
+      min: [1, 2, 3] as [number, number, number],
+      max: [1, 2, 3] as [number, number, number],
+    };
+    const el = resolveEdgeLength(5, bbox);
+    expect(el).toBeCloseTo(2.0, 6);
+  });
+
+  test('scaled-unit-cube pipeline: 50× scaled master hits adaptive floor and still finishes', async () => {
+    // Integration test: a 50×50×50 mm cube (unit cube × 50 scale) has
+    // bboxVol = 125_000 mm³ raw (pre-transform); post 50×50×50 scale
+    // it's 125_000 mm³. Adaptive ≈ cbrt(125k/150k) ≈ 0.94 → static
+    // wins. Scale to 100×100×100 (via separate cube dim) to push
+    // adaptive past 2.0.
+    //
+    // We build a 200×200×200 mm cube via `Manifold.cube` so it sits
+    // at the "large master" target: edgeLength should climb to ~3.77
+    // and the generate pipeline should still produce a watertight
+    // silicone + shell without blowing the 12 s budget.
+    const toplevel = await initManifold();
+    const bigCube = toplevel.Manifold.cube([200, 200, 200], true);
+    try {
+      // Pre-check via the pure function — adaptive floor dominates here.
+      const bboxForCheck = bigCube.boundingBox();
+      const el = resolveEdgeLength(5, bboxForCheck);
+      expect(el).toBeGreaterThanOrEqual(3.0);
+
+      const t0 = performance.now();
+      const result = await generateSiliconeShell(
+        bigCube,
+        params({ siliconeThickness_mm: 5, printShellThickness_mm: 8 }),
+        new Matrix4(),
+      );
+      const elapsed = performance.now() - t0;
+      try {
+        // Pipeline completes and produces manifold outputs.
+        expect(isManifold(result.silicone)).toBe(true);
+        expect(result.silicone.isEmpty()).toBe(false);
+        expect(result.shellPieces.length).toBe(DEFAULT_PARAMETERS.sideCount);
+        for (const piece of result.shellPieces) {
+          expect(isManifold(piece)).toBe(true);
+          expect(piece.isEmpty()).toBe(false);
+        }
+
+        // Resin identity still holds with the coarser grid.
+        const masterVol = bigCube.volume();
+        expect(result.resinVolume_mm3).toBeCloseTo(masterVol, 6);
+
+        // Perf budget: 200³ cube at edgeLength 3.77 has roughly the
+        // same sample count as the mini-figurine at 2.0 mm (both hit
+        // ~150k target). Pipeline should stay comfortably under the
+        // mini-figurine budget (12 s) — the whole point of the
+        // adaptive floor.
+        //
+        // Skipped under coverage instrumentation (coverage slows the
+        // closure-heavy SDF loop ~7×).
+        const worker = (
+          globalThis as {
+            __vitest_worker__?: { config?: { coverage?: { enabled?: boolean } } };
+          }
+        ).__vitest_worker__;
+        const coverageEnabled = !!worker?.config?.coverage?.enabled;
+        if (!coverageEnabled) {
+          expect(elapsed).toBeLessThan(12_000);
+        }
+      } finally {
+        disposeAll(result);
+      }
+    } finally {
+      bigCube.delete();
+    }
+  }, 60_000);
 });
 
 describe('generateSiliconeShell — Generate×3 leak check', () => {

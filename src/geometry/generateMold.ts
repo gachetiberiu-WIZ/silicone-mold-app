@@ -184,6 +184,18 @@ const PRINT_SHELL_POUR_EDGE_MM = 3;
 const PRINT_SHELL_POUR_CHANNEL_SLOP_MM = 2;
 
 /**
+ * Target raw-bbox volume (mm³) that tunes the adaptive edgeLength floor
+ * for large masters (issue #76). See `resolveEdgeLength` for the full
+ * derivation + example calculations.
+ *
+ * Picked so that a 200×200×200 mm master lands at edgeLength ≥ 3.0 mm
+ * (cbrt(8e6 / 150_000) ≈ 3.77) while a mini-figurine-sized master
+ * (bboxVol ~140k mm³) stays at the static 2.0 mm floor
+ * (cbrt(140k / 150_000) ≈ 0.98, clamped by the static floor).
+ */
+const ADAPTIVE_EDGELENGTH_TARGET_BBOX_VOL_MM3 = 150_000;
+
+/**
  * LevelSet grid spacing (mm). Tuned for the mini-figurine to land under
  * the CI budget while still giving a visually plausible silicone body.
  *
@@ -201,11 +213,78 @@ const PRINT_SHELL_POUR_CHANNEL_SLOP_MM = 2;
  * for preview + volume), tighten this back toward
  * `min(0.3 × siliconeThickness, 1 mm)` per the skill default.
  *
+ * Issue #76 — adaptive edgeLength for large masters
+ * -------------------------------------------------
+ *
+ * Pre-#76 the floor was a static `max(2.0, siliconeThickness/4)`. On
+ * masters with large bboxes (the user's "Testing Mold .stl" dogfood,
+ * bbox ~100×80×160 mm, ~1.28M mm³) the BCC sample count at edgeLength=
+ * 2.0 mm scaled ~30× vs the mini-figurine — observed ~53 s generate
+ * where mini-figurine is ~7 s.
+ *
+ * Fix: add a THIRD floor term derived from the master's raw bbox
+ * volume. At 150_000 mm³ target volume, the adaptive floor is
+ * `cbrt(bboxVol / 150_000)`. The overall edgeLength is the MAX of
+ * three floors:
+ *
+ *   1. Static 2.0 mm (preview-fidelity floor, issue #71).
+ *   2. Wall-thickness-proportional `siliconeThickness / 4` (skill
+ *      default for thin-wall masters).
+ *   3. Adaptive `cbrt(bboxVol / 150_000)` (this fix).
+ *
+ * Example calculations (raw master bbox volume):
+ *
+ *   - Mini-figurine (~50×70×40 mm, bboxVol≈140k mm³):
+ *       adaptive = cbrt(0.93) ≈ 0.98 → floor stays at 2.0 mm
+ *       (static wins). Mini-figurine CI perf unchanged — a hard
+ *       requirement of #76's AC "mini-figurine CI stays <5 s".
+ *   - Testing-mold (~100×80×160 mm, bboxVol≈1.28M mm³):
+ *       adaptive = cbrt(8.53) ≈ 2.04 → floor=2.04 mm. Sample count
+ *       drops ~1 % vs 2.0 mm — gentle smoothing.
+ *   - Large master (200×200×200 mm, bboxVol=8M mm³):
+ *       adaptive = cbrt(53.3) ≈ 3.77 → floor=3.77 mm. Sample count
+ *       drops ~7× vs 2.0 mm — the ~30-50 s generate on such masters
+ *       falls toward the #76 AC "<20 s locally".
+ *
+ * The cbrt floor is ≈ 1/edge of the grid in the direction of each
+ * axis: if we wanted a fixed TOTAL sample count `N` regardless of bbox
+ * size, we'd solve `edgeLength³ × N = bboxVol` → `edgeLength =
+ * cbrt(bboxVol / N)`. 150k ≈ "the sample count that makes a cube the
+ * size of a mini-figurine run at 2 mm edgeLength" — so below that
+ * threshold the adaptive floor is dormant and the static 2 mm
+ * controls, above it the adaptive floor picks up linearly in cube-root
+ * of bbox volume.
+ *
+ * Fidelity risk: at 3.77 mm edgeLength on a 200 mm master, the
+ * silicone outer is sampled at roughly `200 / 3.77 ≈ 53` cells per
+ * axis — marching-tetrahedra on a `siliconeThickness = 5 mm` offset
+ * (~1.3 grid cells deep) will produce a noticeably coarser iso-surface
+ * than the mini-figurine gets. For v1 this is acceptable: the
+ * silicone is a PREVIEW/volume body, not a printable artefact. When a
+ * future wave ships printable silicone, tighten the target volume
+ * (raise N) so the floor stays below `siliconeThickness / 3` even on
+ * large masters.
+ *
  * Thanks to the QA follow-up on PR #70 + issue #71 for surfacing the
- * pre-Wave-B perf regression.
+ * pre-Wave-B perf regression, and to the dogfood on "Testing Mold
+ * .stl" for surfacing the large-master perf cliff (#76).
+ *
+ * @param siliconeThickness_mm Silicone layer thickness in mm.
+ * @param masterBbox Axis-aligned bounding box of the TRANSFORMED
+ *   master (post-viewTransform). Used to derive the adaptive floor.
  */
-function resolveEdgeLength(siliconeThickness_mm: number): number {
-  return Math.max(2.0, siliconeThickness_mm / 4);
+export function resolveEdgeLength(
+  siliconeThickness_mm: number,
+  masterBbox: Box,
+): number {
+  const dx = masterBbox.max[0] - masterBbox.min[0];
+  const dy = masterBbox.max[1] - masterBbox.min[1];
+  const dz = masterBbox.max[2] - masterBbox.min[2];
+  const bboxVol = Math.max(0, dx) * Math.max(0, dy) * Math.max(0, dz);
+  const adaptiveFloor = Math.cbrt(
+    bboxVol / ADAPTIVE_EDGELENGTH_TARGET_BBOX_VOL_MM3,
+  );
+  return Math.max(2.0, siliconeThickness_mm / 4, adaptiveFloor);
 }
 
 /**
@@ -638,7 +717,13 @@ export async function generateSiliconeShell(
   try {
     assertManifold(transformedMaster, 'transformed master');
 
-    const edgeLength = resolveEdgeLength(parameters.siliconeThickness_mm);
+    // Compute the transformed-master bbox up front so `resolveEdgeLength`
+    // can consult it for the adaptive floor (issue #76).
+    const masterBbox = transformedMaster.boundingBox();
+    const edgeLength = resolveEdgeLength(
+      parameters.siliconeThickness_mm,
+      masterBbox,
+    );
     const siliconeThickness = parameters.siliconeThickness_mm;
     const shellThickness = parameters.printShellThickness_mm;
     const totalOffset = siliconeThickness + shellThickness;
@@ -692,8 +777,6 @@ export async function generateSiliconeShell(
     );
     const tSdf = performance.now();
     try {
-      const masterBbox = transformedMaster.boundingBox();
-
       // Issue #74 perf fix: unify the two levelSet bounds onto one grid.
       //
       // manifold-3d's `levelSet` derives its BCC sample lattice from
