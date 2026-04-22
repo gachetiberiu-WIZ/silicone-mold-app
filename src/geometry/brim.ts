@@ -176,21 +176,6 @@ import { pieceMidAngleRad } from './shellSlicer';
 import { SIDE_CUT_ANGLES } from './sideAngles';
 
 /**
- * Multiplier applied to `printShellThickness_mm` to compute
- * `bondOverlap` — how far the brim extends INWARD past the shell's
- * outer surface so it fuses mechanically with the shell wall after the
- * union.
- *
- * Kept at 2.0 post-conformal fix (was 2.0 pre-fix too). The inward
- * offset is applied in 2D on the conformal cross-section, so the
- * inner boundary of the brim ring is a shrunken copy of the shell's
- * outer silhouette at each Y. The silicone-cavity subtract in step 12
- * still carves anything that dips past the shell's inner cavity,
- * making `bondOverlap` strictly a visual/mechanical-bonding knob.
- */
-const BOND_OVERLAP_MULTIPLIER = 2.0;
-
-/**
  * Clipper2 circular-segment count for round joins on the 2D offset.
  * 32 matches the value used elsewhere in the codebase (baseSlab.ts) —
  * plenty of smoothness for a ~10 mm offset without creating thousand-
@@ -308,7 +293,6 @@ export function addBrim(args: AddBrimArgs): Manifold {
     brimWidth_mm,
     brimThickness_mm,
     siliconeOuter,
-    printShellThickness_mm,
   } = args;
 
   const angles = args.angles ?? SIDE_CUT_ANGLES[sideCount];
@@ -358,13 +342,6 @@ export function addBrim(args: AddBrimArgs): Manifold {
   const shellMinY = shellBboxWorld.min.y;
   const shellMaxY = shellBboxWorld.max.y;
   const shellYSpan = Math.max(0, shellMaxY - shellMinY);
-
-  // bondOverlap (mm) = 2× shell thickness. Inward 2D offset distance
-  // applied to the shell-slice CrossSection.
-  const bondOverlap = Math.max(
-    0,
-    BOND_OVERLAP_MULTIPLIER * printShellThickness_mm,
-  );
 
   if (shellYSpan <= 0 || brimWidth_mm <= 0 || brimThickness_mm <= 0) {
     // Nothing sensible to build — return the piece unchanged.
@@ -522,28 +499,59 @@ export function addBrim(args: AddBrimArgs): Manifold {
       const csOutward = csOutwardRaw.intersect(clipRectPlaced);
       tempSections.push(csOutward);
 
-      // Step 4: shrink inward by bondOverlap (Round joins). Negative
-      // delta = contour retraction. On a non-convex master an inward
-      // offset can produce disjoint components; Clipper2's fill-rule
-      // handling keeps these consistent. No Y clipping needed — the
-      // inward profile is always strictly inside the shell slice,
-      // which is already bounded by the shell's Y range.
-      const csInward = csFilled.offset(
-        -bondOverlap,
-        'Round',
-        2,
-        OFFSET_CIRCULAR_SEGMENTS,
-      );
-      tempSections.push(csInward);
-
-      // Step 5: ring between outward and inward. If the inward offset
-      // collapsed to empty (a very thin shell slice + large
-      // bondOverlap), the subtract is a no-op and the ring defaults
-      // to the full outward profile — still a valid brim (just no
-      // mechanical-bond overlap into the shell wall on that slice,
-      // which would be caught by the siliconeOuter subtract
-      // downstream).
-      const brim2d = csOutward.subtract(csInward);
+      // Step 4: build the brim as (outer ring) ∪ (shell wall slice).
+      //
+      // Prior formulation was `csOutward − csInward` where csInward
+      // was `csFilled.offset(-bondOverlap)`. That produced a visible
+      // overhang tab at the top/bottom of the brim: the isotropic
+      // inward offset shrinks csInward in Y too, so at Y bands
+      // `[shellMinY, shellMinY + bondOverlap]` and `[shellMaxY −
+      // bondOverlap, shellMaxY]` csInward is empty and the subtract
+      // leaves the FULL csOutward band — a horizontal slab that
+      // extended from the brim's outer edge all the way inward to
+      // the shell's inner wall, poking INTO the shell's open pour
+      // cavity (where siliconeOuter doesn't extend, so the cavity
+      // carve-out downstream couldn't remove it).
+      //
+      // New formulation:
+      //
+      //   - `csOuterRing = csOutward − csFilled`: pure ring OUTSIDE
+      //     the shell silhouette, uniform `brimWidth` radial thickness
+      //     at every Y, naturally bounded to the shell's Y range
+      //     because csOutward already is (step 3b clip).
+      //   - `csBondRegion = csRaw`: the actual ANNULAR shell-wall
+      //     slice at the cut plane, UNMODIFIED. Its outer boundary
+      //     hugs the shell's outer surface and its inner boundary
+      //     hugs the shell's inner cavity surface. Provides the
+      //     mechanical bond where the brim fuses with the shell wall
+      //     via the downstream `Manifold.union(piece, brim)` step.
+      //   - `brim2d = csOuterRing ∪ csBondRegion`: combined shape
+      //     that extends from the shell's INNER wall outward to the
+      //     brim's outer edge — never into the open cavity above the
+      //     silicone, never above/below the shell's Y range.
+      //
+      // Bond depth dropped from `2 × printShellThickness_mm` to
+      // `1 × printShellThickness_mm` (the shell wall's own
+      // thickness). The old 2× multiplier existed to soften the
+      // seam on the pre-conformal rectangular brim; the conformal
+      // profile already blends visually because csOuterRing's inner
+      // edge is exactly the shell's outer silhouette.
+      //
+      // `BOND_OVERLAP_MULTIPLIER` is retained in the module for a
+      // possible future revival but is no longer used in the
+      // pipeline.
+      const csOuterRing = csOutward.subtract(csFilled);
+      tempSections.push(csOuterRing);
+      // csRaw must share the SAME X_cs ≥ 0 clip as csOutward for the
+      // adjacent-pieces-disjoint invariant: the other cut plane of the
+      // piece projects to the Y_cs axis in this cut's local 2D, so
+      // bond material must live strictly in the piece's half-plane.
+      // Without this clip, csRaw's full annular shell-wall slice
+      // spills into the adjacent piece's arc and the two brims
+      // overlap at the shared cut plane.
+      const csRawClipped = csRaw.intersect(clipRectPlaced);
+      tempSections.push(csRawClipped);
+      const brim2d = csRawClipped.add(csOuterRing);
       tempSections.push(brim2d);
 
       if (brim2d.isEmpty()) {
