@@ -34,66 +34,16 @@
 //   - Registration keys on future brim interfaces (Wave F).
 //   - Draft-angle application (separate wave).
 //
-// Offset algorithm — `Manifold.levelSet` over a BVH-driven SDF:
+// Offset algorithm + perf playbook:
 //
-//   The `mesh-operations` skill + ADR-002 both prescribe
-//   `Manifold.levelSet` as the quality-path offset for silicone walls.
-//   We use it TWICE against the SAME SDF closure:
-//
-//     Manifold.levelSet(sdf, unifiedBounds, edgeLength, -siliconeThickness)
-//       → silicone outer body
-//     Manifold.levelSet(sdf, unifiedBounds, edgeLength,
-//                       -(siliconeThickness + printShellThickness))
-//       → print-shell outer body
-//
-//   The SDF closure is stateless relative to the level parameter — the
-//   BVH built from the master geometry answers `closestPoint + ray-parity`
-//   the same way for every grid cell regardless of iso-value. So a single
-//   BVH build feeds both levelSet passes.
-//
-//   `edgeLength` governs both the BCC grid spacing AND the output mesh
-//   resolution. Wave C bumps the floor from 1.5 mm to 2.0 mm as the perf
-//   fix #71 — see `resolveEdgeLength` below. At the default silicone
-//   thickness of 5 mm this yields a 2.0 mm grid (down from 1.5 mm), ~60%
-//   fewer cells, bringing the mini-figurine back under the ~4 s CI budget.
-//
-// Issue #74 perf optimisations (this commit):
-//
-//   1. Unified bounds. Pre-#74 the silicone pass ran on a smaller grid
-//      (pad = siliconeThickness) and the shell pass on a larger grid
-//      (pad = siliconeThickness + shellThickness). manifold-3d derives
-//      the sample lattice from `bounds.min/max` with an internal step
-//      that only approximates `edgeLength`, so the two grids shared ZERO
-//      sample points in the overlap region. Using the LARGER bounds for
-//      BOTH calls makes every sample of the second pass a cache-key
-//      collision with a first-pass sample.
-//
-//   2. Quantised-key SDF cache. The SDF closure wraps a
-//      `Map<string, number>` keyed by `round(p·1e6)` triples. Combined
-//      with (1) this gives a 50% cache hit rate by construction — the
-//      shell-levelset cost collapses from ~3.4 s to ~550 ms on the
-//      mini-figurine.
-//
-//   3. Far-field early-out. For query points whose AABB distance from
-//      the master exceeds `max(|level|) + edgeLength`, the exact SDF
-//      value is immaterial to marching-tetrahedra output — they're
-//      always "outside the volume". The closure skips the BVH descent
-//      and returns a pre-computed constant below the deepest iso-level.
-//      Saves another ~10% of BVH work on a figurine, ~30% on a compact
-//      cube.
-//
-//   4. Non-axis-aligned parity ray. The pre-#74 raycast used
-//      `(1, 0, 0)`, which grazes axis-aligned mesh edges and returned
-//      ambiguous parity counts. Under (1)'s enlarged grid this
-//      surfaced as silent topology corruption (extra silicone
-//      components at the grid boundary). A prime-ratio ray direction
-//      never passes exactly through an edge or vertex on
-//      non-degenerate meshes. See `buildMasterSdf` for details.
-//
-//   Net: mini-figurine local wall-clock ~7.1 s → ~5.2 s (~27% faster);
-//   shell-levelset alone ~3.4 s → ~550 ms (~84% faster). CI is
-//   expected to see a similar ratio, bringing the 10 s ubuntu-CI run
-//   under the issue #72 5 s AC target.
+//   The pipeline calls `Manifold.levelSet` TWICE against the SAME SDF
+//   closure (silicone pass, then print-shell pass). See the
+//   mesh-operations skill's "LevelSet perf playbook" section for:
+//     - Unified grid bounds + quantised SDF cache (issue #74 #75).
+//     - Far-field early-out.
+//     - Non-axis-aligned parity ray (#74 topology-corruption fix).
+//     - edgeLength floor (#71 #86).
+//   Preserve those when editing this path.
 
 import { DoubleSide, Ray, Vector3 } from 'three';
 import type { BufferGeometry, Matrix4 } from 'three';
