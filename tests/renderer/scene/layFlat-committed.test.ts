@@ -219,8 +219,8 @@ describe('LAY_FLAT_COMMITTED_EVENT — commit path', () => {
    * The controller now uses `pointerdown`/`pointerup` instead of `click`
    * (issue #80 dogfood — Chromium drops `click` after ~5 px of pointer
    * travel, which was silently losing commits on hand-tremor). A zero-
-   * travel pointerdown→pointerup pair is always within the 6 px drag
-   * threshold so it always commits.
+   * travel pointerdown→pointerup pair is always within the drag
+   * threshold (10 px post-#94) so it always commits.
    */
   function drivePickAndCommit(): void {
     const { controller, canvas } = harness!;
@@ -300,7 +300,8 @@ describe('LAY_FLAT_COMMITTED_EVENT — click-vs-drag gate (issue #80 dogfood)', 
    * `click`, which Chromium suppresses whenever the pointer moves more
    * than ~5 CSS px between down and up — any hand-tremor during a click
    * silently dropped the commit. We now listen for pointerdown + pointerup
-   * ourselves and gate the commit on a 6 px travel threshold, so we own
+   * ourselves and gate the commit on a 10 px travel threshold (bumped
+   * from 6 px in issue #94 dogfood for high-DPI hand-tremor), so we own
    * the click-vs-drag decision instead of relying on Chromium's heuristic.
    */
   function dispatchDown(canvas: HTMLCanvasElement, x: number, y: number): void {
@@ -327,16 +328,16 @@ describe('LAY_FLAT_COMMITTED_EVENT — click-vs-drag gate (issue #80 dogfood)', 
     expect(controller.isCommitted()).toBe(true);
   });
 
-  test('small (<6 px) travel still commits — matches Chromium click behaviour', () => {
+  test('small (<10 px) travel still commits — matches Chromium click behaviour', () => {
     const { controller, canvas } = harness!;
     controller.enable();
     dispatchDown(canvas, 100, 100);
-    // 3 px diagonal travel — hypot(3, 0) = 3, under the 6 px threshold.
+    // 3 px diagonal travel — hypot(3, 0) = 3, under the 10 px threshold.
     dispatchUp(canvas, 103, 100);
     expect(controller.isCommitted()).toBe(true);
   });
 
-  test('travel > 6 px (drag) does NOT commit', () => {
+  test('travel > 10 px (drag) does NOT commit', () => {
     const { controller, canvas } = harness!;
     controller.enable();
     dispatchDown(canvas, 100, 100);

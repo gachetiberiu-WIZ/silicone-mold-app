@@ -111,11 +111,18 @@ const NORMAL_QUAD_SIZE_MM = 15;
  * dogfood) + gating on travel distance gives us a deterministic commit
  * threshold we control instead of relying on Chromium's heuristic.
  *
- * 6 px is a touch above Chromium's own threshold so a commit that WOULD
- * have fired a `click` still commits here; it's well below the distance
- * a user would call "a drag" on a 1920-px-wide canvas.
+ * Issue #94 Fix 3 (polish dogfood 2026-04-22): bumped 6 → 10 px. The
+ * original 6 px value was copied from Chromium's own touch-drag slop
+ * heuristic. On high-DPI displays (Windows scaling at 125-150 %, Retina
+ * macOS) the CSS-pixel distance the cursor moves during a brief mouse
+ * click routinely exceeds 6 — hand tremor plus the sub-pixel jitter
+ * high-DPI mice generate pushed the distance over the threshold roughly
+ * 1-in-5 clicks, silently dropping the commit. 10 px is still well
+ * below "a drag" (any intentional OrbitControls rotate moves the
+ * cursor ≥ 50 px across the canvas) but comfortably clears precision-
+ * trackpad + high-DPI mouse micro-travel.
  */
-const CLICK_DRAG_THRESHOLD_PX = 6;
+const CLICK_DRAG_THRESHOLD_PX = 10;
 
 /**
  * Angle tolerance (cosine) for coplanar flood-fill during hover (issue #67).

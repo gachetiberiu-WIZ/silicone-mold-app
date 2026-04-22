@@ -129,6 +129,35 @@ import { SIDE_CUT_ANGLES } from './sideAngles';
 const BRIM_Y_MARGIN_MM = 2;
 
 /**
+ * Multiplier applied to `printShellThickness_mm` to compute `bondOverlap`
+ * — how far the brim extends INWARD past the shell's outer surface so
+ * it fuses mechanically with the shell wall after the union.
+ *
+ * Issue #94 Fix 2 (polish dogfood 2026-04-22) — user reported the brim
+ * "looks tacked on" with a visible seam where it meets the shell.
+ * Investigation confirmed the brim IS `Manifold.union`-ed with each
+ * piece (single Manifold per piece, single mesh downstream; scene module
+ * mounts `sideCount` meshes, not `sideCount * 2`). This is case B from
+ * the issue: a real watertight surface with a sharp material-change
+ * angle, not a topological disjoint.
+ *
+ * Mitigation: bump the bond overlap from 1× to 1.5× the shell thickness.
+ * The brim's inner face now sits `0.5 × printShellThickness` DEEPER
+ * inside the shell material than before, so the fused profile transitions
+ * over a longer distance and looks more organically integrated. The
+ * siliconeOuter carve-out (step 5 of addBrim) still removes any inward
+ * intrusion past the shell's inner cavity — going past the shell
+ * thickness is harmless because the cavity subtract clips any material
+ * that would have poked through.
+ *
+ * A true fillet at the brim/shell junction is the right long-term fix
+ * (see follow-up). This dimensional tweak takes the visual sharpness
+ * from "tacked on" to "integrated flange" with zero new boolean ops on
+ * the common path.
+ */
+const BOND_OVERLAP_MULTIPLIER = 1.5;
+
+/**
  * Axis-aligned bbox in world mm. Uses the same `{min, max}` of 3-tuples
  * shape as `manifold.boundingBox()` for easy passthrough.
  */
@@ -247,10 +276,14 @@ export function addBrim(args: AddBrimArgs): Manifold {
 
   // Issue #89 fix (A): NARROW radial box.
   //
-  // `bondOverlap` = `printShellThickness_mm` — how far the brim extends
-  // INWARD past the shell's outer surface, to fuse mechanically with
-  // the shell wall after the union. The total radial width of the
-  // box is therefore `bondOverlap + brimWidth`. Its local +X frame:
+  // `bondOverlap` = `BOND_OVERLAP_MULTIPLIER × printShellThickness_mm`
+  // — how far the brim extends INWARD past the shell's outer surface,
+  // to fuse mechanically with the shell wall after the union. The
+  // multiplier was bumped from 1× to 1.5× in issue #94 (polish
+  // dogfood 2026-04-22) so the brim/shell junction transitions more
+  // organically and the brim no longer looks "tacked on". The total
+  // radial width of the box is therefore `bondOverlap + brimWidth`.
+  // Its local +X frame:
   //   - inner edge at local x = 0            → world radial
   //                                             `outerRadius - bondOverlap`
   //   - outer edge at local x = width        → world radial
@@ -259,12 +292,15 @@ export function addBrim(args: AddBrimArgs): Manifold {
   // offset applied in step 4 plants that center at world radial
   // `outerRadius + brimWidth/2 - bondOverlap/2` from xzCenter.
   //
-  // Cannot exceed the shell thickness — otherwise the brim pokes INTO
-  // the silicone cavity on the inner side. Step 5 (silicone-cavity
-  // subtract) carves any such intrusion defensively, but keeping
-  // `bondOverlap` ≤ `printShellThickness` avoids a costly boolean on
-  // the common path.
-  const bondOverlap = Math.max(0, printShellThickness_mm);
+  // Can legitimately exceed the shell thickness — step 5 (silicone-
+  // cavity subtract) carves any intrusion past the shell's inner
+  // cavity. The carve-out makes `bondOverlap` strictly a visual/
+  // mechanical-bonding knob independent of the hard "no poking the
+  // silicone" invariant.
+  const bondOverlap = Math.max(
+    0,
+    BOND_OVERLAP_MULTIPLIER * printShellThickness_mm,
+  );
   const width = bondOverlap + brimWidth_mm;
 
   if (ySize <= 0 || width <= 0 || brimThickness_mm <= 0) {
