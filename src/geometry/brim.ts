@@ -141,21 +141,24 @@ const BRIM_Y_MARGIN_MM = 2;
  * the issue: a real watertight surface with a sharp material-change
  * angle, not a topological disjoint.
  *
- * Mitigation: bump the bond overlap from 1× to 1.5× the shell thickness.
- * The brim's inner face now sits `0.5 × printShellThickness` DEEPER
- * inside the shell material than before, so the fused profile transitions
- * over a longer distance and looks more organically integrated. The
+ * First mitigation (#94): bump 1× → 1.5× the shell thickness.
+ *
+ * Issue #97 Fix 4 (polish dogfood 2026-04-21 round 3): the 1.5× bump
+ * still looked like a floating fin in the re-dogfood session. Going
+ * further to 2× — the brim's inner face now sits a full `shellThickness`
+ * DEEPER inside the shell material than its outer surface, so the
+ * fused profile transitions over twice the original bond depth. The
  * siliconeOuter carve-out (step 5 of addBrim) still removes any inward
  * intrusion past the shell's inner cavity — going past the shell
  * thickness is harmless because the cavity subtract clips any material
  * that would have poked through.
  *
  * A true fillet at the brim/shell junction is the right long-term fix
- * (see follow-up). This dimensional tweak takes the visual sharpness
- * from "tacked on" to "integrated flange" with zero new boolean ops on
- * the common path.
+ * (#96 tracks the fillet work). This dimensional tweak takes the visual
+ * sharpness further toward "integrated flange" with zero new boolean
+ * ops on the common path.
  */
-const BOND_OVERLAP_MULTIPLIER = 1.5;
+const BOND_OVERLAP_MULTIPLIER = 2.0;
 
 /**
  * Axis-aligned bbox in world mm. Uses the same `{min, max}` of 3-tuples

@@ -87,6 +87,7 @@
   },
   "status": {
     "phase": {
+      "starting": "Generating mold…",
       "silicone": "Building silicone…",
       "shell": "Building print shell…",
       "slicing": "Slicing shell pieces…",

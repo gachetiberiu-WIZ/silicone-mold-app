@@ -757,19 +757,105 @@ export function createLayFlatController(
   // canvas.  Replaces the `click` listener — Chromium suppresses `click`
   // when the down→up travel exceeds ~5 px, which was silently dropping
   // commits on anyone whose hand twitched during a pick.
+  //
+  // Issue #97 Fix 2 (polish dogfood 2026-04-21 round 3) — despite PR
+  // #95's 6→10 px widen, the face-pick commit was STILL dropping on
+  // some user devices. Three additional defensive relaxations landed:
+  //
+  //   (a) Primary-button gate uses `(ev.buttons & 1) === 1` OR
+  //       `ev.button === 0` instead of strict `ev.button === 0`. On
+  //       some precision-trackpad + high-DPI-mouse paths Chromium fires
+  //       `pointerup` with `button: 0` but also routes a pointerdown
+  //       with `button: -1` (re-entrant pen/touch coalescing). The
+  //       bitmask check catches all "primary clicking now" states.
+  //
+  //   (b) Target check uses `target.closest('canvas') === canvas` so
+  //       a pointerdown/up that lands on a stray child or adjacent
+  //       overlapping absolutely-positioned element (banner, toast,
+  //       axes-gizmo scissor region) still counts as a canvas event
+  //       as long as the cursor is inside the canvas's layout rect.
+  //       Strict `ev.target !== canvas` dropped legitimate clicks
+  //       whenever the pointerup target differed from the pointerdown
+  //       target — a subtle Chromium behaviour under high-DPI
+  //       fractional-pixel rounding.
+  //
+  //   (c) Fallback: if `ev.target` is not in the DOM tree AT ALL (rare
+  //       but possible when an event fires after element removal),
+  //       compare `ev.clientX/Y` against the canvas's bounding rect.
+  //       Inside the rect → treat as a canvas event.
   let downArmed = false;
   let downX = 0;
   let downY = 0;
 
+  /**
+   * Relaxed target check — returns true when the event's target is
+   * (or is descended from) the canvas. Falls back to a geometric
+   * inside-canvas-rect check ONLY when the event's target is a
+   * descendant of the #viewport container (so a user click on an
+   * accent absolutely-positioned overlay — progress banner, future
+   * axes-gizmo DOM widget — still registers as a canvas click), or
+   * when the target has been detached from the DOM entirely. A click
+   * whose target lives elsewhere in the app chrome (sidebar panel,
+   * topbar) is still rejected.
+   */
+  function eventIsOnCanvas(ev: PointerEvent): boolean {
+    const target = ev.target as Element | null;
+    if (!target || typeof target.closest !== 'function') {
+      // Target is null / non-Element — fall through to the geometric
+      // check below so these still work.
+    } else {
+      if (target.closest('canvas') === canvas) return true;
+      // If the target isn't inside our canvas, check whether it lives
+      // inside the shared #viewport container as a STRICT descendant
+      // (not the container itself). Only container descendants
+      // qualify for the geometric rescue; clicks that target the
+      // topbar / sidebar / body / viewport container itself never
+      // commit a face.
+      const viewportEl = canvas.parentElement;
+      if (
+        !viewportEl ||
+        target === viewportEl ||
+        !viewportEl.contains(target)
+      ) {
+        return false;
+      }
+    }
+    // Geometric fallback: if the cursor is inside the canvas's
+    // bounding rect, treat the event as a canvas event even when a
+    // child overlay of the viewport absorbed the DOM target.
+    const rect = canvas.getBoundingClientRect();
+    return (
+      ev.clientX >= rect.left &&
+      ev.clientX <= rect.right &&
+      ev.clientY >= rect.top &&
+      ev.clientY <= rect.bottom
+    );
+  }
+
+  /**
+   * True when the event represents a primary-button interaction. Uses
+   * the `buttons` bitmask as the primary source of truth — bit 0 is
+   * set whenever the primary button is currently pressed — and falls
+   * back to `button === 0` for pointerup events (where `buttons` is
+   * often zero because the button has just been released). Handles
+   * the edge case of a pen / touch device that fires `button: -1`
+   * alongside `buttons: 1`.
+   */
+  function isPrimaryButton(ev: PointerEvent): boolean {
+    if (ev.button === 0) return true;
+    if ((ev.buttons & 1) === 1) return true;
+    return false;
+  }
+
   function onPointerDown(ev: PointerEvent): void {
     if (!active) return;
-    if (ev.button !== 0) {
+    if (!isPrimaryButton(ev)) {
       // Non-primary button (e.g. right-drag → OrbitControls pan). Keep
       // the armed flag as-is — a parallel primary-button click isn't
       // possible (single pointer), so we simply don't re-arm here.
       return;
     }
-    if (ev.target !== canvas) {
+    if (!eventIsOnCanvas(ev)) {
       // Pointer down originated outside our canvas — don't claim it.
       return;
     }
@@ -782,8 +868,11 @@ export function createLayFlatController(
     if (!active) return;
     if (!downArmed) return;
     downArmed = false;
+    // pointerup's `button` reliably reports which button was
+    // released, even though `buttons` may be zero by now. Accept a
+    // bare `button === 0` here (no bitmask fallback needed).
     if (ev.button !== 0) return;
-    if (ev.target !== canvas) {
+    if (!eventIsOnCanvas(ev)) {
       // Up landed off-canvas (user dragged off the viewport). Not a click.
       return;
     }

@@ -1072,6 +1072,24 @@ export async function generateSiliconeShell(
           // bottom) — `buildBaseSlab` returns a valid-but-empty Manifold
           // in that case. We don't assertManifold here; downstream (the
           // scene module + topbar) handle the empty case gracefully.
+          //
+          // Issue #97 Fix 3 (polish dogfood 2026-04-21 round 3): surface
+          // a console.warn when the slab came out empty. Silent empties
+          // looked like "slab missing from scene" in the dogfood session
+          // even though the geometry was technically correct for the
+          // given master. Gated off under NODE_ENV=test to keep the
+          // geometry unit-test log output quiet for fixtures that
+          // intentionally hit the degenerate path.
+          if (basePart.isEmpty() && process.env.NODE_ENV !== 'test') {
+            console.warn(
+              '[generateSiliconeShell] base slab came out empty — the ' +
+                "master's lowest-Y slice is degenerate (no supporting " +
+                'footprint). The printable-parts scene module will render ' +
+                'zero slab geometry; shell pieces are unaffected. If you ' +
+                'see "slab missing" in the UI, try re-orienting the master ' +
+                'so a flat face sits on the bed.',
+            );
+          }
           const tBaseSlab = performance.now();
 
           // Step 7: volumes. Resin identity (resin ≡ masterVolume) pinned
