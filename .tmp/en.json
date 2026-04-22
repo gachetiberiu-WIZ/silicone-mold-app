@@ -1,0 +1,62 @@
+{
+  "volume": {
+    "label": "Volume",
+    "none": "No master loaded",
+    "notGenerated": "Click Generate"
+  },
+  "units": {
+    "mm": "mm",
+    "in": "in",
+    "deg": "°"
+  },
+  "topbar": {
+    "open": "Open STL",
+    "appName": "Silicone Mold App",
+    "volumeMaster": "Master",
+    "volumeSilicone": "Silicone",
+    "volumePrintShell": "Print shell",
+    "volumeResin": "Resin"
+  },
+  "parameters": {
+    "title": "Mold parameters",
+    "siliconeThickness": "Silicone thickness",
+    "printShell": "Print shell thickness",
+    "sideCount": "Side count",
+    "draft": "Draft angle",
+    "reset": "Reset to defaults",
+    "invalid": "Out of range ({{min}}–{{max}})"
+  },
+  "layFlat": {
+    "toggle": "Place on face",
+    "toggleHint": "Click a face on the mesh to lay it flat on the print bed (Esc to cancel)",
+    "reset": "Reset orientation",
+    "resetHint": "Restore the mesh to its original STL orientation"
+  },
+  "explodedView": {
+    "toggle": "Exploded view",
+    "toggleHint": "Show the silicone body lifted so the cavity is visible"
+  },
+  "printableParts": {
+    "toggle": "Show printable parts",
+    "toggleHint": "Show the surface-conforming print shell around the silicone"
+  },
+  "generate": {
+    "button": "Generate mold",
+    "buttonBusy": "Generating…",
+    "hint": "Orient the part on its base (use Place on face in the toolbar), then click Generate.",
+    "ready": "Ready to generate",
+    "done": "Generated — click to re-run with current parameters.",
+    "staleParams": "Parameters changed. Click Generate to update.",
+    "noMaster": "Load an STL to begin.",
+    "error": "Could not generate mold: {{reason}}"
+  },
+  "notice": {
+    "masterRepaired": "Repaired non-manifold STL on load ({{removed}} triangles removed)."
+  },
+  "errors": {
+    "stlOnly": "Only .stl files are supported",
+    "singleFile": "Drop one file at a time",
+    "fileTooLarge": "File too large",
+    "readFailed": "Could not read file"
+  }
+}
