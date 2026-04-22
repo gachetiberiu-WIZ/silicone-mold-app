@@ -60,6 +60,7 @@
 import type { Manifold } from 'manifold-3d';
 import type { Matrix4 } from 'three';
 
+import type { CutOverrides } from '../state/cutOverrides';
 import type { MoldParameters } from '../state/parameters';
 import type {
   MoldGenerationResult,
@@ -159,6 +160,22 @@ export interface GenerateOrchestratorDeps {
   getMaster: () => Manifold | null;
   getParameters: () => MoldParameters;
   getViewTransform: () => Matrix4 | null;
+  /**
+   * Optional cut-overrides reader (dogfood round 7, PR B). When
+   * provided AND the overrides differ from defaults, the orchestrator
+   * merges `cutRotation_deg` + `cutCenterOffset_mm` into the
+   * parameters payload handed to `generate`. When omitted or at
+   * defaults, the payload is the raw `MoldParameters` snapshot —
+   * pre-feature behaviour preserved 1:1.
+   */
+  getCutOverrides?: () => CutOverrides;
+  /**
+   * Optional gate — when supplied, returns whether the cut overrides
+   * are currently at their defaults. If true, the orchestrator skips
+   * threading the override fields even if `getCutOverrides` returns
+   * a value. Wired through the store's `isAtDefaults()`.
+   */
+  isCutOverridesAtDefaults?: () => boolean;
   generate: (
     master: Manifold,
     parameters: MoldParameters,
@@ -318,6 +335,8 @@ export function createGenerateOrchestrator(
     getMaster,
     getParameters,
     getViewTransform,
+    getCutOverrides,
+    isCutOverridesAtDefaults,
     generate,
     topbar,
     button,
@@ -371,7 +390,30 @@ export function createGenerateOrchestrator(
         return;
       }
 
-      const parameters = getParameters();
+      // Cut-overrides merge (PR B). Only populate the optional
+      // `cutRotation_deg` + `cutCenterOffset_mm` fields on the
+      // parameters payload when BOTH:
+      //   - a cut-overrides reader is wired, AND
+      //   - the overrides are not currently at defaults.
+      // Keeps the payload clean for the vast majority of generates
+      // where the user hasn't touched the cut-planes gizmo.
+      let parameters = getParameters();
+      if (getCutOverrides) {
+        const atDefaults = isCutOverridesAtDefaults
+          ? isCutOverridesAtDefaults()
+          : false;
+        if (!atDefaults) {
+          const overrides = getCutOverrides();
+          parameters = {
+            ...parameters,
+            cutRotation_deg: overrides.rotation_deg,
+            cutCenterOffset_mm: {
+              x: overrides.centerOffset_mm.x,
+              z: overrides.centerOffset_mm.z,
+            },
+          };
+        }
+      }
       const epoch = bumpEpoch();
 
       button.setError(null);

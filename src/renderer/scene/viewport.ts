@@ -29,8 +29,13 @@ import {
 } from './gizmos';
 import { recenterGroup } from './layFlat';
 import { createLayFlatController, type LayFlatController } from './layFlatController';
+import {
+  createCutPlanesPreview,
+  type CutPlanesPreviewApi,
+} from './cutPlanesPreview';
 import { createRenderer, resizeRendererToContainer } from './renderer';
 import { createScene } from './index';
+import type { CutOverridesStore } from '../state/cutOverrides';
 import {
   disposeMaster as sceneDisposeMaster,
   getNativeBbox as sceneGetNativeBbox,
@@ -213,11 +218,40 @@ export interface MountedViewport {
    * live mm readouts as `nativeBbox × scale[axis]`.
    */
   getNativeBbox: () => Box3 | null;
+  /**
+   * Dogfood round 7 (PR B) — cut-planes preview handle. Constructed
+   * during viewport mount when a `CutOverridesStore` + sideCount
+   * reader are supplied; otherwise `null`. Main uses it to attach
+   * when orientation commits + detach on staleness.
+   */
+  cutPlanesPreview: CutPlanesPreviewApi | null;
   /** Stop RAF, detach listeners, dispose GPU resources, remove the canvas. */
   dispose: () => void;
 }
 
-export function mount(container: HTMLElement): MountedViewport {
+/** Mount-time options for the viewport. */
+export interface MountOptions {
+  /**
+   * When supplied, the viewport constructs a cut-planes preview bound
+   * to this store + the `getSideCount` reader. Main toggles attach /
+   * detach via `handle.cutPlanesPreview.attach()` in response to
+   * orientation-commit + staleness events.
+   */
+  cutOverridesStore?: CutOverridesStore;
+  /** Reads the current sideCount. Required alongside `cutOverridesStore`. */
+  getSideCount?: () => 2 | 3 | 4;
+  /**
+   * Called whenever the user releases a drag on the cut-planes gizmo.
+   * Main wires this to flip the generate button to a stale state
+   * when a generate has previously happened.
+   */
+  onCutPreviewDragRelease?: () => void;
+}
+
+export function mount(
+  container: HTMLElement,
+  options: MountOptions = {},
+): MountedViewport {
   // Render determinism is requested via either build-time NODE_ENV=test OR
   // a runtime `?test=1` query param. See top-of-file note for the rationale.
   const testRuntime = hasTestQueryFlag();
@@ -251,6 +285,45 @@ export function mount(container: HTMLElement): MountedViewport {
     getMasterMesh: () => layFlatMasterMesh,
   });
 
+  // Cut-planes preview (dogfood round 7, PR B). Only constructed when
+  // the caller wires both the store + sideCount reader; otherwise the
+  // handle stays null. Main owns the attach/detach lifecycle via the
+  // orientation + staleness events.
+  let cutPlanesPreview: CutPlanesPreviewApi | null = null;
+  if (options.cutOverridesStore && options.getSideCount) {
+    const cutStore = options.cutOverridesStore;
+    const getSideCount = options.getSideCount;
+    cutPlanesPreview = createCutPlanesPreview({
+      scene,
+      camera,
+      controls,
+      canvas,
+      cutOverridesStore: cutStore,
+      getSideCount,
+      getMasterBbox: () => {
+        const masterGroup = scene.children.find(
+          (c) => c.userData['tag'] === 'master',
+        );
+        if (!masterGroup) return null;
+        const bbox = new Box3().setFromObject(masterGroup);
+        return bbox.isEmpty() ? null : bbox;
+      },
+      getShellHeight: () => {
+        const masterGroup = scene.children.find(
+          (c) => c.userData['tag'] === 'master',
+        );
+        if (!masterGroup) return 1;
+        const bbox = new Box3().setFromObject(masterGroup);
+        if (bbox.isEmpty()) return 1;
+        // Small pad so the plane is visibly taller than the master.
+        return Math.max(1, (bbox.max.y - bbox.min.y) * 1.1);
+      },
+      ...(options.onCutPreviewDragRelease
+        ? { onDragRelease: options.onCutPreviewDragRelease }
+        : {}),
+    });
+  }
+
   // Resize: a ResizeObserver on the container catches every layout change
   // (window resize, devtools dock, split-pane drag). Falls back to
   // `window.resize` if ResizeObserver is unavailable (universal in Electron
@@ -275,6 +348,11 @@ export function mount(container: HTMLElement): MountedViewport {
     rafId = requestAnimationFrame(tick);
 
     controls.update();
+
+    // Axis-constraint defense for the cut-planes preview (PR B).
+    // Every frame, push anchor.position.y + anchor.rotation.{x,z}
+    // back to their locked values. Cheap: three numeric compares.
+    if (cutPlanesPreview) cutPlanesPreview.onFrame();
 
     // Main pass — full-canvas viewport, no scissor.
     const canvasW = renderer.domElement.width;
@@ -588,6 +666,10 @@ export function mount(container: HTMLElement): MountedViewport {
       window.removeEventListener('resize', onWindowResize);
     }
     layFlat.dispose();
+    if (cutPlanesPreview) {
+      cutPlanesPreview.dispose();
+      cutPlanesPreview = null;
+    }
     // Release any cached master Manifold — the WASM kernel won't free it
     // automatically when the viewport's JS state is dropped. Idempotent and
     // safe on a scene that never loaded a master.
@@ -646,6 +728,7 @@ export function mount(container: HTMLElement): MountedViewport {
     isFaceHoverOverlayVisible: () => layFlat.getHoverOverlay().visible,
     setMasterScale,
     getNativeBbox: getNativeBboxFromScene,
+    cutPlanesPreview,
     dispose,
   };
 

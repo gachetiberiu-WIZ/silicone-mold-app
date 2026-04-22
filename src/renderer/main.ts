@@ -35,10 +35,17 @@ import {
   generateMoldViaWorker,
   cancelCurrentWorkerRun,
 } from './worker/generateMoldRunner';
-import { LAY_FLAT_ACTIVE_EVENT } from './scene/layFlatController';
+import {
+  LAY_FLAT_ACTIVE_EVENT,
+  LAY_FLAT_COMMITTED_EVENT,
+} from './scene/layFlatController';
 import { getMasterManifold } from './scene/master';
 import { mount, type MountedViewport } from './scene/viewport';
 import { initI18n, t } from './i18n';
+import {
+  createCutOverridesStore,
+  type CutOverridesStore,
+} from './state/cutOverrides';
 import {
   createDimensionsStore,
   type DimensionsStore,
@@ -63,6 +70,10 @@ import {
   createGenerateOrchestrator,
   type GenerateOrchestratorApiWithExport,
 } from './ui/generateOrchestrator';
+import {
+  mountCutOverridesReadout,
+  type CutOverridesReadoutApi,
+} from './ui/cutOverridesReadout';
 import { mountExportStlButton, type ExportStlApi } from './ui/exportStl';
 import {
   mountParameterPanel,
@@ -90,6 +101,7 @@ let topbar: TopbarApi | null = null;
 let viewport: MountedViewport | null = null;
 let parametersStore: ParametersStore | null = null;
 let parameterPanel: ParameterPanelApi | null = null;
+let cutOverridesStore: CutOverridesStore | null = null;
 let dimensionsStore: DimensionsStore | null = null;
 let dimensionsPanel: DimensionsPanelApi | null = null;
 let placeOnFace: PlaceOnFaceToggleApi | null = null;
@@ -99,6 +111,7 @@ let generateButton: GenerateButtonApi | null = null;
 let generateOrchestrator: GenerateOrchestratorApiWithExport | null = null;
 let generateStatus: GenerateStatusApi | null = null;
 let exportStl: ExportStlApi | null = null;
+let cutOverridesReadout: CutOverridesReadoutApi | null = null;
 
 /**
  * Canonical "is the exploded view currently ON" flag at the UI layer
@@ -237,7 +250,30 @@ function mountViewport(): void {
     console.error('Missing #viewport container — renderer HTML is out of date.');
     return;
   }
-  viewport = mount(container);
+  // PR B: cut-overrides store + parametersStore are created here (ahead
+  // of `mountParameters`) so the viewport can wire the cut-planes
+  // preview during construction. The parametersStore's `sideCount` is
+  // what `getSideCount` reads from, so the viewport needs a live
+  // reference at mount time. Both stores remain exposed on the test
+  // hooks surface from `mountParameters` further down.
+  cutOverridesStore = createCutOverridesStore();
+  parametersStore = createParametersStore();
+  const cStore = cutOverridesStore;
+  const pStore = parametersStore;
+  viewport = mount(container, {
+    cutOverridesStore: cStore,
+    getSideCount: () => pStore.get().sideCount,
+    onCutPreviewDragRelease: () => {
+      // Drag released: if a generate has previously happened, flip
+      // the button to a stale state. The same stale-marker treatment
+      // that the parameters-store subscription applies.
+      if (generateButton && generateButton.isGenerated() && !generateButton.isBusy()) {
+        generateButton.setStale(true);
+        topbar?.setVolumesStale(true);
+        generateOrchestrator?.invalidateExportables();
+      }
+    },
+  });
   // Issue #87 Fix 1: progress-banner lives inside the viewport
   // container so it positions relative to the canvas, not the
   // window. Mounted after the viewport so the canvas is already in
@@ -251,6 +287,7 @@ function mountViewport(): void {
     };
     const hooks = (w.__testHooks ??= {});
     hooks['generateStatus'] = generateStatus;
+    hooks['cutOverrides'] = cutOverridesStore;
   }
 }
 
@@ -277,7 +314,11 @@ function mountParameters(): void {
     );
     return;
   }
-  parametersStore = createParametersStore();
+  // PR B: `parametersStore` is created inside `mountViewport` so the
+  // viewport can wire the cut-planes preview's `getSideCount` reader
+  // at mount time. Guard here in case someone calls mountParameters
+  // without mountViewport (test bundles).
+  if (!parametersStore) parametersStore = createParametersStore();
   dimensionsStore = createDimensionsStore();
   // Panel mounts first because `mountParameterPanel` does `container.textContent = ''`
   // to wipe any pre-mount HTML fallback. Mounting the generate-block before
@@ -330,6 +371,16 @@ function mountParameters(): void {
   });
   container.prepend(generateButton.element);
 
+  // PR B — cut-overrides readout + reset icon. Mounted inside the
+  // generate-block element so it sits directly beneath the Generate
+  // button. Renders as "Cut: 0°, (0.0, 0.0) mm" plus a reset icon.
+  if (cutOverridesStore) {
+    cutOverridesReadout = mountCutOverridesReadout(
+      generateButton.element,
+      cutOverridesStore,
+    );
+  }
+
   // Build the orchestrator now that every dep is mounted. The orchestrator
   // owns the `setBusy → await → staleness-check → topbar-push` cycle and
   // is injectable so the race-condition unit test can drive the full
@@ -340,9 +391,16 @@ function mountParameters(): void {
     const tbar = topbar;
     const btn = generateButton;
     const statusApi = generateStatus;
+    const coStore = cutOverridesStore;
     generateOrchestrator = createGenerateOrchestrator({
       getMaster: () => getMasterManifold(vp.scene),
       getParameters: () => pStore.get(),
+      ...(coStore
+        ? {
+            getCutOverrides: () => coStore.get(),
+            isCutOverridesAtDefaults: () => coStore.isAtDefaults(),
+          }
+        : {}),
       getViewTransform: () => {
         const masterGroup = vp.scene.children.find(
           (c) => c.userData['tag'] === 'master',
@@ -396,6 +454,12 @@ function mountParameters(): void {
           explodedView.setActive(false);
           explodedView.setEnabled(true);
         }
+        // PR B — generate kicked off with silicone installed. Printable
+        // parts are about to get installed too (they render on top of the
+        // cut-planes preview). Detach the preview so the gizmo doesn't
+        // clutter the generated-mold view. The next orientation commit
+        // (after the user resets + picks a new face) re-attaches.
+        viewport?.cutPlanesPreview?.detach();
         // Printable-parts are installed too (the orchestrator hands
         // them off after the silicone hand-off completes — see
         // `setPrintableParts` in the scene deps above). Issue #67 —
@@ -473,11 +537,19 @@ function mountParameters(): void {
   if (parametersStore && topbar && generateButton) {
     const tbar = topbar;
     const btn = generateButton;
-    parametersStore.subscribe(() => {
+    let lastSideCount: 2 | 3 | 4 = parametersStore.get().sideCount;
+    parametersStore.subscribe((params) => {
       if (btn.isGenerated() && !btn.isBusy()) {
         btn.setStale(true);
         tbar.setVolumesStale(true);
         generateOrchestrator?.invalidateExportables();
+      }
+      // PR B: sideCount change → rebuild the cut-planes preview so
+      // the plane count matches. Guard via a cached last value so
+      // unrelated parameter edits don't burn a rebuild.
+      if (params.sideCount !== lastSideCount) {
+        lastSideCount = params.sideCount;
+        viewport?.cutPlanesPreview?.rebuild();
       }
       // Issue #77 — also kill any in-flight worker when parameters
       // change while a generate is busy. The orchestrator's epoch check
@@ -485,6 +557,23 @@ function mountParameters(): void {
       // running burns a CPU core and delays the next fresh run's WASM
       // init. Terminate early. Safe when no worker is live (no-op).
       cancelCurrentWorkerRun();
+    });
+  }
+
+  // PR B — subscribe to the cut-overrides store so changes (programmatic
+  // or via the gizmo drag) mark the generate button stale ONLY when a
+  // generate has previously happened. Pre-first-generate edits should
+  // NOT flip the hint — the button is still in its initial "ready"
+  // state and the user is just exploring the gizmo.
+  if (cutOverridesStore && topbar && generateButton) {
+    const tbar = topbar;
+    const btn = generateButton;
+    cutOverridesStore.subscribe(() => {
+      if (btn.isGenerated() && !btn.isBusy()) {
+        btn.setStale(true);
+        tbar.setVolumesStale(true);
+        generateOrchestrator?.invalidateExportables();
+      }
     });
   }
 
@@ -504,6 +593,38 @@ function mountParameters(): void {
       // Issue #77 — kill any in-flight worker on dimension changes.
       // See the parametersStore subscribe above for the rationale.
       cancelCurrentWorkerRun();
+    });
+  }
+
+  // PR B — cut-planes preview attach/detach. Listens directly to the
+  // LAY_FLAT_COMMITTED_EVENT (separate from `attachGenerateInvalidation`
+  // which handles staleness + silicone clears). Policy:
+  //   - attach when orientation is COMMITTED true + no printable parts
+  //     are currently visible;
+  //   - detach when orientation goes FALSE (reset, new master), or when
+  //     printable parts become visible (the cut planes would clash with
+  //     the generated shell pieces).
+  if (viewport) {
+    const vp = viewport;
+    const updateCutPreviewVisibility = () => {
+      const cpp = vp.cutPlanesPreview;
+      if (!cpp) return;
+      const shouldAttach =
+        vp.isOrientationCommitted() && !vp.hasPrintableParts();
+      if (shouldAttach) cpp.attach();
+      else cpp.detach();
+    };
+    document.addEventListener(LAY_FLAT_COMMITTED_EVENT, () => {
+      updateCutPreviewVisibility();
+    });
+    // Also re-evaluate on parameters change (sideCount changed → rebuild
+    // + make sure it's attached in the right state).
+    parametersStore?.subscribe(() => {
+      if (vp.cutPlanesPreview?.isVisible()) {
+        // Already attached, rebuild handled elsewhere.
+      } else {
+        updateCutPreviewVisibility();
+      }
     });
   }
 
@@ -582,6 +703,7 @@ function mountParameters(): void {
   // hooks a place to call destroy().
   void parameterPanel;
   void dimensionsPanel;
+  void cutOverridesReadout;
 }
 
 /**

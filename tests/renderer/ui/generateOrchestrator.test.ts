@@ -1183,3 +1183,116 @@ describe('generateOrchestrator — degenerate-slab notice (issue #93)', () => {
     await expect(runPromise).resolves.toBeUndefined();
   });
 });
+
+describe('generateOrchestrator — cut overrides (PR B)', () => {
+  test('does NOT merge cut fields when overrides are at defaults', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const generateSpy = vi
+      .fn<
+        (
+          m: Manifold,
+          p: MoldParameters,
+          vt: Matrix4,
+        ) => Promise<MoldGenerationResult>
+      >()
+      .mockReturnValue(d.promise);
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      getCutOverrides: () => ({
+        rotation_deg: 0,
+        centerOffset_mm: { x: 0, z: 0 },
+      }),
+      isCutOverridesAtDefaults: () => true,
+      generate: generateSpy,
+      topbar,
+      button,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeResult());
+    await runPromise;
+
+    expect(generateSpy).toHaveBeenCalledTimes(1);
+    const [, paramsPassed] = generateSpy.mock.calls[0]!;
+    expect(paramsPassed.cutRotation_deg).toBeUndefined();
+    expect(paramsPassed.cutCenterOffset_mm).toBeUndefined();
+  });
+
+  test('merges cut fields into parameters when overrides are non-default', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const generateSpy = vi
+      .fn<
+        (
+          m: Manifold,
+          p: MoldParameters,
+          vt: Matrix4,
+        ) => Promise<MoldGenerationResult>
+      >()
+      .mockReturnValue(d.promise);
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      getCutOverrides: () => ({
+        rotation_deg: 45,
+        centerOffset_mm: { x: 3, z: -2 },
+      }),
+      isCutOverridesAtDefaults: () => false,
+      generate: generateSpy,
+      topbar,
+      button,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeResult());
+    await runPromise;
+
+    expect(generateSpy).toHaveBeenCalledTimes(1);
+    const [, paramsPassed] = generateSpy.mock.calls[0]!;
+    expect(paramsPassed.cutRotation_deg).toBe(45);
+    expect(paramsPassed.cutCenterOffset_mm).toEqual({ x: 3, z: -2 });
+  });
+
+  test('omits cut fields when getCutOverrides is not wired', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const generateSpy = vi
+      .fn<
+        (
+          m: Manifold,
+          p: MoldParameters,
+          vt: Matrix4,
+        ) => Promise<MoldGenerationResult>
+      >()
+      .mockReturnValue(d.promise);
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: generateSpy,
+      topbar,
+      button,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeResult());
+    await runPromise;
+
+    const [, paramsPassed] = generateSpy.mock.calls[0]!;
+    expect(paramsPassed.cutRotation_deg).toBeUndefined();
+    expect(paramsPassed.cutCenterOffset_mm).toBeUndefined();
+  });
+});

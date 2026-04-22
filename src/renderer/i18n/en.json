@@ -56,6 +56,11 @@
     "toggle": "Show printable parts",
     "toggleHint": "Show the surface-conforming print shell around the silicone"
   },
+  "cutPlanes": {
+    "readoutRotation": "Cut: {{deg}}°",
+    "readoutOffset": "({{x}}, {{z}}) mm",
+    "resetTitle": "Reset cut planes"
+  },
   "generate": {
     "button": "Generate mold",
     "buttonBusy": "Generating…",
