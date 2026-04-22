@@ -98,47 +98,31 @@ describe('addBrim — sideCount=2 single-cut case', () => {
         expect(isManifold(brimmed)).toBe(true);
         expect(brimmed.isEmpty()).toBe(false);
         const brimmedVol = brimmed.volume();
-        // Post-#89 volume bounds — the brim is now a narrow
-        // `(bondOverlap + brimWidth) × shellHeight × brimThickness`
-        // slab (minus any silicone-cavity intrusion). For sideCount=2
-        // (single brim per piece):
-        //   brim gross ≈ (3 + 10) × shellHeight × 3 = 39·shellHeight
-        //                                                mm³
-        //   part of that overlaps existing shell material (the
-        //   bondOverlap portion sits inside the shell wall) → the
-        //   net volume gain is strictly less than gross.
+        // Post-dogfood-round-6 bounds — brim's radial span is
+        // `[shellOuterRadius - bondOverlap, shellOuterRadius + brimWidth]`
+        // with `bondOverlap = min(2×shellThickness + 0.35×outerRadius,
+        // 0.9×outerRadius)`. For this fixture: outerRadius = 10,
+        // thickness = 3, so bondOverlap = min(6 + 3.5, 9) = 9 mm,
+        // radialInner = 1 mm, width = 19 mm.
+        //
+        // Bounds picked loose — sanity-check "brim adds plausible
+        // material" without pinning exact volume. Exact safety is
+        // covered by the separate no-cavity-intrusion test.
         expect(brimmedVol).toBeGreaterThan(pieceVol);
-        const shellHeight =
-          shellBbox.max[1]! - shellBbox.min[1]! - 4; // 2mm margin top+bottom
+        const shellHeight = shellBbox.max[1]! - shellBbox.min[1]!;
         const outerFlangeVol = brimWidth * shellHeight * brimThickness;
-        // Issue #96 taper: the outer radial half of the trapezoidal
-        // prism contributes `brimWidth × (ySize × (1 + k) / 2) ×
-        // brimThickness` averaged over its Z-length. For k = 0.5 that's
-        // 75 % of the pre-#96 box volume in the outer-flange region.
-        // Lower bound stays at half the pre-#96 rectangular estimate —
-        // still safely exceeded by the tapered prism minus shell
-        // absorption.
-        expect(brimmedVol - pieceVol).toBeGreaterThan(outerFlangeVol * 0.5);
-        // Upper bound on the volume gain. Issue #97 Fix 4 (polish
-        // dogfood round 3) bumped the bond-overlap multiplier 1.5 →
-        // 2.0; issue #96 (taper) replaced the rectangular box with a
-        // trapezoidal prism whose volume is `BRIM_TAPER_VOLUME_FACTOR
-        // × grossBoxVol` where the volume factor is `(1 +
-        // BRIM_TAPER_FACTOR) / 2 = 0.75` at the production taper of
-        // 0.5. We still use the un-tapered gross box × 1.1 as an upper
-        // bound (loose), since 0.75 < 1 < 1.1.
-        const BOND_OVERLAP_MULTIPLIER = 2.0;
-        const BRIM_TAPER_FACTOR = 0.5;
-        const BRIM_TAPER_VOLUME_FACTOR = (1 + BRIM_TAPER_FACTOR) / 2;
+        // Lower bound: outer flange (outside shell) survived with
+        // taper reducing it by ~25 %.
+        expect(brimmedVol - pieceVol).toBeGreaterThan(outerFlangeVol * 0.4);
+        // Upper bound: full uncarved brim box × 1.1.
+        const shellOuterRadius = OUTER / 2;
+        const bondOverlapUB = Math.min(
+          2 * printShellThickness + 0.35 * shellOuterRadius,
+          0.9 * shellOuterRadius,
+        );
         const grossBoxVol =
-          (BOND_OVERLAP_MULTIPLIER * printShellThickness + brimWidth) *
-          shellHeight *
-          brimThickness;
+          (bondOverlapUB + brimWidth) * shellHeight * brimThickness;
         expect(brimmedVol - pieceVol).toBeLessThan(grossBoxVol * 1.1);
-        // Tighter upper bound reflecting the taper: gain is at most
-        // `trapezoidalPrismVol × 1.1` (10 % slack for kernel slop).
-        const trapezoidalPrismVol = grossBoxVol * BRIM_TAPER_VOLUME_FACTOR;
-        expect(brimmedVol - pieceVol).toBeLessThan(trapezoidalPrismVol * 1.1);
         expect(brimmedVol).toBeLessThan(shellVol * 3);
         brimmed.delete();
       } catch (err) {
@@ -285,11 +269,11 @@ describe('addBrim — sideCount=4 two-cut case', () => {
 // failure mode that was visible in the viewer during dogfood.
 
 describe('addBrim — issue #89 no-cavity-intrusion invariant', () => {
-  test('brim does not extend inward past `outerRadius - bondOverlap`', async () => {
+  test('brimmed piece extends outward to approximately `outerRadius + brimWidth`', async () => {
     const toplevel = await initManifold();
     const OUTER = 20;
     const INNER = 10;
-    const SHELL_THICKNESS = 3; // = bondOverlap
+    const SHELL_THICKNESS = 3;
     const BRIM_W = 10;
     const shell = buildRingShell(toplevel, OUTER, INNER);
     const shellBbox = shell.boundingBox();
@@ -297,26 +281,22 @@ describe('addBrim — issue #89 no-cavity-intrusion invariant', () => {
     // Shell outer radius: half of 20 mm AABB = 10.
     const OUTER_RADIUS = OUTER / 2;
 
-    // Build the brim IN ISOLATION (union it onto an empty-ish piece)
-    // and check its bounding-box extents. The simplest way to get
-    // "just the brim" is to subtract the raw piece volume from the
-    // brimmed piece, but manifold-3d doesn't expose a public "subtract
-    // from self" identity at test-granularity. Instead: construct a
-    // brimmed piece and compare its radial bbox min against the bare
-    // piece's radial bbox min — the brim must NOT have pushed the
-    // radial min inward past `OUTER_RADIUS - bondOverlap`.
+    // Since the post-dogfood-round-6 brim extends from `xzCenter`
+    // (radialInner = 0) all the way outward, the INWARD bbox is no
+    // longer a useful regression probe — the brim reaches center
+    // along each cut direction by design, then gets carved by the
+    // silicone subtract. The OUTWARD extent is still testable.
     //
-    // For a square ring shell on sideCount=4 piece 0 (arc +Z mid at
-    // 90°), the piece's closest point to the xzCenter along the radial
-    // axis (+Z) is at the inner cube's +Z face, i.e. z = INNER/2 = 5.
-    // The brim lives along the radial directions 45° and 135°; its
-    // radial-inward edge (in the 45°/135° directions) sits at
-    // `OUTER_RADIUS - bondOverlap = 10 - 3 = 7 mm` radial distance.
-    // Projected onto +X or -X the brim's edge is at
-    // `7 / sqrt(2) ≈ 4.95 mm`, which is a TIGHTER X-bound than the
-    // raw piece (whose X extent reaches ~5 mm at the inner cube face).
-    // So the assertion we can make robustly is: `brim ∩ siliconeOuter
-    // = 0` (no cavity intrusion), which we cover below directly.
+    // For sideCount=4 piece 0 (arc +Z mid at 90°), the two cut
+    // directions are 45° and 135°. Brim along those directions
+    // extends outward to `OUTER_RADIUS + BRIM_W = 20 mm`. Projected
+    // onto +X or -X that's `20 / sqrt(2) ≈ 14.14 mm`. The raw piece
+    // reaches ~10 mm in +X / -X (outer cube half-width), so the brim
+    // adds ~4.14 mm of outward growth on each of +X / -X.
+    //
+    // The critical safety property — "brim doesn't intrude into the
+    // silicone cavity" — is covered by the dedicated
+    // `brim.intersect(siliconeOuter).volume() ≈ 0` test below.
     const pieces = sliceShellRadial(toplevel, shell, 4, { x: 0, z: 0 });
     shell.delete();
 

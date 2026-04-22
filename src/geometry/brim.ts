@@ -222,37 +222,39 @@ import { SIDE_CUT_ANGLES } from './sideAngles';
 const BRIM_Y_MARGIN_MM = 0;
 
 /**
- * Multiplier applied to `printShellThickness_mm` to compute `bondOverlap`
- * — how far the brim extends INWARD past the shell's outer surface so
- * it fuses mechanically with the shell wall after the union.
+ * Multiplier on `printShellThickness_mm` for the THICKNESS-driven part
+ * of bondOverlap — how far the brim reaches INWARD to fuse into the
+ * shell wall for mechanical bonding.
  *
- * Issue #94 Fix 2 (polish dogfood 2026-04-22) — user reported the brim
- * "looks tacked on" with a visible seam where it meets the shell.
- * Investigation confirmed the brim IS `Manifold.union`-ed with each
- * piece (single Manifold per piece, single mesh downstream; scene module
- * mounts `sideCount` meshes, not `sideCount * 2`). This is case B from
- * the issue: a real watertight surface with a sharp material-change
- * angle, not a topological disjoint.
- *
- * First mitigation (#94): bump 1× → 1.5× the shell thickness.
- *
- * Issue #97 Fix 4 (polish dogfood 2026-04-21 round 3): the 1.5× bump
- * still looked like a floating fin in the re-dogfood session. Going
- * further to 2× — the brim's inner face now sits a full `shellThickness`
- * DEEPER inside the shell material than its outer surface, so the
- * fused profile transitions over twice the original bond depth. The
- * siliconeOuter carve-out (step 6 of addBrim) still removes any inward
- * intrusion past the shell's inner cavity — going past the shell
- * thickness is harmless because the cavity subtract clips any material
- * that would have poked through.
- *
- * Issue #96 replaced the rectangular box with a TAPERED (trapezoidal)
- * prism that reduces the outer perimeter's vertical extent. The bond
- * depth stays doubled because the union now takes a tapered flange
- * INTO a deep shell — both changes compose and the junction reads as
- * an integrated buttress.
+ * 2× grown through issues #94, #97, #103 from dogfood iterations.
  */
 const BOND_OVERLAP_MULTIPLIER = 2.0;
+
+/**
+ * Fraction of `shellOuterRadius` added to bondOverlap to cover the
+ * DIAGONAL-gap problem: at cut angles like 45°, the shell's actual
+ * radial extent is `shellOuterRadius / sqrt(2) ≈ 71 %` — the gap
+ * from the AABB-derived max to the actual surface is ~29 %. We
+ * reserve 35 % as a safety margin for any asymmetric master.
+ */
+const DIAGONAL_COVERAGE_RATIO = 0.35;
+
+/**
+ * Lower bound on `radialInner` (the brim's inner-edge distance from
+ * `xzCenter`) as a fraction of `shellOuterRadius`. Prevents the brim
+ * from reaching center even on small masters where the thickness-
+ * driven bond would otherwise over-extend.
+ *
+ * Why this matters: if two brims on one piece (sideCount 3/4) BOTH
+ * reach center, their union is a self-intersecting plus-sign through
+ * the silicone cavity — the kernel's subsequent
+ * `difference(merged, siliconeOuter)` becomes pathologically slow
+ * (observed: 90+ s on 200 %-scaled mini-figurine in E2E). Clamping
+ * `radialInner >= 10 % × shellOuterRadius` keeps adjacent brims
+ * spatially separated + off the silicone volume, so the boolean
+ * ops stay bounded.
+ */
+const MIN_RADIAL_INNER_RATIO = 0.1;
 
 /**
  * Issue #96 — tapered-brim scale factor. The brim's OUTER radial edge
@@ -393,35 +395,54 @@ export function addBrim(args: AddBrimArgs): Manifold {
   const ySize = Math.max(0, shellMaxY - shellMinY - 2 * BRIM_Y_MARGIN_MM);
   const yCenter = (shellMinY + shellMaxY) / 2;
 
-  // Issue #89 fix (A) + #96 taper: NARROW radial span, tapered
-  // trapezoidal prism.
+  // Brim radial layout (post-dogfood round 6, revised for perf).
   //
-  // `bondOverlap` = `BOND_OVERLAP_MULTIPLIER × printShellThickness_mm`
-  // — how far the brim extends INWARD past the shell's outer surface,
-  // to fuse mechanically with the shell wall after the union. The
-  // multiplier was bumped from 1× to 1.5× in issue #94 (polish
-  // dogfood 2026-04-22), then to 2× in issue #97 Fix 4.
+  // Prior iterations up to PR #106 used a fixed
+  // `bondOverlap = BOND_OVERLAP_MULTIPLIER × printShellThickness`
+  // (2 × 8 = 16 mm default). The brim's inner edge sat at
+  // `shellOuterRadius - bondOverlap`. Failure mode: at diagonal
+  // cut angles (e.g. 45° on a squarish master), the shell's
+  // ACTUAL radial extent is less than the AABB-derived
+  // `shellOuterRadius`, so the brim's inner edge landed OUTSIDE
+  // the shell's outer surface → visible gap between brim and
+  // shell.
   //
-  // Total radial width of the brim is `bondOverlap + brimWidth`.
-  // Radial layout (measured from `xzCenter` along the cut's outward
-  // radial direction):
-  //   - inner edge at `outerRadius - bondOverlap`,
-  //   - outer edge at `outerRadius + brimWidth`.
+  // First attempted fix (PR #107 initial): set `radialInner = 0`
+  // so the brim extends from `xzCenter` outward through the
+  // silicone cavity. Cavity subtract then carves the inside-
+  // silicone portion. Gap problem solved, BUT: on sideCount 3/4
+  // the TWO brims per piece overlap near `xzCenter` forming a
+  // self-intersecting plus-sign through the silicone volume. The
+  // subsequent `difference(merged_brims, siliconeOuter)` became
+  // pathologically slow (observed 90+ s on 200 %-scaled mini-
+  // figurine in Windows E2E).
   //
-  // Can legitimately exceed the shell thickness — step 6 (silicone-
-  // cavity subtract) carves any intrusion past the shell's inner
-  // cavity. The carve-out makes `bondOverlap` strictly a visual/
-  // mechanical-bonding knob independent of the hard "no poking the
-  // silicone" invariant.
-  const bondOverlap = Math.max(
+  // Current approach: bondOverlap now has TWO terms that sum to
+  // cover both the thickness-driven bonding depth AND the
+  // diagonal-gap problem:
+  //
+  //   bondOverlap = BOND_OVERLAP_MULTIPLIER × printShellThickness
+  //               + DIAGONAL_COVERAGE_RATIO × shellOuterRadius
+  //
+  // At DIAGONAL_COVERAGE_RATIO = 0.35 the brim reaches ~35 % of
+  // shellOuterRadius inward from the AABB max — enough to cross
+  // into the shell material at any cut angle θ (the worst-case
+  // gap at 45° is ~29 % for a squarish master).
+  //
+  // Final safety clamp: `radialInner >= MIN_RADIAL_INNER_RATIO ×
+  // shellOuterRadius` (10 %). Prevents the brim from reaching
+  // center even on small masters, keeping adjacent brims
+  // spatially separated so the kernel's boolean ops stay
+  // bounded.
+  const desiredBondOverlap = Math.max(
     0,
-    BOND_OVERLAP_MULTIPLIER * printShellThickness_mm,
+    BOND_OVERLAP_MULTIPLIER * printShellThickness_mm +
+      DIAGONAL_COVERAGE_RATIO * shellOuterRadius,
   );
+  const minRadialInner = MIN_RADIAL_INNER_RATIO * shellOuterRadius;
+  const maxBondOverlap = Math.max(0, shellOuterRadius - minRadialInner);
+  const bondOverlap = Math.min(desiredBondOverlap, maxBondOverlap);
   const width = bondOverlap + brimWidth_mm;
-  // Issue #96: distance from `xzCenter` to the brim's inner radial
-  // edge. The extrusion starts at local Z = 0 (after rotation, at
-  // world position `xzCenter + radialInner × radial(θ)`) and extends
-  // outward by `width`.
   const radialInner = shellOuterRadius - bondOverlap;
 
   if (ySize <= 0 || width <= 0 || brimThickness_mm <= 0) {
