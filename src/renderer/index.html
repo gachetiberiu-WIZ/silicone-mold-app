@@ -2,9 +2,21 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      Issue #77 — CSP extension for the generateMold web worker:
+        - `worker-src 'self' blob:` so the renderer can spawn the
+          module-type worker that hosts the manifold-3d WASM kernel.
+          Vite's dev server serves the worker file from `'self'`; the
+          production build emits a chunked worker bundle and loads it
+          via a `blob:` URL when the worker module contains ESM imports
+          the Electron file protocol can't range-serve.
+        - `child-src 'self' blob:` mirrors `worker-src` for older UA
+          fallbacks (Electron tracks Chromium which honours `worker-src`
+          on 2024+ versions — this is belt-and-braces).
+    -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'unsafe-eval'; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+      content="default-src 'self'; script-src 'self' 'unsafe-eval' blob:; worker-src 'self' blob:; child-src 'self' blob:; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!--

@@ -23,7 +23,18 @@
  * tsconfig include).
  */
 
-import { generateSiliconeShell } from '@/geometry/generateMold';
+// Issue #77 — the renderer no longer calls `generateSiliconeShell`
+// directly. The pipeline runs in a dedicated web worker (see
+// `./worker/generateMoldRunner.ts`); the runner's `generateMoldViaWorker`
+// matches the orchestrator's `generate` signature 1:1 so the orchestrator
+// stays oblivious to the transport. `cancelCurrentWorkerRun` hangs off
+// every staleness path so a new STL / parameter change / orientation
+// commit kills the in-flight worker instead of letting it burn cycles
+// on a stale run.
+import {
+  generateMoldViaWorker,
+  cancelCurrentWorkerRun,
+} from './worker/generateMoldRunner';
 import { LAY_FLAT_ACTIVE_EVENT } from './scene/layFlatController';
 import { getMasterManifold } from './scene/master';
 import { mount, type MountedViewport } from './scene/viewport';
@@ -342,7 +353,10 @@ function mountParameters(): void {
         masterGroup.updateMatrixWorld(true);
         return masterGroup.matrixWorld.clone();
       },
-      generate: generateSiliconeShell,
+      // Issue #77 — offload to a web worker. The runner keeps the
+      // `(master, parameters, viewTransform, onPhase?) => Promise<...>`
+      // shape so the orchestrator doesn't know it's talking to a worker.
+      generate: generateMoldViaWorker,
       topbar: tbar,
       button: btn,
       // Issue #47: hand the generated halves to the scene's silicone
@@ -465,6 +479,12 @@ function mountParameters(): void {
         tbar.setVolumesStale(true);
         generateOrchestrator?.invalidateExportables();
       }
+      // Issue #77 — also kill any in-flight worker when parameters
+      // change while a generate is busy. The orchestrator's epoch check
+      // already drops stale results, but letting the worker keep
+      // running burns a CPU core and delays the next fresh run's WASM
+      // init. Terminate early. Safe when no worker is live (no-op).
+      cancelCurrentWorkerRun();
     });
   }
 
@@ -481,6 +501,9 @@ function mountParameters(): void {
         tbar.setVolumesStale(true);
         generateOrchestrator?.invalidateExportables();
       }
+      // Issue #77 — kill any in-flight worker on dimension changes.
+      // See the parametersStore subscribe above for the rationale.
+      cancelCurrentWorkerRun();
     });
   }
 
@@ -503,6 +526,11 @@ function mountParameters(): void {
     const tbar = topbar;
     attachGenerateInvalidation(topbar, generateButton, {
       clearSilicone: () => {
+        // Issue #77 — abort any in-flight Generate worker before we
+        // clear the scene. A new-STL load, orientation commit, or
+        // reset invalidates any pending result, and we'd rather stop
+        // the worker now than let it post back into a dead scene.
+        cancelCurrentWorkerRun();
         vp.clearSilicone();
         // Keep the exploded-view toggle's enabled state in lock-step with
         // whether silicone is in the scene. Also force the pressed state
@@ -590,6 +618,14 @@ async function loadMasterFromBuffer(buffer: ArrayBuffer): Promise<void> {
   // the invalidation listener covers only the "had-commit → new-STL"
   // path. Bumping here covers the first-load / no-prior-commit path too.
   bumpGenerateEpoch();
+  // Issue #77 — also kill any in-flight generate worker. The epoch bump
+  // above makes the pipeline's resolved result get dropped on arrival,
+  // but the worker would still burn a CPU core computing that doomed
+  // result. Terminating it here frees the thread immediately. Safe when
+  // no worker is live (no-op). Covers the first-load + no-prior-commit
+  // path the invalidation listener misses (that listener only fires on
+  // the `LAY_FLAT_COMMITTED_EVENT` stream).
+  cancelCurrentWorkerRun();
   // Issue #47: any silicone preview attached to the PREVIOUS master is
   // stale. Tear it down + release the cached half-Manifolds. Idempotent
   // and safe on a first-load with no silicone installed. The
