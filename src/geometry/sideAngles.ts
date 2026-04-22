@@ -34,3 +34,24 @@ export const SIDE_CUT_ANGLES: Readonly<Record<2 | 3 | 4, readonly number[]>> =
     3: Object.freeze([30, 150, 270]),
     4: Object.freeze([45, 135, 225, 315]),
   });
+
+/**
+ * Return `SIDE_CUT_ANGLES[sideCount]` with every angle offset by
+ * `rotationDeg`, modulo 360. Used by the cut-planes preview feature
+ * (dogfood 2026-04-22 round 7) to let the user spin the whole cut-
+ * plane set around the vertical axis before generate.
+ *
+ * Keeps the base table immutable; returns a fresh array so callers
+ * can safely iterate / sort without touching the frozen source.
+ *
+ * `rotationDeg` defaults to 0 so existing call-sites that don't
+ * care about user rotation work unchanged.
+ */
+export function effectiveCutAngles(
+  sideCount: 2 | 3 | 4,
+  rotationDeg = 0,
+): readonly number[] {
+  const base = SIDE_CUT_ANGLES[sideCount];
+  if (rotationDeg === 0) return base;
+  return base.map((a) => ((a + rotationDeg) % 360 + 360) % 360);
+}

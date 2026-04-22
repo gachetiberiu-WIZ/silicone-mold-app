@@ -527,6 +527,86 @@ describe('addBrim — issue #89 no-cavity-intrusion invariant', () => {
   );
 });
 
+// Cut-planes preview feature (dogfood round 7) — brim must preserve
+// every safety invariant when the user rotates the partition or moves
+// the cut center. Run the key invariants (cavity-intrusion +
+// adjacent-disjoint) with a non-trivial rotation + offset.
+
+describe('addBrim — user cut-plane overrides', () => {
+  test('cavity-intrusion + disjoint invariants hold under rotation=30° + offset=(2,-1)', async () => {
+    const toplevel = await initManifold();
+    const OUTER = 20;
+    const INNER = 10;
+    const shell = buildRingShell(toplevel, OUTER, INNER);
+    const shellBbox = shell.boundingBox();
+    const siliconeOuter = buildInnerCavity(toplevel, INNER);
+    const rotatedAngles = [75, 165, 255, 345]; // [45,135,225,315] + 30
+    const xzCenter = { x: 2, z: -1 };
+    const pieces = sliceShellRadial(
+      toplevel,
+      shell,
+      4,
+      xzCenter,
+      rotatedAngles,
+    );
+    shell.delete();
+
+    const brimmed: Manifold[] = [];
+    try {
+      for (let i = 0; i < pieces.length; i++) {
+        brimmed.push(
+          addBrim({
+            toplevel,
+            piece: pieces[i]!,
+            pieceIndex: i,
+            sideCount: 4,
+            shellBboxWorld: {
+              min: {
+                x: shellBbox.min[0]!,
+                y: shellBbox.min[1]!,
+                z: shellBbox.min[2]!,
+              },
+              max: {
+                x: shellBbox.max[0]!,
+                y: shellBbox.max[1]!,
+                z: shellBbox.max[2]!,
+              },
+            },
+            xzCenter,
+            angles: rotatedAngles,
+            brimWidth_mm: 10,
+            brimThickness_mm: 3,
+            siliconeOuter,
+            printShellThickness_mm: 3,
+          }),
+        );
+      }
+      // Invariant 1 — adjacent-piece disjointness holds under rotation.
+      for (let i = 0; i < brimmed.length; i++) {
+        const j = (i + 1) % brimmed.length;
+        const a = brimmed[i]!;
+        const b = brimmed[j]!;
+        const overlap = toplevel.Manifold.intersection([a, b]);
+        try {
+          const overlapVol = overlap.volume();
+          const minVol = Math.min(a.volume(), b.volume());
+          expect(overlapVol).toBeLessThan(minVol * 1e-3);
+        } finally {
+          overlap.delete();
+        }
+      }
+      // Invariant 2 — every piece still manifold + non-empty.
+      for (const p of brimmed) {
+        expect(isManifold(p)).toBe(true);
+        expect(p.isEmpty()).toBe(false);
+      }
+    } finally {
+      for (const p of brimmed) p.delete();
+      siliconeOuter.delete();
+    }
+  });
+});
+
 // Issue #96 regression coverage — tapered trapezoidal brim.
 //
 // The brim is built as a trapezoidal prism that is FULL height

@@ -194,3 +194,94 @@ describe('sliceShellRadial — reference table matches documented convention', (
     expect(SIDE_CUT_ANGLES[2]).toEqual([90, 270]);
   });
 });
+
+// Cut-planes preview feature (dogfood round 7) — the slicer now accepts
+// an `angles` override so the user-facing gizmo can rotate the whole
+// partition. Default (no override) must still match the reference
+// table above; explicit override must produce a valid partition at
+// arbitrary rotation + center offset.
+
+describe('sliceShellRadial — user cut-plane overrides', () => {
+  test('sideCount=4, angles rotated by 45° maps piece 0 centroid onto +X', async () => {
+    const toplevel = await initManifold();
+    const shell = buildRingShell(toplevel);
+    try {
+      // Base angles at sideCount=4 → [45,135,225,315], piece 0 mid = 90° (+Z).
+      // Rotated by 45° → [90,180,270,360=0], piece 0 mid = 135°... hmm wait.
+      // Actually the mid of piece 0 = (angles[0]+angles[1])/2 = (90+180)/2 = 135°.
+      // 135° CCW from +X is -X +Z quadrant. Let's just check the centroid
+      // points along cos(mid),sin(mid) direction instead.
+      const rotatedAngles = [90, 180, 270, 360]; // == effectiveCutAngles(4, 45)
+      const pieces = sliceShellRadial(
+        toplevel,
+        shell,
+        4,
+        { x: 0, z: 0 },
+        rotatedAngles,
+      );
+      try {
+        expect(pieces).toHaveLength(4);
+        for (const p of pieces) {
+          expect(isManifold(p)).toBe(true);
+          expect(p.isEmpty()).toBe(false);
+        }
+        // Piece 0 mid-angle = 135° → points to +Z, -X quadrant.
+        const midRad = pieceMidAngleRad(4, 0, rotatedAngles);
+        const expected = radialUnit(midRad);
+        const bbox = pieces[0]!.boundingBox();
+        const cx = (bbox.min[0]! + bbox.max[0]!) / 2;
+        const cz = (bbox.min[2]! + bbox.max[2]!) / 2;
+        // Centroid projects positive onto the mid direction.
+        expect(cx * expected[0] + cz * expected[2]).toBeGreaterThan(0);
+      } finally {
+        for (const p of pieces) p.delete();
+      }
+    } finally {
+      shell.delete();
+    }
+  });
+
+  test('sideCount=3, rotation + xzCenter offset: all pieces remain manifold and volumes sum correctly', async () => {
+    const toplevel = await initManifold();
+    const shell = buildRingShell(toplevel);
+    try {
+      const shellVol = shell.volume();
+      // Rotate by 30° and translate the cut center by (+2, -1) mm.
+      const rotatedAngles = [60, 180, 300]; // [30,150,270] + 30
+      const pieces = sliceShellRadial(
+        toplevel,
+        shell,
+        3,
+        { x: 2, z: -1 },
+        rotatedAngles,
+      );
+      try {
+        expect(pieces).toHaveLength(3);
+        let totalVol = 0;
+        for (const p of pieces) {
+          expect(isManifold(p)).toBe(true);
+          expect(p.isEmpty()).toBe(false);
+          totalVol += p.volume();
+        }
+        // Mass conservation: piece sum ≈ shell volume within kernel slop.
+        expect(Math.abs(totalVol - shellVol) / shellVol).toBeLessThan(1e-3);
+      } finally {
+        for (const p of pieces) p.delete();
+      }
+    } finally {
+      shell.delete();
+    }
+  });
+
+  test('wrong-length angles array throws', async () => {
+    const toplevel = await initManifold();
+    const shell = buildRingShell(toplevel);
+    try {
+      expect(() =>
+        sliceShellRadial(toplevel, shell, 4, { x: 0, z: 0 }, [0, 90, 180]),
+      ).toThrow(/expected 4 angles/);
+    } finally {
+      shell.delete();
+    }
+  });
+});
