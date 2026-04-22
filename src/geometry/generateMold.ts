@@ -871,6 +871,19 @@ export async function generateSiliconeShell(
                 xzCenter,
                 brimWidth_mm: parameters.brimWidth_mm,
                 brimThickness_mm: parameters.brimThickness_mm,
+                // Issue #89 fix: pass the shell's inner-cavity volume
+                // (master-outset by `siliconeThickness`) + the shell
+                // thickness so the brim builder can (a) size the brim
+                // to cover `bondOverlap = printShellThickness` inward
+                // into the shell wall, and (b) carve the silicone
+                // cavity out of the brim box so it never intrudes.
+                // `siliconeOuter` is the Manifold allocated above at
+                // the silicone-outer levelSet step; the `finally`
+                // at the end of this try block disposes it AFTER
+                // every addBrim call completes (it needs to survive
+                // every iteration).
+                siliconeOuter,
+                printShellThickness_mm: shellThickness,
               });
               assertManifold(brimmed, `shell piece ${i} (post-brim)`);
               shellPieces[i] = brimmed;
