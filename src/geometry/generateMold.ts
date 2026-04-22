@@ -1332,28 +1332,24 @@ export async function generateSiliconeShell(
           // released — we then set `shellPieces = undefined` to avoid
           // the outer `catch` trying to re-release. Achieve this by
           // swap-then-assign.
+          // applyTongueAndGrooveSeals handles its own partial cleanup
+          // on throw (releases any surviving piece Manifolds). On throw
+          // `shellPieces` stays undefined so the outer catch skips the
+          // re-release loop.
           const preSealPieces = shellPieces;
           shellPieces = undefined;
-          try {
-            shellPieces = applyTongueAndGrooveSeals({
-              toplevel,
-              pieces: preSealPieces,
-              sideCount: parameters.sideCount,
-              xzCenter,
-              angles: effectiveCutAngles_,
-              shellY: {
-                minY: shellBboxWorld.min.y,
-                maxY: shellBboxWorld.max.y,
-              },
-              radialMax_mm: sealRadialMax_mm,
-            });
-          } catch (err) {
-            // applyTongueAndGrooveSeals handled the partial cleanup;
-            // preSealPieces is empty / its entries are dead. Rethrow
-            // to the outer catch which will find shellPieces ===
-            // undefined and skip the re-release loop.
-            throw err;
-          }
+          shellPieces = applyTongueAndGrooveSeals({
+            toplevel,
+            pieces: preSealPieces,
+            sideCount: parameters.sideCount,
+            xzCenter,
+            angles: effectiveCutAngles_,
+            shellY: {
+              minY: shellBboxWorld.min.y,
+              maxY: shellBboxWorld.max.y,
+            },
+            radialMax_mm: sealRadialMax_mm,
+          });
           const tSeal = performance.now();
 
           if (onPhase) await onPhase('slab');
