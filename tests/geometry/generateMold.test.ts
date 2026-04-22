@@ -262,13 +262,19 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
             // full print shell at each cut plane to build a flange that
             // follows the shell silhouette (user-approved visual fix
             // after the AABB-based brim left visible gaps on tapered
-            // masters). Adds ~4 s on ubuntu CI at sideCount=4 (8 ×
-            // rotate + slice on the full print shell). Budget bumped
-            // 12 s → 18 s to absorb the geometry cost; follow-up
-            // tracks claw-back via cross-section caching — compute
-            // per unique cut angle once and share across adjacent
-            // pieces, halving the rotate+slice count at sideCount 3/4.
-            expect(elapsed).toBeLessThan(18_000);
+            // masters). Initially added ~4 s on ubuntu CI at
+            // sideCount=4 (budget bumped 12 s → 18 s to unblock).
+            //
+            // Round-11 perf claw-back (same dogfood cycle) caches the
+            // cut-plane cross-section once per unique angle in
+            // `generateMold.ts` and reuses across adjacent pieces —
+            // halves the rotate + slice + hole-fill cost. Local
+            // mini-figurine dropped from ~15 s to ~7 s; ubuntu CI
+            // expected at ~9-10 s. Budget tightened 18 s → 12 s (back
+            // to the pre-conformal value), catching any regression
+            // that undoes the caching or re-introduces the per-brim
+            // shell-rotate.
+            expect(elapsed).toBeLessThan(12_000);
           }
 
           expect(isManifold(result.silicone)).toBe(true);
