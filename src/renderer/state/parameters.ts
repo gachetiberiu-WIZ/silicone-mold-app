@@ -78,6 +78,21 @@ export interface MoldParameters {
   sideCount: 2 | 3 | 4;
   /** Draft angle in degrees. Always unit-agnostic. */
   draftAngle_deg: number;
+  /**
+   * Cut-plane rotation override (degrees, CCW, looking down −Y).
+   * Offset applied uniformly to every radial cut angle. Optional;
+   * missing or 0 means "use `SIDE_CUT_ANGLES[sideCount]` as-is" —
+   * preserves pre-feature behaviour for call-sites that don't set
+   * it. Populated by the cut-planes preview gizmo (dogfood round 7).
+   */
+  cutRotation_deg?: number;
+  /**
+   * Cut-plane center XZ offset (mm). Added to the master's computed
+   * bbox XZ center so the cut planes pivot around the user-chosen
+   * point. Optional; missing or `{x:0, z:0}` means "pivot through
+   * master center" — preserves pre-feature behaviour.
+   */
+  cutCenterOffset_mm?: { x: number; z: number };
 }
 
 /**

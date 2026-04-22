@@ -323,6 +323,14 @@ export interface AddBrimArgs {
    * final union (issue #89).
    */
   printShellThickness_mm: number;
+  /**
+   * Optional radial cut-angle override (degrees, CCW from +X axis).
+   * Must be length `sideCount` and sorted CCW. Defaults to
+   * `SIDE_CUT_ANGLES[sideCount]`. The cut-planes preview feature
+   * (dogfood 2026-04-22 round 7) uses this to let the user rotate
+   * the whole partition before generate.
+   */
+  angles?: readonly number[];
 }
 
 /**
@@ -350,7 +358,12 @@ export function addBrim(args: AddBrimArgs): Manifold {
     printShellThickness_mm,
   } = args;
 
-  const angles = SIDE_CUT_ANGLES[sideCount];
+  const angles = args.angles ?? SIDE_CUT_ANGLES[sideCount];
+  if (angles.length !== sideCount) {
+    throw new Error(
+      `addBrim: expected ${sideCount} angles, got ${angles.length}`,
+    );
+  }
 
   // Cuts for this piece:
   //   - CCW (lower) bound at angle a0: piece sits on +n_CCW(a0) side
@@ -683,7 +696,8 @@ export function addBrim(args: AddBrimArgs): Manifold {
 export function pieceOutwardDir(
   sideCount: 2 | 3 | 4,
   pieceIndex: number,
+  angles?: readonly number[],
 ): { x: number; z: number } {
-  const mid = pieceMidAngleRad(sideCount, pieceIndex);
+  const mid = pieceMidAngleRad(sideCount, pieceIndex, angles);
   return { x: Math.cos(mid), z: Math.sin(mid) };
 }

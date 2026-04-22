@@ -82,8 +82,8 @@ export interface XzCenter {
 
 /**
  * Slice a print shell radially into `sideCount` pieces, bounded by
- * vertical half-space planes through `(xzCenter, Y axis)` at the angles
- * from `SIDE_CUT_ANGLES[sideCount]`.
+ * vertical half-space planes through `(xzCenter, Y axis)` at the given
+ * `angles` (or `SIDE_CUT_ANGLES[sideCount]` if omitted).
  *
  * @param toplevel Initialised manifold-3d handle (unused today — the
  *   slice is a pure `.trimByPlane` chain — but kept in the signature so
@@ -91,7 +91,15 @@ export interface XzCenter {
  *   a second `initManifold()` round-trip).
  * @param shell Print-shell Manifold; caller retains ownership.
  * @param sideCount 2, 3, or 4.
- * @param xzCenter Master bbox XZ center, world-space mm.
+ * @param xzCenter Cut-plane center, world-space mm. The caller must
+ *   apply any user-facing offset (e.g. the cut-planes preview gizmo
+ *   drag) before passing this in — the slicer treats it as the
+ *   authoritative pivot.
+ * @param angles Optional radial cut angles (degrees, CCW from +X).
+ *   Defaults to `SIDE_CUT_ANGLES[sideCount]`. Must be length
+ *   `sideCount` and sorted CCW so piece `i` occupies
+ *   `[angles[i], angles[(i+1) % n]]` (the slicer allows wraparound
+ *   via the `a1 <= a0` check in `pieceMidAngleRad`).
  * @returns Fresh `Manifold[]` of length `sideCount`; caller owns each
  *   handle and must `.delete()` them.
  */
@@ -100,10 +108,15 @@ export function sliceShellRadial(
   shell: Manifold,
   sideCount: 2 | 3 | 4,
   xzCenter: XzCenter,
+  angles: readonly number[] = SIDE_CUT_ANGLES[sideCount],
 ): Manifold[] {
   void toplevel; // reserved for future use (union fallback path)
 
-  const angles = SIDE_CUT_ANGLES[sideCount];
+  if (angles.length !== sideCount) {
+    throw new Error(
+      `sliceShellRadial: expected ${sideCount} angles, got ${angles.length}`,
+    );
+  }
   const pieces: Manifold[] = [];
 
   try {
@@ -170,8 +183,11 @@ export function sliceShellRadial(
  * sideCount=2 spans 270°→360°+90°=450°; mid = 360°) by adding 360° to
  * `a1` when needed before averaging.
  */
-export function pieceMidAngleRad(sideCount: 2 | 3 | 4, pieceIndex: number): number {
-  const angles = SIDE_CUT_ANGLES[sideCount];
+export function pieceMidAngleRad(
+  sideCount: 2 | 3 | 4,
+  pieceIndex: number,
+  angles: readonly number[] = SIDE_CUT_ANGLES[sideCount],
+): number {
   const a0 = angles[pieceIndex] as number;
   let a1 = angles[(pieceIndex + 1) % sideCount] as number;
   if (a1 <= a0) a1 += 360;

@@ -55,6 +55,7 @@ import { SIDE_COUNT_OPTIONS } from '@/renderer/state/parameters';
 import { manifoldToBufferGeometry, isManifold } from './adapters';
 import { buildBaseSlab, BASE_SLAB_PLUG_HEIGHT_MM } from './baseSlab';
 import { addBrim } from './brim';
+import { effectiveCutAngles } from './sideAngles';
 import { initManifold } from './initManifold';
 import { sliceShellRadial } from './shellSlicer';
 
@@ -1003,10 +1004,20 @@ export async function generateSiliconeShell(
           // along any XZ face). Then slice into `sideCount` pieces and
           // union a brim onto each piece's cut face(s).
           const shellBbox = printShellFull.boundingBox();
+          // Apply the user-facing cut-plane overrides (dogfood 2026-04-22
+          // round 7, cut-planes preview feature). Both fields default to
+          // zero so callers that don't touch the preview gizmo get the
+          // pre-feature behaviour.
+          const cutCenterOffset = parameters.cutCenterOffset_mm ?? { x: 0, z: 0 };
+          const cutRotation_deg = parameters.cutRotation_deg ?? 0;
           const xzCenter = {
-            x: (masterBbox.min[0] + masterBbox.max[0]) / 2,
-            z: (masterBbox.min[2] + masterBbox.max[2]) / 2,
+            x: (masterBbox.min[0] + masterBbox.max[0]) / 2 + cutCenterOffset.x,
+            z: (masterBbox.min[2] + masterBbox.max[2]) / 2 + cutCenterOffset.z,
           };
+          const effectiveCutAngles_ = effectiveCutAngles(
+            parameters.sideCount,
+            cutRotation_deg,
+          );
           const shellBboxWorld = {
             min: {
               x: shellBbox.min[0],
@@ -1025,6 +1036,7 @@ export async function generateSiliconeShell(
             printShellFull,
             parameters.sideCount,
             xzCenter,
+            effectiveCutAngles_,
           );
           // The full shell is no longer needed — the pieces cover its
           // volume minus trimming rounding.
@@ -1052,6 +1064,7 @@ export async function generateSiliconeShell(
                 sideCount: parameters.sideCount,
                 shellBboxWorld,
                 xzCenter,
+                angles: effectiveCutAngles_,
                 brimWidth_mm: parameters.brimWidth_mm,
                 brimThickness_mm: parameters.brimThickness_mm,
                 // Issue #89 fix: pass the shell's inner-cavity volume
