@@ -118,9 +118,18 @@ export interface MoldGenerationResult {
   readonly siliconeVolume_mm3: number;
   /**
    * Resin pour volume in mm³. With sprue + vent channels removed, this
-   * equals the master's volume exactly (to within kernel tolerance the
-   * `manifold.volume()` call returns). Identity with `masterVolume_mm3`
-   * is pinned in tests at 1e-9 relative.
+   * equals the TRANSFORMED master's volume exactly (to within kernel
+   * tolerance the `manifold.volume()` call returns). Identity with
+   * `transformedMaster.volume()` is pinned in tests at 1e-9 relative.
+   *
+   * Issue #81: pre-fix this read `master.volume()` (untransformed), so
+   * a non-identity viewTransform — notably the Dimensions panel scale
+   * (#79) — left the Resin topbar readout pegged at the untransformed
+   * volume even as the viewport + silicone scaled correctly. Now
+   * derived from `transformedMaster.volume()` so scale + rotation +
+   * translation all flow through. Identity viewTransform still yields
+   * `master.volume()` within `Manifold.transform` roundoff, preserving
+   * the original 1e-9 relative identity for untransformed fixtures.
    */
   readonly resinVolume_mm3: number;
   /**
@@ -1042,11 +1051,19 @@ export async function generateSiliconeShell(
           }
           const tBaseSlab = performance.now();
 
-          // Step 7: volumes. Resin identity (resin ≡ masterVolume) pinned
-          // at 1e-9 relative — no sprue / vent channels contribute any
-          // more.
+          // Step 7: volumes. Resin identity (resin ≡ transformedMasterVolume)
+          // pinned at 1e-9 relative — no sprue / vent channels contribute
+          // any more.
+          //
+          // Issue #81: use `transformedMaster.volume()` (not the raw
+          // `master`) so the Dimensions panel's scale + any lay-flat
+          // rotation + translation all flow into the Resin readout.
+          // Every downstream op in this pipeline already runs against
+          // `transformedMaster`; this line is catching up to the rest.
+          // Identity viewTransform falls back to the untransformed
+          // volume within `Manifold.transform` roundoff (< 1e-12 rel).
           const siliconeVolume_mm3 = silicone.volume();
-          const resinVolume_mm3 = master.volume();
+          const resinVolume_mm3 = transformedMaster.volume();
           const shellPiecesVolume_mm3 = shellPieces.map((p) => p.volume());
           const totalShellVolume_mm3 = shellPiecesVolume_mm3.reduce(
             (sum, v) => sum + v,

@@ -190,6 +190,29 @@ export interface GenerateOrchestratorDeps {
   translatePhase?: (key: string) => string;
   onSiliconeInstalled?: (result: unknown) => void;
   onGenerateSuccess?: OrchestratorOnGenerateSuccess;
+  /**
+   * Issue #93: fire a user-visible NOTICE (not an error) when the
+   * post-generate base slab came out degenerate — `basePart.isEmpty()`
+   * is true OR `baseSlabVolume_mm3 <= 0`. Intended wiring:
+   * `(msg) => showNotice(msg)` from `errorToast.ts`, with `msg` the
+   * translated `warnings.degenerateSlab` string.
+   *
+   * The orchestrator fires this at most ONCE per successful `run()` —
+   * on the happy-path terminal branch only, AFTER the topbar + scene
+   * hand-off. Stale-drop and error paths skip the notice (the user
+   * will see the later run's outcome, whatever it is). Omit to
+   * disable the hook entirely (legacy tests, any call site that
+   * doesn't want UI side effects).
+   */
+  showNotice?: (message: string) => void;
+  /**
+   * Issue #93: translate a warning key (`'warnings.degenerateSlab'`)
+   * into a user-facing label. Production wires
+   * `(key) => t(key)` so the string flows through i18n. If omitted,
+   * the key is passed through verbatim (suitable for tests that want
+   * to assert on the raw key).
+   */
+  translateWarning?: (key: string) => string;
   bumpEpoch?: () => number;
   getEpoch?: () => number;
   logger?: {
@@ -303,6 +326,8 @@ export function createGenerateOrchestrator(
     translatePhase,
     onSiliconeInstalled,
     onGenerateSuccess,
+    showNotice,
+    translateWarning,
     bumpEpoch = bumpGenerateEpoch,
     getEpoch = getGenerateEpoch,
     logger = console,
@@ -530,6 +555,35 @@ export function createGenerateOrchestrator(
           };
           fireState();
           if (onGenerateSuccess) onGenerateSuccess();
+
+          // Issue #93 — degenerate-slab notice. When the user commits
+          // the wrong orientation (e.g. figurine top-face instead of
+          // bottom) the base slab footprint collapses to zero area and
+          // `buildBaseSlab` returns a valid-but-empty Manifold. The
+          // export still writes `base-slab.stl` as a 0-triangle binary
+          // STL; the user prints nothing and doesn't know why. Surface
+          // a NOTICE (not an error) post-generate so they can re-orient
+          // and regenerate. Fires at most once per successful `run()`
+          // and ONLY on the happy-path terminal branch — stale-drops
+          // and error paths skip it since the user will see the
+          // superseding run's outcome. Checks BOTH `isEmpty()` and
+          // `<= 0` volume for defence in depth — a non-empty but
+          // zero-volume slab is still a user-visible problem.
+          if (showNotice) {
+            const slabDegenerate =
+              (typeof result.basePart.isEmpty === 'function' &&
+                result.basePart.isEmpty()) ||
+              !(result.baseSlabVolume_mm3 > 0);
+            if (slabDegenerate) {
+              const key = 'warnings.degenerateSlab';
+              const msg = translateWarning ? translateWarning(key) : key;
+              try {
+                showNotice(msg);
+              } catch (err) {
+                logger.error('[generate] showNotice threw:', err);
+              }
+            }
+          }
           // Issue #97 Fix 1C: keep the progress banner visible until
           // the scene has actually REPAINTED with the fresh silicone +
           // printable-parts meshes. `setSilicone` + `setPrintableParts`

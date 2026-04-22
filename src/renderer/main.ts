@@ -405,6 +405,14 @@ function mountParameters(): void {
         btn.setGenerated(true);
         tbar.setVolumesStale(false);
       },
+      // Issue #93 — surface a blue notice-toast post-generate when the
+      // base slab came out degenerate (zero footprint for the committed
+      // orientation). The orchestrator fires this once per successful
+      // run on the happy-path terminal branch only; stale-drops + error
+      // paths skip it. `translateWarning` routes the i18n key through
+      // `t()` so the string honours locale.
+      showNotice: (message: string) => showNotice(message),
+      translateWarning: (key: string) => t(key),
     });
 
     // Issue #91 — wire the Export STL button's enabled flag to the
