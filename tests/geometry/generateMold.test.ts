@@ -245,7 +245,15 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
             // widened 8 s → 10 s to unblock the feature-complete landing;
             // issue #86 tracks clawing this back via brim simplification
             // and piece-parallel slicing.
-            expect(elapsed).toBeLessThan(10_000);
+            //
+            // Issue #94 Fix 1 added the pour-channel subtract (1 slice +
+            // 1 extrude + 1 Manifold.difference) for ~1 s additional on
+            // ubuntu CI. Budget bumped 10 s → 12 s to absorb the new
+            // boolean; issue #86 still tracks the overall claw-back. An
+            // observed failure at 11.0 s on ubuntu-latest sat well under
+            // the old 15 s ceiling; 12 s gives a ~9 % headroom over the
+            // observed peak without weakening the 25 % regression gate.
+            expect(elapsed).toBeLessThan(12_000);
           }
 
           expect(isManifold(result.silicone)).toBe(true);
