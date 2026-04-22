@@ -513,45 +513,26 @@ export function addBrim(args: AddBrimArgs): Manifold {
       // cavity (where siliconeOuter doesn't extend, so the cavity
       // carve-out downstream couldn't remove it).
       //
-      // New formulation:
+      // New formulation (round-10 fix, dogfood 2026-04-22):
       //
-      //   - `csOuterRing = csOutward − csFilled`: pure ring OUTSIDE
-      //     the shell silhouette, uniform `brimWidth` radial thickness
-      //     at every Y, naturally bounded to the shell's Y range
-      //     because csOutward already is (step 3b clip).
-      //   - `csBondRegion = csRaw`: the actual ANNULAR shell-wall
-      //     slice at the cut plane, UNMODIFIED. Its outer boundary
-      //     hugs the shell's outer surface and its inner boundary
-      //     hugs the shell's inner cavity surface. Provides the
-      //     mechanical bond where the brim fuses with the shell wall
-      //     via the downstream `Manifold.union(piece, brim)` step.
-      //   - `brim2d = csOuterRing ∪ csBondRegion`: combined shape
-      //     that extends from the shell's INNER wall outward to the
-      //     brim's outer edge — never into the open cavity above the
-      //     silicone, never above/below the shell's Y range.
+      //   brim2d = csOutward - csFilled
       //
-      // Bond depth dropped from `2 × printShellThickness_mm` to
-      // `1 × printShellThickness_mm` (the shell wall's own
-      // thickness). The old 2× multiplier existed to soften the
-      // seam on the pre-conformal rectangular brim; the conformal
-      // profile already blends visually because csOuterRing's inner
-      // edge is exactly the shell's outer silhouette.
+      // i.e. a pure ring OUTSIDE the shell silhouette, uniform
+      // `brimWidth_mm` radial thickness at every Y, naturally bounded
+      // to the shell's Y range because csOutward is (step 3b clip).
       //
-      // `BOND_OVERLAP_MULTIPLIER` is retained in the module for a
-      // possible future revival but is no longer used in the
-      // pipeline.
-      const csOuterRing = csOutward.subtract(csFilled);
-      tempSections.push(csOuterRing);
-      // csRaw must share the SAME X_cs ≥ 0 clip as csOutward for the
-      // adjacent-pieces-disjoint invariant: the other cut plane of the
-      // piece projects to the Y_cs axis in this cut's local 2D, so
-      // bond material must live strictly in the piece's half-plane.
-      // Without this clip, csRaw's full annular shell-wall slice
-      // spills into the adjacent piece's arc and the two brims
-      // overlap at the shared cut plane.
-      const csRawClipped = csRaw.intersect(clipRectPlaced);
-      tempSections.push(csRawClipped);
-      const brim2d = csRawClipped.add(csOuterRing);
+      // NO bond region. The brim attaches to the shell at the cut-
+      // plane SURFACE; Manifold.union(piece, brim) surface-merges the
+      // two volumes without needing interior overlap. The prior
+      // `csRaw` bond region was a 2D annular shell-wall slice
+      // extruded PERPENDICULAR to the cut plane by brimThickness_mm;
+      // on a curved (tapered or faceted) shell, that prismatic
+      // extrusion doesn't match the shell wall's actual shape
+      // `brimThickness/2` mm into the piece, so the extrusion
+      // overflows the shell interior at each cut plane — creating
+      // the visible shelf / ledge protrusions into the pour cavity
+      // that the dogfood screenshots caught.
+      const brim2d = csOutward.subtract(csFilled);
       tempSections.push(brim2d);
 
       if (brim2d.isEmpty()) {
