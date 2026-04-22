@@ -6,7 +6,15 @@ Instructions for Claude Code sessions working in this repo. Read this first.
 
 Desktop app (Electron + Three.js, Windows-first) that takes a 3D master STL (miniature, figurine, object) and generates a silicone-glove mold wrapped in a rigid 3D-printed shell. Computes silicone volume, resin pour volume, and print-shell volume. Exports binary STL.
 
-**v1 scope (redirected 2026-04-20 after dogfood):** rigid-shell + silicone-glove mold strategy. Surface-conforming silicone offset + surface-conforming print shell, open-top pour edge, optional radial slicing + brims (Waves E/F). 2/3/4 side count parameter reserved for radial slicing of the shell in Wave E. mm default, inches toggle. Sleeve+shell variations, multi-part (3–5), brush-on, and cut molds are explicitly out of scope — do not add them without user approval.
+**v1 scope (redirected 2026-04-20 after dogfood; feature-complete 2026-04-22):** rigid-shell + silicone-glove mold strategy. Pipeline:
+
+1. Surface-conforming silicone offset around the master (`manifold-3d` levelSet).
+2. Surface-conforming print shell around the silicone, open-top pour edge, bottom cut at master base.
+3. Printed base slab (2D footprint extrusion) with 45° step-pocket interlock between slab and shell.
+4. Radial slicing of the shell into 2/3/4 side pieces; user rotates + translates the cut-plane partition via a scene gizmo before Generate (cut-plane preview feature).
+5. Conformal brim flange on each cut face — inner edge hugs the shell silhouette at every Y (sliced at the cut plane + 2D outward offset), outer edge sits `brimWidth_mm` (default 10) further out radially.
+
+STL export of silicone (single piece), base slab, and N shell pieces. mm default, inches toggle. Sleeve+shell variations, multi-part (3–5), brush-on, and cut molds are explicitly out of scope — do not add them without user approval. Sprue, vent channels, and registration-key stamping were removed in Wave A and stay removed unless the user re-prioritises them after printing a physical mold.
 
 ## Architecture at a glance
 
