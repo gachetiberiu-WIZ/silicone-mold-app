@@ -26,8 +26,25 @@
 //   rather than a boolean predicate.
 
 import { BufferAttribute, BufferGeometry } from 'three';
+import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { Manifold, ManifoldToplevel, Mesh } from 'manifold-3d';
 import { initManifold } from './initManifold';
+
+/**
+ * Crease angle (radians) for `toCreasedNormals`. Edges whose adjacent
+ * face normals dot ABOVE `cos(CREASE_ANGLE_RAD)` are averaged into a
+ * smooth shared normal; edges below stay sharp (per-face normal).
+ *
+ * 30° (π / 6) was picked after dogfood 2026-04-22 showed the flat-
+ * shaded shell looked like a faceted gemstone — every triangle edge
+ * on the curved silicone/shell offset was visible as a hard step, and
+ * the brim-to-shell junction read as "fin is tacked on" even though
+ * the Manifold union geometry was correct. 30° keeps the genuinely
+ * sharp structural edges (slab's chamfer, shell's cut planes, brim's
+ * outer corners) flat while smoothing the curved offset surfaces the
+ * levelSet pass emits as many near-coplanar triangles.
+ */
+const CREASE_ANGLE_RAD = Math.PI / 6;
 
 /**
  * Watertight-ness predicate. Returns `true` iff the manifold reports no error
@@ -214,6 +231,12 @@ export async function bufferGeometryToManifold(
  * The returned geometry is non-indexed (3 verts × numTri). We could emit an
  * indexed form to halve the memory footprint; hold off until a profile says
  * it matters. Simpler code wins at v1.
+ *
+ * Normals: we apply `toCreasedNormals` at `CREASE_ANGLE_RAD` so the curved
+ * offset surfaces (silicone, shell) shade smoothly while genuinely sharp
+ * edges (brim outer corners, slab chamfer, shell cut planes) stay flat.
+ * Replaces the prior plain `computeVertexNormals()` which gave flat
+ * per-face normals everywhere and made the curved surfaces look faceted.
  */
 export async function manifoldToBufferGeometry(
   manifold: Manifold,
@@ -239,7 +262,10 @@ export async function manifoldToBufferGeometry(
 
   const geometry = new BufferGeometry();
   geometry.setAttribute('position', new BufferAttribute(positions, 3));
-  // Re-derive normals — Manifold preserves CCW winding; compute fresh normals.
-  geometry.computeVertexNormals();
-  return geometry;
+  // Crease-aware smooth normals — averages coincident vertex normals
+  // when the inter-face angle is below CREASE_ANGLE_RAD, leaves sharp
+  // edges flat. Returns the same geometry (non-indexed) with a
+  // `normal` attribute populated. Manifold preserves CCW winding, so
+  // the resulting normals point outward consistently.
+  return toCreasedNormals(geometry, CREASE_ANGLE_RAD);
 }
