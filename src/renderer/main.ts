@@ -50,8 +50,9 @@ import {
 import { attachGenerateInvalidation } from './ui/generateInvalidation';
 import {
   createGenerateOrchestrator,
-  type GenerateOrchestratorApi,
+  type GenerateOrchestratorApiWithExport,
 } from './ui/generateOrchestrator';
+import { mountExportStlButton, type ExportStlApi } from './ui/exportStl';
 import {
   mountParameterPanel,
   type ParameterPanelApi,
@@ -84,8 +85,9 @@ let placeOnFace: PlaceOnFaceToggleApi | null = null;
 let explodedView: ExplodedViewToggleApi | null = null;
 let printablePartsToggle: PrintablePartsToggleApi | null = null;
 let generateButton: GenerateButtonApi | null = null;
-let generateOrchestrator: GenerateOrchestratorApi | null = null;
+let generateOrchestrator: GenerateOrchestratorApiWithExport | null = null;
 let generateStatus: GenerateStatusApi | null = null;
+let exportStl: ExportStlApi | null = null;
 
 /**
  * Canonical "is the exploded view currently ON" flag at the UI layer
@@ -180,6 +182,17 @@ function mountUi(): void {
       },
     });
 
+    // Export STL button (issue #91). Mounts here so its placement sits
+    // alongside the other toolbar affordances (exploded-view, printable-
+    // parts). Wire-up happens in `mountParameters()` AFTER the
+    // orchestrator is constructed — we need `orchestrator.
+    // getCurrentExportables` for the click handler and
+    // `orchestrator.onStateChange` for the enable/disable plumbing.
+    // Starts disabled; the state subscription flips it.
+    exportStl = mountExportStlButton(center, {
+      getExportables: () => generateOrchestrator?.getCurrentExportables() ?? null,
+    });
+
     // Mirror viewport-side state transitions (auto-exit-on-commit,
     // Escape-key exit) back into the toggle button so its pressed state
     // never drifts from the controller's truth.
@@ -202,6 +215,7 @@ function mountUi(): void {
     if (placeOnFace) hooks['placeOnFace'] = placeOnFace;
     if (explodedView) hooks['explodedView'] = explodedView;
     if (printablePartsToggle) hooks['printablePartsToggle'] = printablePartsToggle;
+    if (exportStl) hooks['exportStl'] = exportStl;
     w.__testHooks = hooks;
   }
 }
@@ -392,6 +406,32 @@ function mountParameters(): void {
         tbar.setVolumesStale(false);
       },
     });
+
+    // Issue #91 — wire the Export STL button's enabled flag to the
+    // orchestrator's export-state stream. The stream fires on every
+    // busy start/end and every invalidation, so the button tracks
+    // `hasExportables && !isBusy` without polling. The initial state
+    // fires synchronously inside `onStateChange` (replay pattern), so
+    // the button sets itself to `enabled=false` at boot without a
+    // flicker.
+    if (exportStl) {
+      const exportBtn = exportStl;
+      generateOrchestrator.onStateChange((state) => {
+        const canExport = state.hasExportables && !state.isBusy;
+        exportBtn.setEnabled(canExport);
+        // Disabled reason flips to "stale" only when Generate has run at
+        // least once AND the result is invalidated (button says "Click
+        // Generate to update" alongside). Pre-first-generate keeps the
+        // default disabled tooltip.
+        if (canExport) {
+          exportBtn.setTooltip('none');
+        } else if (btn.isGenerated() && btn.isStale()) {
+          exportBtn.setTooltip('stale');
+        } else {
+          exportBtn.setTooltip('disabled');
+        }
+      });
+    }
   }
 
   // Issue #64 — subscribe to the parameters store so a tweak AFTER a
@@ -403,6 +443,11 @@ function mountParameters(): void {
   // (the readouts are already null). The next successful generate
   // resets both flags via `onGenerateSuccess` above; every staleness
   // signal resets them via `attachGenerateInvalidation` below.
+  //
+  // Issue #91 — the Export STL button must ALSO go disabled on the
+  // same signal. `invalidateExportables()` clears the orchestrator's
+  // captured Manifold refs, which fires the export-state subscription
+  // → button re-renders as disabled with the "stale" tooltip.
   if (parametersStore && topbar && generateButton) {
     const tbar = topbar;
     const btn = generateButton;
@@ -410,13 +455,15 @@ function mountParameters(): void {
       if (btn.isGenerated() && !btn.isBusy()) {
         btn.setStale(true);
         tbar.setVolumesStale(true);
+        generateOrchestrator?.invalidateExportables();
       }
     });
   }
 
   // Issue #79 — same staleness semantics for dimension edits. Any scale
   // change invalidates the previously-generated silicone + print-shell
-  // volumes the same way a parameter change does.
+  // volumes the same way a parameter change does. Issue #91 — also
+  // clears the Export STL button (see comment above).
   if (dimensionsStore && topbar && generateButton) {
     const tbar = topbar;
     const btn = generateButton;
@@ -424,6 +471,7 @@ function mountParameters(): void {
       if (btn.isGenerated() && !btn.isBusy()) {
         btn.setStale(true);
         tbar.setVolumesStale(true);
+        generateOrchestrator?.invalidateExportables();
       }
     });
   }
@@ -474,6 +522,12 @@ function mountParameters(): void {
         if (printablePartsToggle) {
           printablePartsToggle.setEnabled(false);
         }
+        // Issue #91 — every printable-parts teardown also invalidates
+        // the Export STL button. The scene module has just disposed the
+        // cached Manifolds, so the orchestrator's held references are
+        // now pointing at freed WASM memory; drop them before any
+        // user click can hand them to the geometry adapter.
+        generateOrchestrator?.invalidateExportables();
       },
     });
   }
@@ -539,6 +593,13 @@ async function loadMasterFromBuffer(buffer: ArrayBuffer): Promise<void> {
   // Issue #62 parallel of the above: any printable-parts preview
   // attached to the PREVIOUS master is stale. Same idempotent safety.
   viewport.clearPrintableParts();
+  // Issue #91 — the clear above disposed the cached Manifolds, so the
+  // orchestrator's exportables refs (if any) are now stale. Drop them
+  // before they can be handed out. The lay-flat controller's
+  // `notifyMasterReset` also fires the invalidation event which hits
+  // the `clearPrintableParts` callback in `attachGenerateInvalidation`;
+  // doing it here covers the first-load + no-prior-commit case.
+  generateOrchestrator?.invalidateExportables();
   // Reset the exploded-view UI mirror on every new master load — the
   // fresh master starts collapsed.
   explodedViewActive = false;

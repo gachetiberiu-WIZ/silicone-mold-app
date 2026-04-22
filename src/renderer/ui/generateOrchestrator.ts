@@ -197,9 +197,81 @@ export interface GenerateOrchestratorDeps {
   };
 }
 
+/**
+ * Snapshot of the Manifolds that a caller is allowed to ship out as
+ * printable STL files (issue #91). The orchestrator captures these
+ * references on the happy path AFTER the scene sink has accepted
+ * ownership — so the scene module is the lifetime owner; the
+ * orchestrator merely keeps a pointer so the Export STL button can read
+ * them back.
+ *
+ * `shellPieces` is `readonly` because the consumer (exportStl.ts) only
+ * iterates + hands each Manifold to the geometry adapter. The array
+ * ordering mirrors the generator's output: `shell-piece-0` is index 0,
+ * etc. — exportStl.ts depends on that order for deterministic
+ * filenames.
+ */
+export interface OrchestratorExportables {
+  basePart: Manifold;
+  shellPieces: readonly Manifold[];
+}
+
 /** Handle returned by `createGenerateOrchestrator`. */
 export interface GenerateOrchestratorApi {
   run(): Promise<void>;
+  /**
+   * Read the Manifolds currently eligible for STL export (issue #91).
+   * Returns `null` when:
+   *   - no generate has completed,
+   *   - the last successful generate was invalidated (epoch bumped, i.e.
+   *     orientation commit / reset / new STL load / parameter change after
+   *     the run stored the exportables),
+   *   - a generate is in flight (we clear exportables on every run() entry).
+   *
+   * Callers MUST NOT `.delete()` the returned Manifolds — lifetime belongs
+   * to the scene sink (`scene/printableParts.ts`).
+   */
+  getCurrentExportables(): OrchestratorExportables | null;
+  /**
+   * Subscribe to transitions in `getCurrentExportables()`'s null / non-null
+   * state and the orchestrator's busy flag. The callback fires on every
+   * change (busy start / end, exportables appear / clear). Returns an
+   * unsubscribe function. Used by the Export STL button to flip its
+   * enabled state without polling.
+   */
+  onStateChange(listener: (state: OrchestratorExportState) => void): () => void;
+}
+
+/**
+ * Public state slice the Export STL button cares about (issue #91). The
+ * button is enabled iff `hasExportables && !isBusy`. Staleness is encoded
+ * by `hasExportables` going `false` — the orchestrator clears the refs on
+ * every new `run()` start and whenever `invalidateExportables()` is called
+ * by the staleness-plumbing in main.ts (orientation commit, new STL,
+ * parameter change, dimension change).
+ */
+export interface OrchestratorExportState {
+  hasExportables: boolean;
+  isBusy: boolean;
+}
+
+/**
+ * Extended handle — adds the invalidation hook used by main.ts to clear
+ * exportables on external staleness signals. Kept separate so test files
+ * that mock `GenerateOrchestratorApi` don't accidentally pick up the
+ * method in legacy test shapes. Production `createGenerateOrchestrator`
+ * returns this shape.
+ */
+export interface GenerateOrchestratorApiWithExport
+  extends GenerateOrchestratorApi {
+  /**
+   * Drop the currently-held exportables reference (if any) and fire a
+   * state-change event. Called by main.ts from every staleness path
+   * (lay-flat commit, reset, new STL load, parameter / dimension change
+   * after a successful generate). Idempotent — a no-op when no
+   * exportables are held.
+   */
+  invalidateExportables(): void;
 }
 
 /**
@@ -218,7 +290,7 @@ function safeDelete(m: Manifold | undefined | null): void {
  */
 export function createGenerateOrchestrator(
   deps: GenerateOrchestratorDeps,
-): GenerateOrchestratorApi {
+): GenerateOrchestratorApiWithExport {
   const {
     getMaster,
     getParameters,
@@ -235,6 +307,27 @@ export function createGenerateOrchestrator(
     getEpoch = getGenerateEpoch,
     logger = console,
   } = deps;
+
+  // Exportables + busy state slot — drives the Export STL button (issue
+  // #91). `exportables` holds the Manifold refs captured post-success AFTER
+  // the scene sink has accepted ownership; `busy` mirrors the button's
+  // busy flag so subscribers can key on both.
+  let exportables: OrchestratorExportables | null = null;
+  let busy = false;
+  const stateListeners = new Set<(s: OrchestratorExportState) => void>();
+  function snapshot(): OrchestratorExportState {
+    return { hasExportables: exportables !== null, isBusy: busy };
+  }
+  function fireState(): void {
+    const snap = snapshot();
+    for (const l of stateListeners) {
+      try {
+        l(snap);
+      } catch (err) {
+        logger.error('[generate] export-state listener threw:', err);
+      }
+    }
+  }
 
   return {
     async run(): Promise<void> {
@@ -262,6 +355,16 @@ export function createGenerateOrchestrator(
       topbar.setResinVolume(null);
       topbar.setPrintShellVolume?.(null);
       topbar.setBaseSlabVolume?.(null);
+
+      // Issue #91 — a fresh run supersedes any previously-held exportables
+      // (either from a prior success, or orphaned if the epoch was bumped
+      // externally and no one called `invalidateExportables()`). Clear +
+      // flip busy=true so the Export STL button goes disabled the instant
+      // the user clicks Generate. Single `fireState()` call covers both
+      // transitions for subscribers.
+      exportables = null;
+      busy = true;
+      fireState();
 
       // Issue #87 Fix 1: build the onPhase callback that forwards
       // each GeneratePhase into the status sink + yields to RAF so
@@ -379,10 +482,20 @@ export function createGenerateOrchestrator(
         if (
           epoch === getEpoch() &&
           !siliconeSinkFailed &&
-          !printShellFailed &&
-          onGenerateSuccess
+          !printShellFailed
         ) {
-          onGenerateSuccess();
+          // Issue #91 — capture the Manifolds for STL export. Lifetime
+          // belongs to the scene sink (it accepted ownership above); we
+          // only keep references so the Export STL button can hand them
+          // to the geometry adapter. Staleness paths (invalidateExportables,
+          // next `run()`) drop these refs without `.delete()`-ing — the
+          // scene's `clearPrintableParts` handles disposal.
+          exportables = {
+            basePart: result.basePart,
+            shellPieces: result.shellPieces,
+          };
+          fireState();
+          if (onGenerateSuccess) onGenerateSuccess();
         }
       } catch (err) {
         if (epoch !== getEpoch()) {
@@ -402,8 +515,42 @@ export function createGenerateOrchestrator(
           // resolves AFTER a newer run has taken over leaves the
           // newer run's banner intact.
           status?.setPhase(null);
+          // Issue #91 — release the busy flag + re-notify subscribers
+          // of the final state. On the error path `exportables` stayed
+          // null (we never reached the capture point), so this fires a
+          // `{hasExportables:false, isBusy:false}` notification — the
+          // Export STL button stays disabled, correctly. On the success
+          // path `exportables` was set above, so the notification is
+          // `{true, false}` — the button goes enabled.
+          busy = false;
+          fireState();
         }
       }
+    },
+    getCurrentExportables(): OrchestratorExportables | null {
+      return exportables;
+    },
+    onStateChange(
+      listener: (state: OrchestratorExportState) => void,
+    ): () => void {
+      stateListeners.add(listener);
+      // Fire the current state synchronously so subscribers don't have
+      // to guess the initial snapshot. Mirrors the common "subscribe +
+      // replay" pattern used elsewhere in the renderer (parametersStore,
+      // dimensionsStore).
+      try {
+        listener(snapshot());
+      } catch (err) {
+        logger.error('[generate] export-state listener threw on attach:', err);
+      }
+      return () => {
+        stateListeners.delete(listener);
+      };
+    },
+    invalidateExportables(): void {
+      if (exportables === null) return;
+      exportables = null;
+      fireState();
     },
   };
 }

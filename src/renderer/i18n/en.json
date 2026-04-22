@@ -66,6 +66,16 @@
     "noMaster": "Load an STL to begin.",
     "error": "Could not generate mold: {{reason}}"
   },
+  "export": {
+    "button": "Export STL",
+    "exporting": "Exporting…",
+    "successToast": "Exported {{count}} files to {{folder}}",
+    "errorToast": "Failed to export STL",
+    "partialToast": "Exported {{written}} of {{total}} files to {{folder}} before error",
+    "noParts": "Generate a mold first to export",
+    "disabledTooltip": "Generate a mold first to export",
+    "staleTooltip": "Regenerate before exporting (parameters changed)"
+  },
   "notice": {
     "masterRepaired": "Repaired non-manifold STL on load ({{removed}} triangles removed)."
   },
