@@ -1038,10 +1038,15 @@ export async function generateSiliconeShell(
             xzCenter,
             effectiveCutAngles_,
           );
-          // The full shell is no longer needed — the pieces cover its
-          // volume minus trimming rounding.
-          printShellFull.delete();
-          printShellFull = undefined;
+          // NOTE (conformal-brim fix): the full shell used to be
+          // `.delete()`-ed here because the sliced pieces covered its
+          // volume. The conformal brim builder re-slices the full
+          // shell on every brim iteration to derive the 2D profile
+          // that hugs the shell's outer silhouette at each cut plane.
+          // So we MUST keep `printShellFull` alive through the brim
+          // loop. The eager delete is moved to run AFTER the loop
+          // completes. The finally at the end of this try block still
+          // guards the failure path.
           const tSlice = performance.now();
 
           if (onPhase) await onPhase('brims');
@@ -1063,21 +1068,24 @@ export async function generateSiliconeShell(
                 pieceIndex: i,
                 sideCount: parameters.sideCount,
                 shellBboxWorld,
+                // Conformal-brim fix: the brim builder slices the
+                // full (pre-slice) shell at each cut plane to build
+                // a 2D profile that hugs the shell's outer surface.
+                // This Manifold is CALLER-OWNED — we keep it alive
+                // through every addBrim call and release it after
+                // the loop (see the delete below this try block).
+                shellManifold: printShellFull,
                 xzCenter,
                 angles: effectiveCutAngles_,
                 brimWidth_mm: parameters.brimWidth_mm,
                 brimThickness_mm: parameters.brimThickness_mm,
-                // Issue #89 fix: pass the shell's inner-cavity volume
-                // (master-outset by `siliconeThickness`) + the shell
-                // thickness so the brim builder can (a) size the brim
-                // to cover `bondOverlap = printShellThickness` inward
-                // into the shell wall, and (b) carve the silicone
-                // cavity out of the brim box so it never intrudes.
-                // `siliconeOuter` is the Manifold allocated above at
-                // the silicone-outer levelSet step; the `finally`
-                // at the end of this try block disposes it AFTER
-                // every addBrim call completes (it needs to survive
-                // every iteration).
+                // Issue #89: shell's inner-cavity volume, used as a
+                // belt-and-braces carve-out on non-convex masters
+                // where the 2D inward offset can overshoot the
+                // cavity. `siliconeOuter` is the Manifold allocated
+                // above at the silicone-outer levelSet step; the
+                // finally at the end of this try block disposes it
+                // AFTER every addBrim call completes.
                 siliconeOuter,
                 printShellThickness_mm: shellThickness,
               });
@@ -1094,6 +1102,9 @@ export async function generateSiliconeShell(
             }
             throw err;
           }
+          // Brim loop done — safe to release the full shell now.
+          printShellFull.delete();
+          printShellFull = undefined;
           const tBrim = performance.now();
 
           if (onPhase) await onPhase('slab');
