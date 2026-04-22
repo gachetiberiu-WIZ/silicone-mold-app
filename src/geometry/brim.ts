@@ -1,13 +1,15 @@
 // src/geometry/brim.ts
 //
-// Wave F (issue #84). Build a flat brim flange on each cut face of a
-// sliced shell piece. The brim is a box-extruded flange sitting FLUSH
+// Wave F (issue #84). Build a tapered brim flange on each cut face of
+// a sliced shell piece. The brim is a TRAPEZOIDAL prism sitting FLUSH
 // against the cut plane on the piece's side, extending radially outward
 // from the shell's outer surface by `brimWidth_mm`, with a small
 // `bondOverlap` inward into the shell wall for mechanical bonding.
 // Vertically it spans the shell's Y range minus a 2 mm margin top +
-// bottom so it never pokes out the open pour edge or the base-slab
-// interlock.
+// bottom at the INNER (shell-junction) edge, tapering DOWN to
+// `BRIM_TAPER_FACTOR × ySize` (default 0.5×) at the OUTER edge so the
+// flange reads as a real printed buttress blending into the shell
+// rather than a tacked-on rectangle with a hard perimeter crease.
 //
 // Issue #89 fix (post-dogfood on main 2026-04-22)
 // -----------------------------------------------
@@ -24,13 +26,13 @@
 //
 // The fix, applied in two complementary changes:
 //
-//   (A) NARROW the brim box radially. Its radial span is now
+//   (A) NARROW the brim radially. Its radial span is now
 //       `bondOverlap + brimWidth` — typically 8+10 = 18 mm (vs ~50 mm
 //       pre-fix on a mini-figurine). Its inner edge sits at
 //       `outerRadius − bondOverlap`, outer edge at
 //       `outerRadius + brimWidth`. Far enough from the Y-axis that
 //       adjacent brims never touch.
-//   (B) SUBTRACT `siliconeOuter` from the brim box before unioning.
+//   (B) SUBTRACT `siliconeOuter` from the brim solid before unioning.
 //       `siliconeOuter` is the outset of the master by
 //       `siliconeThickness` — a SOLID Manifold filling everything from
 //       the master's surface outward by the silicone layer, i.e. the
@@ -41,59 +43,109 @@
 //
 // After (A) + (B), the brim:
 //   - Starts at the shell's outer surface (with a `bondOverlap ≡
-//     printShellThickness` inward overlap for mechanical bonding).
+//     BOND_OVERLAP_MULTIPLIER × printShellThickness` inward overlap
+//     for mechanical bonding).
 //   - Extends outward by `brimWidth`.
 //   - Never crosses into the silicone cavity.
 //   - Never reaches the Y-axis (so adjacent brims never intersect).
 //
-// Construction sequence (post-#89):
+// Issue #96 fix — tapered (trapezoidal) brim
+// ------------------------------------------
 //
-//   1. Build an axis-aligned box of size
-//        `(bondOverlap + brimWidth) × ySize × brimThickness`
-//      centered at origin.
-//   2. Pre-translate the box in its LOCAL frame so its center sits at
-//        `( (outerRadius + brimWidth/2 − bondOverlap/2), yCenter,
-//          ±brimThickness/2 )`
-//      — the local-X offset places the inner edge at radial distance
-//      `outerRadius − bondOverlap` and the outer edge at
-//      `outerRadius + brimWidth`; `±brimThickness/2` along local ±Z
-//      keeps the brim FLUSH against the cut plane on the piece's side.
-//   3. Rotate `.rotate([0, -θ_deg, 0])` about +Y where θ is the cut-
-//      plane's outward-radial angle. Maps local +X → `radial(θ) =
-//      (cos θ, 0, sin θ)` and local +Z → `n_CCW(θ) = (-sin θ, 0, cos θ)`
-//      (derivation below).
-//   4. Translate by `(xzCenter.x, 0, xzCenter.z)` to plant the box's
-//      inner pivot at the master's XZ center.
-//   5. `Manifold.difference([brimBox, siliconeOuter])` — carves away
-//      any material inside the silicone cavity (belt-and-braces for
-//      non-convex masters; a no-op on convex ones where step 2's
-//      narrow box is already clear of the cavity).
-//   6. `Manifold.union(piece, brimCarved)` — the union absorbs the
-//      bond-overlap portion with the shell piece and contributes only
-//      the radially outward portion as a new flange.
+// Up to PR #98 (issue #94 Fix 2 + issue #97 Fix 4) the brim was a
+// rectangular box. Even with `BOND_OVERLAP_MULTIPLIER` doubled to 2×
+// the shell thickness, the outer perimeter still read as a sharp fin
+// from the side — flat top, flat bottom, square corners where the
+// brim's vertical faces met the curved shell surface.
 //
-// Why `±brimThickness/2`? For the CCW-side cut plane (piece i's LOWER-
-// CCW bound at angle a0), the "into piece" direction is `n_CCW(a0)` —
-// exactly the local +Z after rotation, so `+brimThickness/2`. For the
-// CW-side cut plane (upper-CCW bound at a1), "into piece" is
-// `-n_CCW(a1)` — exactly the local -Z after rotation, so
-// `-brimThickness/2`. Flipping the local Z offset sign keeps the
-// rotation angle consistent with the outward-radial direction on BOTH
-// cut planes.
+// The fix builds the brim as a trapezoidal prism that is FULL height
+// (`ySize`) at the inner/shell-junction edge and tapers DOWN to
+// `BRIM_TAPER_FACTOR × ySize` at the outer radial edge. In side view
+// the brim is a trapezoid (wider against the shell, narrower at the
+// free edge), which blends into the shell's outer surface without a
+// hard top/bottom corner at the union boundary.
+//
+// Implementation uses `CrossSection.extrude` with `scaleTop = [1,
+// BRIM_TAPER_FACTOR]`:
+//
+//   - CrossSection: centred rectangle in the (X, Y) plane sized
+//     `brimThickness × ySize`. Local X here is the PERPENDICULAR-TO-
+//     CUT direction (flange thickness); local Y is the world-vertical
+//     direction.
+//   - `extrude(width, 0, 0, [1, BRIM_TAPER_FACTOR])` extrudes along
+//     local Z by `width = bondOverlap + brimWidth`. The top of the
+//     extrusion (Z = width, outer radial edge) scales the Y dimension
+//     to `ySize × BRIM_TAPER_FACTOR`; X (thickness) stays 1×.
+//   - The resulting trapezoidal prism's local frame is:
+//       +X = flange thickness (perpendicular to cut plane)
+//       +Y = world vertical
+//       +Z = radial outward (extrusion axis)
+//
+// The rotation into world is `.rotate([0, 90 − θ_deg, 0])` — derivation
+// below. This sends local +Z → `radial(θ) = (cos θ, 0, sin θ)` and
+// local +X → `−n_CCW(θ)`. The sign of the thickness offset is chosen
+// per cut so the brim sits on the piece's side of each cut plane.
+//
+// Volume: a trapezoidal prism with end heights `ySize` and
+// `ySize × k` has volume `brimThickness × width × ySize × (1 + k) / 2`.
+// For `k = 0.5` that is 75 % of the former rectangular-box volume —
+// ~25 % less print material per flange.
+//
+// Construction sequence (post-#96):
+//
+//   1. Build `CrossSection.square([brimThickness, ySize], center=true)`
+//      — a centred 2D rectangle in the (X, Y) plane.
+//   2. Shift the CrossSection along X by `−sign × brimThickness / 2`
+//      so the thickness range is `[−brimThickness, 0]` for sign = +1
+//      (CCW-side cut) or `[0, brimThickness]` for sign = −1 (CW-side
+//      cut). After the Y rotation (which maps local +X → −n_CCW(θ)),
+//      world-space thickness lands on `[0, brimThickness]` along
+//      `+n_CCW(θ)` (sign +1) or `−n_CCW(θ)` (sign −1) — i.e. ON the
+//      piece's side of the cut plane.
+//   3. `extrude(width, 0, 0, [1, BRIM_TAPER_FACTOR])` — trapezoidal
+//      prism along local +Z.
+//   4. `.rotate([0, 90 − θ_deg, 0])` about +Y to align local +Z with
+//      world `radial(θ)`.
+//   5. `.translate([xzCenter.x + (outerRadius − bondOverlap) × cos θ,
+//       yCenter, xzCenter.z + (outerRadius − bondOverlap) × sin θ])`
+//      — shifts the base of the prism (local Z = 0 plane) to sit at
+//      world radial distance `outerRadius − bondOverlap` on the cut
+//      line and centres it vertically on the shell.
+//   6. `Manifold.difference([brim, siliconeOuter])` — carves any
+//      portion that dips into the silicone cavity (belt-and-braces
+//      for non-convex masters where the narrow radial slab alone
+//      doesn't clear the cavity).
+//   7. `Manifold.union(piece, brimCarved)` — absorbs the bondOverlap
+//      portion into the shell wall and keeps the tapered flange as a
+//      new unified surface.
+//
+// Why `±brimThickness/2` on local X? For the CCW-side cut plane (piece
+// i's lower-CCW bound at angle a0), the "into piece" direction is
+// `+n_CCW(a0)`. Our rotation maps local +X → `−n_CCW(a0)`, so we need
+// the CrossSection's thickness range to be on the LOCAL-NEGATIVE X
+// side of the origin: translate by `−brimThickness/2` along local X.
+// For the CW-side cut plane at a1, "into piece" is `−n_CCW(a1)` —
+// matches our rotation's local +X → `−n_CCW(a1)` — so thickness range
+// sits on LOCAL-POSITIVE X: translate by `+brimThickness/2` along
+// local X. The `localXSign` field on each cut entry is `−1 / +1`
+// respectively so the pre-translate is just `localXSign ×
+// brimThickness / 2`.
 //
 // Why `bondOverlap`? Mechanical bond between the brim flange and the
 // shell wall: the brim overlaps INWARD by `bondOverlap` mm past the
 // shell's outer surface, so after union the two are a single fused
-// body rather than two surfaces touching. `bondOverlap` is set to
-// `printShellThickness_mm` by the caller (default 8 mm) — the full
-// shell thickness. Can't exceed the shell thickness or the brim pokes
-// through into the silicone (which is why step 5 then subtracts
-// `siliconeOuter`).
+// body rather than two surfaces touching. `bondOverlap` is
+// `BOND_OVERLAP_MULTIPLIER × printShellThickness` (default 2× → 16 mm
+// at an 8 mm shell). Can legitimately exceed the shell thickness —
+// step 6 (silicone-cavity subtract) carves any intrusion past the
+// shell's inner cavity, so `bondOverlap` is strictly a visual/mechan-
+// ical-bonding knob independent of the hard "no poking the silicone"
+// invariant.
 //
 // sideCount === 2 special case: only ONE cut plane total (angles 90°
 // and 270° define the same vertical plane). The caller (via
-// `generateMold.ts`) passes a single cut angle for each piece; the brim
-// builder treats it as a single-brim piece.
+// `generateMold.ts`) passes a single cut angle for each piece; the
+// brim builder treats it as a single-brim piece.
 //
 // Rotation-angle derivation
 // -------------------------
@@ -101,12 +153,14 @@
 // Manifold's `.rotate([0, φ_deg, 0])` applies the standard right-handed
 // Y rotation:
 //
-//     (x, z) → (x cos φ + z sin φ, -x sin φ + z cos φ)
+//     (x, z) → (x cos φ + z sin φ, −x sin φ + z cos φ)
 //
-// Applied to local +X = (1, 0, 0): → (cos φ, 0, -sin φ). We want this
-// to equal `radial(θ) = (cos θ, 0, sin θ)`, so φ = -θ. Applied to local
-// +Z = (0, 0, 1) with φ = -θ: → (sin(-θ), 0, cos(-θ)) = (-sin θ,
-// 0, cos θ) = `n_CCW(θ)`. ✓
+// We want local +Z = (0, 0, 1) to map to `radial(θ) = (cos θ, 0,
+// sin θ)`. Applying the formula to (0, 1): → (sin φ, cos φ). Setting
+// equal to (cos θ, sin θ) gives sin φ = cos θ and cos φ = sin θ, i.e.
+// φ = 90° − θ. Applying the same φ to local +X = (1, 0): → (cos φ,
+// −sin φ) = (sin θ, −cos θ) = `−n_CCW(θ)` (since n_CCW(θ) = (−sin θ,
+// cos θ) in the (x, z) plane). ✓
 //
 // Ownership contract:
 //
@@ -117,10 +171,11 @@
 //     it. Caller retains responsibility for the full lifetime —
 //     defer the `siliconeOuter.delete()` in `generateMold.ts` until
 //     AFTER every `addBrim` call for every piece completes.
-//   - Every intermediate Manifold is `.delete()`-ed in a `finally`
-//     block so no leak happens on any failure path.
+//   - Every intermediate Manifold / CrossSection is `.delete()`-ed in
+//     a `finally` / catch block so no leak happens on any failure
+//     path.
 
-import type { Manifold, ManifoldToplevel } from 'manifold-3d';
+import type { CrossSection, Manifold, ManifoldToplevel } from 'manifold-3d';
 
 import { pieceMidAngleRad } from './shellSlicer';
 import { SIDE_CUT_ANGLES } from './sideAngles';
@@ -148,17 +203,35 @@ const BRIM_Y_MARGIN_MM = 2;
  * further to 2× — the brim's inner face now sits a full `shellThickness`
  * DEEPER inside the shell material than its outer surface, so the
  * fused profile transitions over twice the original bond depth. The
- * siliconeOuter carve-out (step 5 of addBrim) still removes any inward
+ * siliconeOuter carve-out (step 6 of addBrim) still removes any inward
  * intrusion past the shell's inner cavity — going past the shell
  * thickness is harmless because the cavity subtract clips any material
  * that would have poked through.
  *
- * A true fillet at the brim/shell junction is the right long-term fix
- * (#96 tracks the fillet work). This dimensional tweak takes the visual
- * sharpness further toward "integrated flange" with zero new boolean
- * ops on the common path.
+ * Issue #96 replaced the rectangular box with a TAPERED (trapezoidal)
+ * prism that reduces the outer perimeter's vertical extent. The bond
+ * depth stays doubled because the union now takes a tapered flange
+ * INTO a deep shell — both changes compose and the junction reads as
+ * an integrated buttress.
  */
 const BOND_OVERLAP_MULTIPLIER = 2.0;
+
+/**
+ * Issue #96 — tapered-brim scale factor. The brim's OUTER radial edge
+ * has its vertical height scaled by this factor relative to the INNER
+ * (shell-junction) edge. 1.0 is the pre-#96 rectangular box; 0.0
+ * collapses the outer edge to a line (pure triangular prism). 0.5 was
+ * selected as the sweet spot: enough taper to visibly blend into the
+ * shell without so much that the outer edge becomes a knife edge the
+ * user can't print reliably.
+ *
+ * Volume effect: brim volume is `brimThickness × radialWidth × ySize ×
+ * (1 + BRIM_TAPER_FACTOR) / 2` — 25 % less than the former box at 0.5.
+ *
+ * Must be a positive finite value <= 1. Values > 1 would GROW the
+ * outer edge (creating an inverted/overhang flange — not supported).
+ */
+const BRIM_TAPER_FACTOR = 0.5;
 
 /**
  * Axis-aligned bbox in world mm. Uses the same `{min, max}` of 3-tuples
@@ -242,17 +315,22 @@ export function addBrim(args: AddBrimArgs): Manifold {
   const angles = SIDE_CUT_ANGLES[sideCount];
 
   // Cuts for this piece:
-  //   - CCW (lower) bound at angle a0, brim on +Z local side (into piece).
-  //   - CW  (upper) bound at angle a1, brim on -Z local side.
-  // sideCount === 2 has only the first cut (the two angles collapse to
-  // the same plane, so a second brim would overlap the first).
+  //   - CCW (lower) bound at angle a0: piece sits on +n_CCW(a0) side
+  //     of the cut plane; our rotation maps local +X → −n_CCW(θ), so
+  //     the thickness range needs to be on LOCAL-NEGATIVE X
+  //     (`localXSign = −1`, pre-translate by `−brimThickness/2`).
+  //   - CW  (upper) bound at angle a1: piece sits on −n_CCW(a1) side;
+  //     thickness range on LOCAL-POSITIVE X (`localXSign = +1`,
+  //     pre-translate by `+brimThickness/2`).
+  // sideCount === 2 has only the first cut (the two angles collapse
+  // to the same plane, so a second brim would overlap the first).
   const a0Deg = angles[pieceIndex] as number;
-  const cuts: Array<{ angleDeg: number; localZSign: 1 | -1 }> = [
-    { angleDeg: a0Deg, localZSign: 1 },
+  const cuts: Array<{ angleDeg: number; localXSign: 1 | -1 }> = [
+    { angleDeg: a0Deg, localXSign: -1 },
   ];
   if (sideCount !== 2) {
     const a1Deg = angles[(pieceIndex + 1) % sideCount] as number;
-    cuts.push({ angleDeg: a1Deg, localZSign: -1 });
+    cuts.push({ angleDeg: a1Deg, localXSign: 1 });
   }
 
   // Shell outer radius — maximum horizontal extent of the shell's world
@@ -277,25 +355,22 @@ export function addBrim(args: AddBrimArgs): Manifold {
   const ySize = Math.max(0, shellMaxY - shellMinY - 2 * BRIM_Y_MARGIN_MM);
   const yCenter = (shellMinY + shellMaxY) / 2;
 
-  // Issue #89 fix (A): NARROW radial box.
+  // Issue #89 fix (A) + #96 taper: NARROW radial span, tapered
+  // trapezoidal prism.
   //
   // `bondOverlap` = `BOND_OVERLAP_MULTIPLIER × printShellThickness_mm`
   // — how far the brim extends INWARD past the shell's outer surface,
   // to fuse mechanically with the shell wall after the union. The
   // multiplier was bumped from 1× to 1.5× in issue #94 (polish
-  // dogfood 2026-04-22) so the brim/shell junction transitions more
-  // organically and the brim no longer looks "tacked on". The total
-  // radial width of the box is therefore `bondOverlap + brimWidth`.
-  // Its local +X frame:
-  //   - inner edge at local x = 0            → world radial
-  //                                             `outerRadius - bondOverlap`
-  //   - outer edge at local x = width        → world radial
-  //                                             `outerRadius + brimWidth`
-  // so the box's LOCAL center sits at x = width/2 and the world-space
-  // offset applied in step 4 plants that center at world radial
-  // `outerRadius + brimWidth/2 - bondOverlap/2` from xzCenter.
+  // dogfood 2026-04-22), then to 2× in issue #97 Fix 4.
   //
-  // Can legitimately exceed the shell thickness — step 5 (silicone-
+  // Total radial width of the brim is `bondOverlap + brimWidth`.
+  // Radial layout (measured from `xzCenter` along the cut's outward
+  // radial direction):
+  //   - inner edge at `outerRadius - bondOverlap`,
+  //   - outer edge at `outerRadius + brimWidth`.
+  //
+  // Can legitimately exceed the shell thickness — step 6 (silicone-
   // cavity subtract) carves any intrusion past the shell's inner
   // cavity. The carve-out makes `bondOverlap` strictly a visual/
   // mechanical-bonding knob independent of the hard "no poking the
@@ -305,6 +380,11 @@ export function addBrim(args: AddBrimArgs): Manifold {
     BOND_OVERLAP_MULTIPLIER * printShellThickness_mm,
   );
   const width = bondOverlap + brimWidth_mm;
+  // Issue #96: distance from `xzCenter` to the brim's inner radial
+  // edge. The extrusion starts at local Z = 0 (after rotation, at
+  // world position `xzCenter + radialInner × radial(θ)`) and extends
+  // outward by `width`.
+  const radialInner = shellOuterRadius - bondOverlap;
 
   if (ySize <= 0 || width <= 0 || brimThickness_mm <= 0) {
     // Nothing sensible to build — return the piece unchanged. The
@@ -320,15 +400,25 @@ export function addBrim(args: AddBrimArgs): Manifold {
   //     caller's original `piece` (either via `.delete()` inside the
   //     loop, or — on throw before the first union completes — via
   //     the catch block below).
-  //   - `tempHandles` holds every ephemeral box/transform handle so
-  //     the catch can release them in bulk.
+  //   - `tempManifolds` holds every ephemeral brim-prism handle.
+  //   - `tempSections` holds every ephemeral CrossSection handle
+  //     (manifold-3d CrossSections are WASM-allocated and must be
+  //     explicitly `.delete()`-ed).
   let current: Manifold = piece;
   let pieceConsumed = false;
-  const tempHandles: Manifold[] = [];
+  const tempManifolds: Manifold[] = [];
+  const tempSections: CrossSection[] = [];
 
-  const safeDelete = (m: Manifold): void => {
+  const safeDeleteM = (m: Manifold): void => {
     try {
       m.delete();
+    } catch {
+      /* already dead */
+    }
+  };
+  const safeDeleteCs = (cs: CrossSection): void => {
+    try {
+      cs.delete();
     } catch {
       /* already dead */
     }
@@ -337,86 +427,109 @@ export function addBrim(args: AddBrimArgs): Manifold {
   try {
     for (const cut of cuts) {
       // Rotation angle — see header comment for derivation.
-      // φ = -θ about +Y maps local +X → radial(θ), local +Z →
-      // n_CCW(θ). Manifold `.rotate` takes DEGREES.
-      const rotY_deg = -cut.angleDeg;
+      // φ = 90° − θ about +Y maps local +Z → radial(θ) and local +X →
+      // −n_CCW(θ). Manifold `.rotate` takes DEGREES.
+      const rotY_deg = 90 - cut.angleDeg;
 
-      // Step 1: centered box. Dimensions:
-      //   x: `width = bondOverlap + brimWidth`
-      //   y: `ySize` (shell Y range minus 2 × margin)
-      //   z: `brimThickness`
-      const box = toplevel.Manifold.cube(
-        [width, ySize, brimThickness_mm],
+      // Step 1: centred CrossSection in the local (X, Y) plane.
+      // Dimensions: X = brimThickness, Y = ySize. Both centred on the
+      // origin.
+      const baseCs = toplevel.CrossSection.square(
+        [brimThickness_mm, ySize],
         /* center */ true,
       );
-      tempHandles.push(box);
+      tempSections.push(baseCs);
 
-      // Step 2: translate in local frame so:
-      //   local-x center at `outerRadius + brimWidth/2 - bondOverlap/2`:
-      //     inner edge at `outerRadius - bondOverlap`,
-      //     outer edge at `outerRadius + brimWidth`.
-      //   local-y center at 0 — Y translation lands in step 4.
-      //   local-z center at `localZSign * brimThickness/2` — box sits
-      //     FLUSH against the cut plane on the piece's side
-      //     (thickness spans [0, brimThickness] in local +Z direction
-      //     when localZSign = +1, or [-brimThickness, 0] when -1).
-      const localX = shellOuterRadius + brimWidth_mm / 2 - bondOverlap / 2;
-      const localZ = (cut.localZSign * brimThickness_mm) / 2;
-      const localShifted = box.translate([localX, 0, localZ]);
-      tempHandles.push(localShifted);
+      // Step 2: shift the CrossSection along local X by
+      // `localXSign × brimThickness / 2` so the thickness range sits
+      // ON THE PIECE'S SIDE of the cut plane after rotation (see
+      // header comment for the signing derivation).
+      const shiftedCs = baseCs.translate([
+        (cut.localXSign * brimThickness_mm) / 2,
+        0,
+      ]);
+      tempSections.push(shiftedCs);
 
-      // Step 3: rotate about +Y so local axes align with world cut
-      // directions. See header comment for the φ = -θ derivation.
-      const rotated = localShifted.rotate([0, rotY_deg, 0]);
-      tempHandles.push(rotated);
+      // Step 3: extrude the CrossSection along local +Z by `width`,
+      // tapering Y at the top (outer edge) to `BRIM_TAPER_FACTOR ×
+      // ySize`. X (thickness) is unchanged along the extrusion. The
+      // resulting prism has:
+      //   - local Z range [0, width] (radial outward),
+      //   - inner base (Z = 0): full rectangle
+      //       `brimThickness × ySize`,
+      //   - outer base (Z = width): scaled rectangle
+      //       `brimThickness × (BRIM_TAPER_FACTOR × ySize)`,
+      //   - side faces sloping inward in Y only.
+      const prism = shiftedCs.extrude(
+        width,
+        /* nDivisions */ 0,
+        /* twistDegrees */ 0,
+        /* scaleTop */ [1, BRIM_TAPER_FACTOR],
+        /* center */ false,
+      );
+      tempManifolds.push(prism);
 
-      // Step 4: translate to world — plant the rotated box so its inner
-      // pivot is at (xzCenter.x, yCenter, xzCenter.z).
-      const placed = rotated.translate([xzCenter.x, yCenter, xzCenter.z]);
-      tempHandles.push(placed);
+      // Step 4: rotate about +Y so local +Z aligns with world
+      // radial(θ) and local +X aligns with world −n_CCW(θ). Local +Y
+      // is the rotation axis and stays world +Y.
+      const rotated = prism.rotate([0, rotY_deg, 0]);
+      tempManifolds.push(rotated);
 
-      // Step 5 (issue #89 fix B): carve the silicone cavity out of the
-      // brim box. On convex masters this is effectively a no-op since
-      // (A)'s narrow radial slab already clears the shell's outer
-      // surface; on non-convex masters (e.g. a figurine with concave
-      // pockets) the brim's inner face can dip INTO the silicone
-      // cavity, and this subtract removes that intrusion.
+      // Step 5: translate to world — plant the prism's inner base at
+      // `xzCenter + radialInner × radial(θ)` on the cut line, centred
+      // on the shell's vertical midpoint.
+      const theta = (cut.angleDeg * Math.PI) / 180;
+      const placed = rotated.translate([
+        xzCenter.x + radialInner * Math.cos(theta),
+        yCenter,
+        xzCenter.z + radialInner * Math.sin(theta),
+      ]);
+      tempManifolds.push(placed);
+
+      // Step 6 (issue #89 fix B): carve the silicone cavity out of
+      // the brim prism. On convex masters this is effectively a
+      // no-op since the narrow radial slab already clears the shell's
+      // outer surface; on non-convex masters (e.g. a figurine with
+      // concave pockets) the brim's inner face can dip INTO the
+      // silicone cavity, and this subtract removes that intrusion.
       //
       // `siliconeOuter` is the master offset outward by
       // `siliconeThickness_mm` — a SOLID Manifold equal to the shell's
-      // inner-cavity volume. `difference([brimBox, siliconeOuter])`
-      // carves the cavity's volume out of the brim box. CALLER-OWNED:
-      // `siliconeOuter` is NOT disposed here.
+      // inner-cavity volume. `difference([brimPrism, siliconeOuter])`
+      // carves the cavity's volume out of the brim prism. CALLER-
+      // OWNED: `siliconeOuter` is NOT disposed here.
       const carved = toplevel.Manifold.difference([placed, siliconeOuter]);
-      tempHandles.push(carved);
+      tempManifolds.push(carved);
 
-      // Step 6: union with the running piece.
+      // Step 7: union with the running piece.
       const unioned = toplevel.Manifold.union(current, carved);
 
       // Swap running handle. `current` is either the original caller
       // `piece` (iteration 0) or a prior union result (iteration >= 1);
       // either way it's safe to release at this point — the new
       // `unioned` fully contains its volume.
-      safeDelete(current);
+      safeDeleteM(current);
       if (current === piece) pieceConsumed = true;
       current = unioned;
     }
 
-    // Release every intermediate brim-box handle. The final `current`
-    // has absorbed their volume via union.
-    for (const h of tempHandles) safeDelete(h);
+    // Release every intermediate handle. The final `current` has
+    // absorbed their volume via union.
+    for (const m of tempManifolds) safeDeleteM(m);
+    for (const cs of tempSections) safeDeleteCs(cs);
     return current;
   } catch (err) {
-    for (const h of tempHandles) safeDelete(h);
+    for (const m of tempManifolds) safeDeleteM(m);
+    for (const cs of tempSections) safeDeleteCs(cs);
     // Release the running `current` if it is NOT the original piece
     // (either a prior union result that hasn't been consumed by the
     // next iteration, or the piece itself on an iteration-0 throw).
     if (current !== piece) {
-      safeDelete(current);
+      safeDeleteM(current);
     }
     // Always release the original piece — caller's contract is it's
     // consumed regardless of success/failure.
-    if (!pieceConsumed) safeDelete(piece);
+    if (!pieceConsumed) safeDeleteM(piece);
     throw err;
   }
 }
