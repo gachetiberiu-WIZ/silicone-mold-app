@@ -5,12 +5,20 @@ on:
     branches: [feat/brim-fillet]
   workflow_dispatch:
 
-# One-shot chore: regenerate the `printable-parts-exploded.png` baseline
-# under `tests/__screenshots__/linux-ci/visual/printable-parts-exploded.spec.ts-snapshots/`
-# on the Linux runner (matching the visual-regression CI's SwiftShader
-# environment) and commit it back to this branch. Scoped with the `if:`
-# guard below so it can only fire on this feature branch — it cannot
-# run against main. Removed in the last commit of this same PR (issue #96).
+# One-shot chore: regenerate `printable-parts-exploded.png` AND
+# `silicone-exploded.png` baselines on the Linux runner (matching the
+# visual-regression CI's SwiftShader environment) and commit them back
+# to this branch. Scoped with the `if:` guard below so it can only
+# fire on this feature branch — it cannot run against main. Removed
+# in the last commit of this same PR (issue #96).
+#
+# Both goldens pick up the tapered brim: printable-parts-exploded
+# shows the shell pieces fanned out (brim geometry directly visible);
+# silicone-exploded runs the same Generate path and the post-Generate
+# scene mounts the printable-parts group VISIBLE by default (see
+# `src/renderer/main.ts` — `printablePartsToggle.setActive(true)` in
+# the generate-success hook), so the silicone-exploded shot captures
+# the brimmed shell pieces behind the exploded silicone halves.
 #
 # Pattern copied from prior one-shot workflows (e.g. #65, #98). Uses
 # `continue-on-error: true` on the generate step so a still-flaky run
@@ -47,15 +55,16 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps chromium
-      - name: Generate printable-parts-exploded baseline (--update-snapshots)
+      - name: Generate brim-affected baselines (--update-snapshots)
         continue-on-error: true
-        run: pnpm test:visual --update-snapshots -- tests/visual/printable-parts-exploded.spec.ts
+        run: pnpm test:visual --update-snapshots -- tests/visual/printable-parts-exploded.spec.ts tests/visual/silicone-exploded.spec.ts
       - name: List new goldens
         run: |
           echo "printable-parts-exploded snapshot dir:"
           find tests/__screenshots__/linux-ci/visual/printable-parts-exploded.spec.ts-snapshots -type f 2>/dev/null | sort
-          echo "total printable-parts-exploded PNGs: $(find tests/__screenshots__/linux-ci/visual/printable-parts-exploded.spec.ts-snapshots -type f -name '*.png' 2>/dev/null | wc -l)"
-      - name: Commit baseline back to branch
+          echo "silicone-exploded snapshot dir:"
+          find tests/__screenshots__/linux-ci/visual/silicone-exploded.spec.ts-snapshots -type f 2>/dev/null | sort
+      - name: Commit baselines back to branch
         run: |
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
@@ -64,7 +73,7 @@ jobs:
             echo "No golden changes to commit."
             exit 0
           fi
-          git commit -m "chore(test): regenerate printable-parts-exploded golden for tapered brim (#96)"
+          git commit -m "chore(test): regenerate brim-affected goldens for tapered brim (#96)"
           git push origin feat/brim-fillet
       - uses: actions/upload-artifact@v4
         if: always()
