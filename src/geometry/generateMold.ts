@@ -54,7 +54,8 @@ import type { MoldParameters } from '@/renderer/state/parameters';
 import { SIDE_COUNT_OPTIONS } from '@/renderer/state/parameters';
 import { manifoldToBufferGeometry, isManifold } from './adapters';
 import { buildBaseSlab, BASE_SLAB_PLUG_HEIGHT_MM } from './baseSlab';
-import { addBrim } from './brim';
+import type { CutPlaneSlice } from './brim';
+import { addBrim, buildCutPlaneSlice, disposeCutPlaneSlice } from './brim';
 import { effectiveCutAngles } from './sideAngles';
 import { initManifold } from './initManifold';
 import { sliceShellRadial } from './shellSlicer';
@@ -1050,6 +1051,34 @@ export async function generateSiliconeShell(
           const tSlice = performance.now();
 
           if (onPhase) await onPhase('brims');
+          // Perf claw-back: each cut plane is SHARED by two adjacent
+          // pieces (sideCount >= 3) or used once (sideCount = 2). The
+          // conformal brim slices the full shell at each cut plane to
+          // build its 2D profile — sliced + hole-filled ONCE per
+          // unique cut angle here, reused across both pieces'
+          // `addBrim` calls via `cutPlaneSlices`. Halves the rotate +
+          // slice + hole-fill cost at sideCount 3/4 where the dogfood
+          // perf budget was the tightest.
+          const cutPlaneSlices = new Map<number, CutPlaneSlice | null>();
+          try {
+            for (const angleDeg of effectiveCutAngles_) {
+              cutPlaneSlices.set(
+                angleDeg,
+                buildCutPlaneSlice(
+                  toplevel,
+                  printShellFull,
+                  xzCenter,
+                  angleDeg,
+                ),
+              );
+            }
+          } catch (err) {
+            for (const slice of cutPlaneSlices.values()) {
+              disposeCutPlaneSlice(slice);
+            }
+            throw err;
+          }
+
           // Add brim to each piece. `addBrim` consumes its input and
           // returns a fresh Manifold; we swap the array entry in-place
           // so the failure path can release all currently-owned pieces
@@ -1079,6 +1108,10 @@ export async function generateSiliconeShell(
                 angles: effectiveCutAngles_,
                 brimWidth_mm: parameters.brimWidth_mm,
                 brimThickness_mm: parameters.brimThickness_mm,
+                // Perf claw-back: reuse the pre-computed per-angle
+                // cut-plane slices (sliced + hole-filled ONCE above,
+                // reused by every piece that shares an angle).
+                cutPlaneSlices,
                 // Issue #89: shell's inner-cavity volume, used as a
                 // belt-and-braces carve-out on non-convex masters
                 // where the 2D inward offset can overshoot the
@@ -1101,6 +1134,12 @@ export async function generateSiliconeShell(
               }
             }
             throw err;
+          } finally {
+            // Release every cached slice — owned by this block,
+            // never seen by addBrim's cleanup path.
+            for (const slice of cutPlaneSlices.values()) {
+              disposeCutPlaneSlice(slice);
+            }
           }
           // Brim loop done — safe to release the full shell now.
           printShellFull.delete();

@@ -250,6 +250,142 @@ export interface AddBrimArgs {
    * `SIDE_CUT_ANGLES[sideCount]`.
    */
   angles?: readonly number[];
+  /**
+   * Optional cache of pre-computed cut-plane cross-sections, keyed by
+   * `angleDeg` (degrees, matching values in `angles` / `SIDE_CUT_ANGLES`).
+   * Each entry is a `CutPlaneSlice` produced by `buildCutPlaneSlice`.
+   * When present, `addBrim` REUSES the cached `csRaw` / `csFilled`
+   * instead of re-slicing the shell — halves the rotate + slice +
+   * hole-fill cost at sideCount ≥ 3 where each cut plane is shared by
+   * two adjacent pieces.
+   *
+   * CALLER-OWNED. Cache entries (`CrossSection` handles inside) are
+   * NOT disposed by `addBrim`. The caller retains them for the full
+   * brim loop and disposes them via `disposeCutPlaneSlice` afterwards.
+   *
+   * A `null` entry is valid and means "this cut plane is degenerate —
+   * skip the brim for this angle" (matches the in-line early-exit the
+   * non-cached path has). Absent entries fall back to local
+   * computation (backward-compatible for call-sites that don't
+   * pre-compute).
+   */
+  cutPlaneSlices?: ReadonlyMap<number, CutPlaneSlice | null>;
+}
+
+/**
+ * Pre-computed cut-plane cross-section shared across adjacent pieces.
+ *
+ * The full print shell is rotated + sliced once per unique cut plane
+ * in `generateMold.ts`, producing one `CutPlaneSlice` per angle. Each
+ * piece's `addBrim` call then reads the two slices for its bounding
+ * cut planes, skipping the rotate + slice + hole-fill (the expensive
+ * operations on a multi-thousand-tri shell Manifold).
+ *
+ * For sideCount=4 the cache has 4 entries (one per cut plane) reused
+ * across 8 brim builds — halves the per-brim setup cost.
+ *
+ * `filledBounds` is the AABB of `csFilled` in (X, Y) local coords;
+ * stored so each caller doesn't re-call `.bounds()` (cheap but
+ * non-zero across the 8 brim builds).
+ */
+export interface CutPlaneSlice {
+  readonly csRaw: CrossSection;
+  readonly csFilled: CrossSection;
+  readonly filledBounds: { readonly min: readonly number[]; readonly max: readonly number[] };
+}
+
+/**
+ * Slice the full print shell at the cut plane defined by
+ * `xzCenter + Y axis` rotated `angleDeg` CCW from +X. Returns a
+ * `CutPlaneSlice` (caller owns the CrossSection handles inside) or
+ * `null` when the shell doesn't intersect the cut plane meaningfully
+ * (degenerate slice, empty slice after hole-fill).
+ *
+ * Pipeline (kept in sync with `addBrim`'s step 1-2 non-cached path):
+ *
+ *   1. Translate by `-xzCenter` so the cut axis (world +Y shifted
+ *      by `xzCenter` in XZ) passes through the origin.
+ *   2. Rotate by `+angleDeg` about +Y. The cut plane's normal
+ *      `n_CCW(angleDeg)` maps to +Z; the cut plane coincides with
+ *      the rotated shell's Z=0 plane.
+ *   3. `.slice(0)` → `csRaw`, a 2D CrossSection in the rotated
+ *      shell's (X, Y) plane. X_cs = radial-outward, Y_cs = world-
+ *      vertical.
+ *   4. Filter `toPolygons()` to CCW (outer) contours and rebuild
+ *      `csFilled` via `ofPolygons(..., 'Positive')` — fills holes
+ *      so `csOutward = csFilled.offset(+brimWidth)` inflates only
+ *      the outer silhouette.
+ *   5. Record `csFilled.bounds()` for downstream clip-rectangle
+ *      sizing.
+ *
+ * All intermediate transforms are released before returning; only
+ * `csRaw` + `csFilled` survive in the returned slice.
+ */
+export function buildCutPlaneSlice(
+  toplevel: ManifoldToplevel,
+  shellManifold: Manifold,
+  xzCenter: { x: number; z: number },
+  angleDeg: number,
+): CutPlaneSlice | null {
+  const shellShifted = shellManifold.translate([
+    -xzCenter.x,
+    0,
+    -xzCenter.z,
+  ]);
+  let shellRotated: Manifold | undefined;
+  let csRaw: CrossSection | undefined;
+  try {
+    shellRotated = shellShifted.rotate([0, angleDeg, 0]);
+    csRaw = shellRotated.slice(0);
+    if (csRaw.isEmpty() || csRaw.numContour() === 0) {
+      csRaw.delete();
+      return null;
+    }
+    const rawPolys = csRaw.toPolygons();
+    const outerPolys = rawPolys.filter((p) => signedArea(p) > 0);
+    if (outerPolys.length === 0) {
+      csRaw.delete();
+      return null;
+    }
+    const csFilled = toplevel.CrossSection.ofPolygons(
+      outerPolys as unknown as SimplePolygon[],
+      'Positive',
+    );
+    if (csFilled.isEmpty()) {
+      csRaw.delete();
+      csFilled.delete();
+      return null;
+    }
+    const bounds = csFilled.bounds();
+    return {
+      csRaw,
+      csFilled,
+      filledBounds: {
+        min: [bounds.min[0], bounds.min[1]] as const,
+        max: [bounds.max[0], bounds.max[1]] as const,
+      },
+    };
+  } catch (err) {
+    if (csRaw) {
+      try { csRaw.delete(); } catch { /* already dead */ }
+    }
+    throw err;
+  } finally {
+    if (shellRotated) {
+      try { shellRotated.delete(); } catch { /* already dead */ }
+    }
+    try { shellShifted.delete(); } catch { /* already dead */ }
+  }
+}
+
+/**
+ * Release both CrossSection handles inside a `CutPlaneSlice`. Safe to
+ * call with `null` (no-op). Caller's cleanup hook after the brim loop.
+ */
+export function disposeCutPlaneSlice(slice: CutPlaneSlice | null): void {
+  if (!slice) return;
+  try { slice.csRaw.delete(); } catch { /* already dead */ }
+  try { slice.csFilled.delete(); } catch { /* already dead */ }
 }
 
 /**
@@ -388,56 +524,44 @@ export function addBrim(args: AddBrimArgs): Manifold {
       const theta_deg = cut.angleDeg;
       const zOffset = cut.localXSign === -1 ? 0 : -brimThickness_mm;
 
-      // Step 1a: translate the shell so the cut axis passes through
-      // the world origin (Y axis is the cut axis — the cut plane
-      // always contains the world Y axis shifted by xzCenter in XZ).
-      const shellShifted = shellManifold.translate([
-        -xzCenter.x,
-        0,
-        -xzCenter.z,
-      ]);
-      tempManifolds.push(shellShifted);
-
-      // Step 1b: rotate the shell by +θ_deg about +Y. After this
-      // the plane normal n_CCW(θ) aligns with +Z and the radial
-      // direction aligns with +X. The cut plane coincides with the
-      // rotated-shell's Z = 0 plane.
-      const shellRotated = shellShifted.rotate([0, theta_deg, 0]);
-      tempManifolds.push(shellRotated);
-
-      // Step 1c: slice at Z = 0. CrossSection in (X, Y) plane of the
-      // rotated shell. X_cs = radial-outward, Y_cs = world-vertical.
-      const csRaw = shellRotated.slice(0);
-      tempSections.push(csRaw);
-
-      if (csRaw.isEmpty() || csRaw.numContour() === 0) {
-        // Pathological case: the shell has no cross-section at this
-        // cut plane. Skip this cut's brim — no geometry to build.
+      // Steps 1-2: slice the shell at the cut plane and fill holes.
+      // Two paths:
+      //   (a) CACHED — caller pre-computed via `buildCutPlaneSlice`
+      //       and passed in via `cutPlaneSlices`. Reuse csRaw +
+      //       csFilled without re-slicing. Caller owns the handles;
+      //       we do NOT push them to tempSections.
+      //   (b) LOCAL — no cache entry for this angle. Call
+      //       `buildCutPlaneSlice` in-line and release the returned
+      //       slice at end of iteration. Push the transient handles
+      //       to tempSections so failure-path cleanup catches them.
+      const cached = args.cutPlaneSlices?.get(theta_deg);
+      let csRaw: CrossSection;
+      let csFilled: CrossSection;
+      let localSlice: CutPlaneSlice | null = null;
+      if (cached === null) {
+        // Caller already determined this cut is degenerate. Skip.
         continue;
       }
-
-      // Step 2: fill holes. The shell's cross-section is annular
-      // (outer CCW contour + inner CW hole where the silicone cavity
-      // lives). Keep only CCW contours and rebuild as a single
-      // solid profile via `ofPolygons(..., 'Positive')`. Any CCW
-      // contour from a non-convex master becomes its own outer
-      // profile — multiple outer loops are fine, the offset + ring-
-      // subtract operate on each component consistently.
-      const rawPolys = csRaw.toPolygons();
-      const outerPolys = rawPolys.filter((p) => signedArea(p) > 0);
-      if (outerPolys.length === 0) {
-        // No CCW outer contour — degenerate slice (e.g. single-
-        // vertex intersection). Skip.
-        continue;
-      }
-      const csFilled = toplevel.CrossSection.ofPolygons(
-        outerPolys as unknown as SimplePolygon[],
-        'Positive',
-      );
-      tempSections.push(csFilled);
-
-      if (csFilled.isEmpty()) {
-        continue;
+      if (cached !== undefined) {
+        csRaw = cached.csRaw;
+        csFilled = cached.csFilled;
+      } else {
+        localSlice = buildCutPlaneSlice(
+          toplevel,
+          shellManifold,
+          xzCenter,
+          theta_deg,
+        );
+        if (!localSlice) {
+          // Degenerate slice — skip this cut.
+          continue;
+        }
+        csRaw = localSlice.csRaw;
+        csFilled = localSlice.csFilled;
+        // tempSections owns the cleanup for the local slice's
+        // CrossSection handles so the failure path catches them too.
+        tempSections.push(csRaw);
+        tempSections.push(csFilled);
       }
 
       // Step 3a: inflate outward by brimWidth (Round joins). The 2D
@@ -474,11 +598,13 @@ export function addBrim(args: AddBrimArgs): Manifold {
       // slack). For `clipX = false` (sideCount=2) the rectangle
       // covers both +X_cs and -X_cs half-planes. For `clipX = true`
       // the rectangle covers only +X_cs.
-      const filledBounds = csFilled.bounds();
+      const filledBounds = localSlice
+        ? localSlice.filledBounds
+        : (cached as CutPlaneSlice).filledBounds;
       const clipHalfX =
         Math.max(
-          Math.abs(filledBounds.min[0]),
-          Math.abs(filledBounds.max[0]),
+          Math.abs(filledBounds.min[0]!),
+          Math.abs(filledBounds.max[0]!),
         ) + brimWidth_mm + 10;
       const clipMinX = cut.clipX ? 0 : -clipHalfX;
       const clipMaxX = clipHalfX;
