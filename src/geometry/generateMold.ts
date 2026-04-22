@@ -59,7 +59,7 @@ import { addBrim, buildCutPlaneSlice, disposeCutPlaneSlice } from './brim';
 import { CIRCULAR_SEGMENTS } from './primitives';
 import { effectiveCutAngles } from './sideAngles';
 import { initManifold } from './initManifold';
-import { sliceShellRadial } from './shellSlicer';
+import { applyTongueAndGrooveSeals, sliceShellRadial } from './shellSlicer';
 
 /**
  * Error raised on invalid `MoldParameters` input to `generateSiliconeShell`
@@ -1302,7 +1302,50 @@ export async function generateSiliconeShell(
           printShellFull.delete();
           printShellFull = undefined;
           const tBrim = performance.now();
-          const tSeal = tBrim;
+
+          // Step 5.5 (issue piece-seal round 2, 2026-04-22 dogfood):
+          // apply V-chevron tongue-and-groove seals to every shared cut
+          // plane. Each cut face gains a triangular-prism interlock
+          // running the FULL shell height: piece on +n_CCW side gets a
+          // groove cavity; mating piece on −n side gets a tongue that
+          // slides into that cavity with SEAL_CLEARANCE_MM of air gap.
+          // The chevron is centred radially on the SHELL OUTER silhouette
+          // so it straddles the shell-wall / brim junction. See
+          // `./shellSlicer.ts` for the full geometric spec.
+          //
+          // Shell outer radius for X_apex placement: the max XZ extent
+          // from xzCenter. The shell is roughly axisymmetric around the
+          // master centerline, so max XZ extent ≈ outer radius at each
+          // cut angle. Good enough for seal placement; the V's 6 mm
+          // span + clearance tolerates a few mm of wobble in the
+          // radial alignment without the apex poking past the shell
+          // wall's inner surface or the brim's outer edge.
+          const shellOuterHalfExtent = Math.max(
+            shellBboxWorld.max.x - xzCenter.x,
+            xzCenter.x - shellBboxWorld.min.x,
+            shellBboxWorld.max.z - xzCenter.z,
+            xzCenter.z - shellBboxWorld.min.z,
+          );
+          // `applyTongueAndGrooveSeals` consumes shellPieces and returns
+          // fresh handles. On throw, it releases every surviving slot
+          // before re-throw (per its contract), so we swap
+          // `shellPieces = undefined` before the call to prevent the
+          // outer catch from double-releasing.
+          const preSealPieces = shellPieces;
+          shellPieces = undefined;
+          shellPieces = applyTongueAndGrooveSeals({
+            toplevel,
+            pieces: preSealPieces,
+            sideCount: parameters.sideCount,
+            xzCenter,
+            angles: effectiveCutAngles_,
+            shellY: {
+              minY: shellBboxWorld.min.y,
+              maxY: shellBboxWorld.max.y,
+            },
+            shellOuterRadius_mm: shellOuterHalfExtent,
+          });
+          const tSeal = performance.now();
 
           if (onPhase) await onPhase('slab');
           // Step 6: Wave D base slab + plug. Slice the transformed
