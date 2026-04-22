@@ -21,6 +21,16 @@ declare global {
         showSaveDialog?: (
           opts: SaveDialogOptions,
         ) => Promise<{ canceled: boolean; filePath?: string }>;
+        /**
+         * Folder-picker stub for `file:export-mold-parts` (issue #91).
+         * Returns `{canceled, filePaths}` — Electron's native
+         * `showOpenDialog` with `properties: ['openDirectory']` returns
+         * a single-entry `filePaths` array with the picked folder. Test
+         * stubs supply the same shape so the handler stays uniform.
+         */
+        showOpenFolder?: (
+          opts: OpenDialogOptions,
+        ) => Promise<{ canceled: boolean; filePaths: string[] }>;
       }
     | undefined;
 }
@@ -51,6 +61,41 @@ export async function showOpenStl(
 
   if (isTest() && globalThis.__testDialogStub?.showOpenDialog) {
     const stubbed = await globalThis.__testDialogStub.showOpenDialog(options);
+    return {
+      canceled: stubbed.canceled,
+      filePaths: stubbed.filePaths ?? [],
+    };
+  }
+
+  const result = await dialog.showOpenDialog(options);
+  return { canceled: result.canceled, filePaths: result.filePaths };
+}
+
+/**
+ * Raw-dialog result for the Export-Mold-Parts flow (issue #91). Shape
+ * mirrors `OpenStlDialogResult` — the caller joins the picked folder with
+ * each filename and performs the writes. `filePaths` will be either
+ * empty (canceled) or a single-entry array with the absolute folder path.
+ */
+export interface OpenFolderDialogResult {
+  canceled: boolean;
+  filePaths: string[];
+}
+
+/**
+ * Pop the native folder picker used by `file:export-mold-parts`. Uses
+ * Electron's `showOpenDialog` with `properties: ['openDirectory',
+ * 'createDirectory']` so users can pick an existing folder or create a
+ * fresh one mid-picker — the `'createDirectory'` hint is a macOS-only
+ * button but safe to pass on every platform.
+ */
+export async function showOpenFolder(): Promise<OpenFolderDialogResult> {
+  const options: OpenDialogOptions = {
+    properties: ['openDirectory', 'createDirectory'],
+  };
+
+  if (isTest() && globalThis.__testDialogStub?.showOpenFolder) {
+    const stubbed = await globalThis.__testDialogStub.showOpenFolder(options);
     return {
       canceled: stubbed.canceled,
       filePaths: stubbed.filePaths ?? [],
