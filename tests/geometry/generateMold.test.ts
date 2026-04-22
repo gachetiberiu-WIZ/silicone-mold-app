@@ -12,8 +12,14 @@
 // a generate-×3 leak check.
 //
 // Load-bearing invariants (issue #72 AC):
-//   - `resinVolume_mm3 === masterVolume_mm3` at 1e-9 relative on every
-//     fixture (carry-over from PR #70).
+//   - `resinVolume_mm3 === transformedMaster.volume()` at 1e-9 relative
+//     on every fixture. Post-#81 the comparand is the TRANSFORMED master
+//     (viewTransform applied) so the Resin readout tracks the
+//     Dimensions-panel scale + lay-flat orientation. For identity
+//     transforms this still reduces to the raw `master.volume()` within
+//     `Manifold.transform` roundoff — the pre-#81 identity still holds.
+//     For non-identity scales the cube-law test below (2× uniform scale
+//     → 8× volume) pins the new behaviour.
 //   - `printShell` is watertight (`isManifold()` true, `genus() === 0`),
 //     non-empty, top-trimmed at `master.max.y + silicone + 3 mm` and
 //     bottom-trimmed at `master.min.y`, bounds contained within the
@@ -929,6 +935,116 @@ describe('generateSiliconeShell — validation', () => {
       }
     } finally {
       bar.delete();
+    }
+  }, 30_000);
+});
+
+describe('generateSiliconeShell — resinVolume tracks viewTransform (issue #81)', () => {
+  // Pre-#81 `resinVolume_mm3` was computed from the untransformed
+  // `master.volume()`, so a non-identity viewTransform (notably the
+  // Dimensions panel's uniform scale in #79) left the Resin readout
+  // pegged at the untransformed volume even as the viewport + silicone
+  // body scaled correctly. Post-#81 the readout is derived from
+  // `transformedMaster.volume()` so scale + rotation + translation all
+  // flow through. These tests pin the two invariants:
+  //
+  //   1. Identity transform → resin == master.volume() at 1e-9 relative
+  //      (the original #69/#72 AC, now reframed as "transformedMaster
+  //       coincides with master under identity").
+  //   2. 2× uniform scale → resin == 8 × master.volume() at 1e-3
+  //      relative (cube-law: V' = s³·V).
+  //
+  // Uses a hand-built cube via `Manifold.cube` so the test runs on any
+  // fresh clone without a fixture dependency.
+  test('identity viewTransform: resinVolume_mm3 === transformedMaster.volume()', async () => {
+    const toplevel = await initManifold();
+    const master = toplevel.Manifold.cube([4, 4, 4], true);
+    try {
+      const identity = new Matrix4();
+      const result = await generateSiliconeShell(
+        master,
+        params({ siliconeThickness_mm: 5 }),
+        identity,
+      );
+      try {
+        // Under identity, transformedMaster is geometrically the same
+        // as master. `Manifold.transform` roundoff stays below 1e-12,
+        // so the raw master volume is the right comparand here — this
+        // is the original #72 AC "resin ≡ master at 1e-9 rel" reframed
+        // under the post-#81 semantic.
+        const masterVol = master.volume();
+        expect(result.resinVolume_mm3).toBeCloseTo(masterVol, 9);
+        const relErr =
+          Math.abs(result.resinVolume_mm3 - masterVol) / Math.abs(masterVol);
+        expect(relErr).toBeLessThan(1e-9);
+      } finally {
+        disposeAll(result);
+      }
+    } finally {
+      master.delete();
+    }
+  }, 30_000);
+
+  test('2× uniform scale viewTransform: resinVolume_mm3 === 8 × masterVolume (cube-law)', async () => {
+    const toplevel = await initManifold();
+    const master = toplevel.Manifold.cube([4, 4, 4], true);
+    try {
+      const masterVol = master.volume();
+      const SCALE = 2;
+      const scaleMatrix = new Matrix4().makeScale(SCALE, SCALE, SCALE);
+
+      const result = await generateSiliconeShell(
+        master,
+        params({ siliconeThickness_mm: 5 }),
+        scaleMatrix,
+      );
+      try {
+        // Cube-law: V(s·M) = s³·V(M). For s=2 that's 8×. The tolerance
+        // is 1e-3 relative — loose enough to absorb the kernel's
+        // transform-then-re-triangulate roundoff on the 4×4×4 → 8×8×8
+        // cube but tight enough to catch "transform was skipped"
+        // (relErr ≈ 7/8 = 0.875) and "wrong axis scaled" (relErr ≈
+        // 3/4 = 0.75) regressions.
+        const expected = masterVol * SCALE ** 3;
+        expect(result.resinVolume_mm3).toBeCloseTo(expected, 3);
+        const relErr =
+          Math.abs(result.resinVolume_mm3 - expected) / Math.abs(expected);
+        expect(relErr).toBeLessThan(1e-3);
+      } finally {
+        disposeAll(result);
+      }
+    } finally {
+      master.delete();
+    }
+  }, 30_000);
+
+  test('non-identity rotation + translation: resinVolume_mm3 === masterVolume (volume-preserving)', async () => {
+    // Rotations + translations do not change volume. This pins that
+    // `transformedMaster.volume()` still matches the raw master volume
+    // under volume-preserving transforms — defence-in-depth against a
+    // regression where the transform corrupts the mesh AND the fallback
+    // silently papers over it.
+    const toplevel = await initManifold();
+    const master = toplevel.Manifold.cube([4, 4, 4], true);
+    try {
+      const masterVol = master.volume();
+      const rotTrans = new Matrix4()
+        .makeRotationY(Math.PI / 4)
+        .multiply(new Matrix4().makeTranslation(3, -7, 2));
+      const result = await generateSiliconeShell(
+        master,
+        params({ siliconeThickness_mm: 5 }),
+        rotTrans,
+      );
+      try {
+        // Kernel transform roundoff on the rotated cube is larger than
+        // pure identity but still well below 1e-6 relative.
+        expect(result.resinVolume_mm3).toBeCloseTo(masterVol, 6);
+      } finally {
+        disposeAll(result);
+      }
+    } finally {
+      master.delete();
     }
   }, 30_000);
 });

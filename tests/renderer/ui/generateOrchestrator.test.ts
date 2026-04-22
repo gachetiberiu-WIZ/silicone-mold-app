@@ -81,9 +81,16 @@ const STALE_RESIN_MM3 = 127_452;
 const STALE_PRINT_SHELL_MM3 = 455_000;
 const STALE_BASE_SLAB_MM3 = 88_888;
 
-/** A fake Manifold whose only exercised method is `.delete()`. */
-function fakeManifold(): Manifold {
-  return { delete: vi.fn<() => void>() } as unknown as Manifold;
+/**
+ * A fake Manifold whose only exercised methods are `.delete()` and
+ * `.isEmpty()`. `isEmpty` defaults to `false` (the common case); the
+ * degenerate-slab tests override it per call site.
+ */
+function fakeManifold(isEmpty = false): Manifold {
+  return {
+    delete: vi.fn<() => void>(),
+    isEmpty: vi.fn<() => boolean>(() => isEmpty),
+  } as unknown as Manifold;
 }
 
 /**
@@ -929,5 +936,250 @@ describe('generateOrchestrator — progress status (issue #87 Fix 1)', () => {
     await orchestrator.run();
 
     expect(capturedOnPhase).toHaveBeenCalledWith(undefined);
+  });
+});
+
+describe('generateOrchestrator — degenerate-slab notice (issue #93)', () => {
+  // Post-generate, when the committed orientation produces an empty /
+  // zero-volume base slab (e.g. figurine top-face committed instead of
+  // bottom — the Y-min slice is a zero-area cross-section), the
+  // orchestrator surfaces a NOTICE-level toast via the injected
+  // `showNotice` dep. Fires once per successful run on the happy-path
+  // terminal branch only. Stale-drops + error paths skip it.
+
+  /** Build a degenerate result: basePart.isEmpty() returns true + volume 0. */
+  function makeDegenerateResult(): MoldGenerationResult {
+    const result = makeResult();
+    return {
+      ...result,
+      basePart: fakeManifold(/* isEmpty */ true),
+      baseSlabVolume_mm3: 0,
+    };
+  }
+
+  /**
+   * Build a zero-volume-but-NON-empty result. Defence-in-depth check —
+   * the orchestrator fires the notice when volume <= 0 too, not only
+   * when isEmpty() is true.
+   */
+  function makeZeroVolumeNonEmptyResult(): MoldGenerationResult {
+    const result = makeResult();
+    return {
+      ...result,
+      basePart: fakeManifold(/* isEmpty */ false),
+      baseSlabVolume_mm3: 0,
+    };
+  }
+
+  test('fires showNotice when basePart.isEmpty() is true', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const showNotice = vi.fn<(msg: string) => void>();
+    const translateWarning = vi.fn<(key: string) => string>(
+      (k) => `translated:${k}`,
+    );
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      showNotice,
+      translateWarning,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeDegenerateResult());
+    await runPromise;
+
+    expect(translateWarning).toHaveBeenCalledWith('warnings.degenerateSlab');
+    expect(showNotice).toHaveBeenCalledTimes(1);
+    expect(showNotice).toHaveBeenCalledWith('translated:warnings.degenerateSlab');
+  });
+
+  test('fires showNotice when baseSlabVolume_mm3 <= 0 even if basePart is non-empty', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const showNotice = vi.fn<(msg: string) => void>();
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      showNotice,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeZeroVolumeNonEmptyResult());
+    await runPromise;
+
+    expect(showNotice).toHaveBeenCalledTimes(1);
+    // No translateWarning passed → the raw key is forwarded.
+    expect(showNotice).toHaveBeenCalledWith('warnings.degenerateSlab');
+  });
+
+  test('does NOT fire showNotice on the happy path (non-degenerate slab)', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const showNotice = vi.fn<(msg: string) => void>();
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      showNotice,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeResult()); // healthy default: isEmpty() false + volume > 0
+    await runPromise;
+
+    expect(showNotice).not.toHaveBeenCalled();
+  });
+
+  test('fires showNotice exactly ONCE per run (not on every internal hop)', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const showNotice = vi.fn<(msg: string) => void>();
+    // Also wire the scene sinks so the orchestrator walks the full
+    // hand-off path — which historically had multiple post-result
+    // branches; the notice should still fire once.
+    const sceneSetSilicone = vi
+      .fn<(payload: { silicone: Manifold }) => Promise<unknown>>()
+      .mockResolvedValue({ bbox: null });
+    const sceneSetPrintableParts = vi
+      .fn<(parts: {
+        shellPieces: readonly Manifold[];
+        basePart: Manifold;
+        xzCenter?: { x: number; z: number };
+      }) => Promise<unknown>>()
+      .mockResolvedValue({ bbox: null });
+
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      scene: {
+        setSilicone: sceneSetSilicone,
+        setPrintableParts: sceneSetPrintableParts,
+      },
+      showNotice,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeDegenerateResult());
+    await runPromise;
+
+    expect(showNotice).toHaveBeenCalledTimes(1);
+  });
+
+  test('does NOT fire showNotice on stale-drop even if basePart is degenerate', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const showNotice = vi.fn<(msg: string) => void>();
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      showNotice,
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    const { bumpGenerateEpoch } = await import('@/renderer/ui/generateEpoch');
+    bumpGenerateEpoch(); // make the in-flight run stale
+    d.resolve(makeDegenerateResult());
+    await runPromise;
+
+    expect(showNotice).not.toHaveBeenCalled();
+  });
+
+  test('does NOT fire showNotice when generate rejects', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const showNotice = vi.fn<(msg: string) => void>();
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => Promise.reject(new Error('boom')),
+      topbar,
+      button,
+      showNotice,
+      logger: { error: () => {} },
+    });
+
+    await orchestrator.run();
+
+    expect(showNotice).not.toHaveBeenCalled();
+  });
+
+  test('showNotice throwing is logged but does NOT break the run', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const showNotice = vi.fn<(msg: string) => void>(() => {
+      throw new Error('toast sink boom');
+    });
+    const error = vi.fn<(...args: unknown[]) => void>();
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      showNotice,
+      logger: { error },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeDegenerateResult());
+    await expect(runPromise).resolves.toBeUndefined();
+
+    expect(showNotice).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalled();
+    // Busy still cleared on the terminal finally.
+    expect(button.setBusy).toHaveBeenLastCalledWith(false);
+  });
+
+  test('optional showNotice — omitting it is a no-op even on degenerate slab', async () => {
+    const { topbar, button } = makeMocks();
+    const master = {} as Manifold;
+    const d = deferred<MoldGenerationResult>();
+    const orchestrator = createGenerateOrchestrator({
+      getMaster: () => master,
+      getParameters: () => DEFAULT_PARAMETERS,
+      getViewTransform: () => new Matrix4(),
+      generate: () => d.promise,
+      topbar,
+      button,
+      // showNotice intentionally omitted
+      logger: { error: () => {} },
+    });
+
+    const runPromise = orchestrator.run();
+    d.resolve(makeDegenerateResult());
+    await expect(runPromise).resolves.toBeUndefined();
   });
 });

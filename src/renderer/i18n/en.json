@@ -79,6 +79,9 @@
   "notice": {
     "masterRepaired": "Repaired non-manifold STL on load ({{removed}} triangles removed)."
   },
+  "warnings": {
+    "degenerateSlab": "Base slab has zero volume for this orientation. Try committing a different face with 'Place on face' and regenerate."
+  },
   "errors": {
     "stlOnly": "Only .stl files are supported",
     "singleFile": "Drop one file at a time",
