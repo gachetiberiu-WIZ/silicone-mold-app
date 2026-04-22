@@ -55,6 +55,22 @@ If an input mesh is non-manifold, `manifold-3d` repairs it silently. **Surface t
 - **Generate (batch)**: target < 500 ms on 50 k-tri masters, < 3 s on 500 k-tri. Beyond 500 k, show progress and allow cancel.
 - **WASM init**: preload `manifold-3d` at app startup. Don't lazy-load on first Generate.
 
+## LevelSet perf playbook (issues #72 / #74 / #75 / #86)
+
+The silicone + print-shell pipeline in `src/geometry/generateMold.ts` calls `Manifold.levelSet` twice on the same master SDF. These optimisations compound to take mini-figurine from ~7.1 s → ~5.2 s (–27% total, –84% on the shell-levelset alone). When editing this path, preserve them:
+
+1. **Unified grid bounds.** Both `levelSet` calls sample the SAME lattice. The shell pass uses `pad = siliconeThickness + printShellThickness`; the silicone pass reuses that same padded bounds. Sharing bounds means sample points collide in the overlap region — precondition for (2).
+
+2. **Quantised-key SDF cache.** The SDF closure wraps a `Map<string, number>` keyed by `round(p · 1e6)` triples. Gives ~50% hit rate by construction on the second pass. Quantum MUST be much tighter than `edgeLength` (1e-6 mm is lossless; `edgeLength/2` would be unsafe — one-quantum SDF errors near BCC edges flip marching-tet classification).
+
+3. **Far-field early-out.** For query points whose AABB distance from the master exceeds `max(|level|) + edgeLength`, the exact SDF value is immaterial — they're always "outside". The closure skips BVH descent and returns a pre-computed constant below the deepest iso-level. ~10% BVH savings on a figurine, ~30% on a compact cube.
+
+4. **Non-axis-aligned parity ray.** The ray cast for inside/outside parity MUST use a prime-ratio direction like `(1, 0.00931, 0.01373).normalize()`, never `(1, 0, 0)`. Axis-aligned rays graze axis-aligned mesh edges and return ambiguous parity counts. Under (1)'s enlarged grid this surfaces as silent topology corruption (extra silicone components at the grid boundary). Prime-ratio direction avoids edges/vertices on non-degenerate meshes.
+
+5. **edgeLength floor** (#71, #86). `max(2.0, siliconeThickness/4)` as the floor. At silicone=5 mm this yields 2.0 mm. Dropping below 1.5 mm makes ubuntu CI blow through the 12 s perf budget. When lowering, add a scaling rule based on master bbox magnitude (#76 tracks this for large masters).
+
+When profiling regressions, instrument via `SdfStats` (cache hit rate, far-skip count, BVH ms). Signal to watch: `shell-levelset-ms / silicone-levelset-ms` — if it's not ~0.15, the cache is broken.
+
 ## Patterns to prefer
 
 - **Single source of truth for geometry**: Manifold instance for compute, `BufferGeometry` for display. Build a thin adapter in `src/geometry/adapters.ts` (create if missing); don't sprinkle conversions across call sites.
