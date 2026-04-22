@@ -256,11 +256,19 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
             // Issue #94 Fix 1 added the pour-channel subtract (1 slice +
             // 1 extrude + 1 Manifold.difference) for ~1 s additional on
             // ubuntu CI. Budget bumped 10 s → 12 s to absorb the new
-            // boolean; issue #86 still tracks the overall claw-back. An
-            // observed failure at 11.0 s on ubuntu-latest sat well under
-            // the old 15 s ceiling; 12 s gives a ~9 % headroom over the
-            // observed peak without weakening the 25 % regression gate.
-            expect(elapsed).toBeLessThan(12_000);
+            // boolean; issue #86 still tracks the overall claw-back.
+            //
+            // Round-8 conformal brim (dogfood 2026-04-22) slices the
+            // full print shell at each cut plane to build a flange that
+            // follows the shell silhouette (user-approved visual fix
+            // after the AABB-based brim left visible gaps on tapered
+            // masters). Adds ~4 s on ubuntu CI at sideCount=4 (8 ×
+            // rotate + slice on the full print shell). Budget bumped
+            // 12 s → 18 s to absorb the geometry cost; follow-up
+            // tracks claw-back via cross-section caching — compute
+            // per unique cut angle once and share across adjacent
+            // pieces, halving the rotate+slice count at sideCount 3/4.
+            expect(elapsed).toBeLessThan(18_000);
           }
 
           expect(isManifold(result.silicone)).toBe(true);
