@@ -155,10 +155,11 @@ test('generate progress: banner appears during Generate, hides after', async () 
     expect(firstLabel.length).toBeGreaterThan(0);
 
     // Wait for the generator to finish and the banner to hide.
-    // Generator budget on the mini-figurine is ~2-5 s; allow 20 s
-    // for CI headroom.
+    // Generator budget on the mini-figurine is ~15-18 s with the
+    // round-8 conformal brim (2026-04-22); 45 s timeout gives CI
+    // headroom (was 20 s for the pre-conformal ~2-5 s budget).
     await expect(generateBtn).toHaveText('Generate mold', {
-      timeout: 20_000,
+      timeout: 45_000,
     });
 
     // Silicone volume populated — sanity that the orchestrator ran

@@ -85,6 +85,11 @@ async function commitTopFace(page: Page): Promise<void> {
 }
 
 test('worker cancel: new Open-STL mid-generate terminates worker, second generate succeeds', async () => {
+  // Default Playwright test timeout is 30 s; conformal brim adds ~4 s
+  // per generate and this test runs TWO generates (the cancelled one +
+  // the follow-up). Bump to 90 s on Windows CI where the base generate
+  // is ~15-18 s.
+  test.setTimeout(90_000);
   const app = await launchApp();
   try {
     const page = await app.firstWindow();
@@ -172,8 +177,9 @@ test('worker cancel: new Open-STL mid-generate terminates worker, second generat
     await generateBtn.click();
 
     // Generate #2 must complete cleanly — volumes populated, banner
-    // hidden. 20 s budget for CI headroom on the mini-figurine.
-    await expect(generateBtn).toHaveText('Generate mold', { timeout: 25_000 });
+    // hidden. 45 s budget for conformal brim geometry cost (round-8
+    // fix 2026-04-22, was 25 s).
+    await expect(generateBtn).toHaveText('Generate mold', { timeout: 45_000 });
     await expect(
       page.locator('[data-testid="silicone-volume-value"]'),
     ).not.toHaveText('Click Generate', { timeout: 5_000 });

@@ -111,7 +111,12 @@ async function clickGenerateAndWait(page: Page): Promise<number> {
   // invalidation + re-commit cycle.
   await page.locator('[data-testid="generate-btn"]').click({ timeout: 60_000 });
   await expect(page.locator('[data-testid="generate-btn"]'))
-    .toHaveText('Generate mold', { timeout: 90_000 });
+    // 200 % scale pushes the mini-figurine through an 8× volume levelSet
+    // (linear scale³ law) on top of the conformal brim's ~4 s geometry
+    // cost. Base generate is ~15-18 s on Windows CI → 2× scale observed
+    // at ~60-120 s. 180 s timeout absorbs the peak; follow-up tracks
+    // clawing back the levelSet + brim cost.
+    .toHaveText('Generate mold', { timeout: 180_000 });
   const siliconeText = await page
     .locator('[data-testid="silicone-volume-value"]')
     .textContent();

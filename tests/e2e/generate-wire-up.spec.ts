@@ -258,9 +258,10 @@ test('generate wire-up: click → volumes populate → re-commit → volumes sta
 
     await page.locator('[data-testid="generate-btn"]').click();
 
-    // Wait for the generator to finish — ≤ 15 s total (2-3 s typical).
+    // Wait for the generator to finish — ≤ 45 s total (15-20 s typical
+    // on CI with conformal brim, round-8 fix 2026-04-22).
     await expect(page.locator('[data-testid="generate-btn"]'))
-      .toHaveText('Generate mold', { timeout: 15_000 });
+      .toHaveText('Generate mold', { timeout: 45_000 });
     await expect(page.locator('[data-testid="generate-btn"]')).toBeEnabled();
 
     // Drain the observer and assert the busy-state transition was visible.

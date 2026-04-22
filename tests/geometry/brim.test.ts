@@ -61,7 +61,8 @@ describe('addBrim — sideCount=2 single-cut case', () => {
     const siliconeOuter = buildInnerCavity(toplevel, INNER);
 
     const pieces = sliceShellRadial(toplevel, shell, 2, { x: 0, z: 0 });
-    shell.delete();
+    // Conformal-brim fix: addBrim requires shellManifold kept alive
+    // across every call. Delete `shell` at the end of the test.
 
     try {
       const pieceVol = pieces[0]!.volume();
@@ -86,6 +87,7 @@ describe('addBrim — sideCount=2 single-cut case', () => {
             z: shellBbox.max[2]!,
           },
         },
+        shellManifold: shell,
         xzCenter: { x: 0, z: 0 },
         brimWidth_mm: brimWidth,
         brimThickness_mm: brimThickness,
@@ -98,47 +100,46 @@ describe('addBrim — sideCount=2 single-cut case', () => {
         expect(isManifold(brimmed)).toBe(true);
         expect(brimmed.isEmpty()).toBe(false);
         const brimmedVol = brimmed.volume();
-        // Post-#89 volume bounds — the brim is now a narrow
-        // `(bondOverlap + brimWidth) × shellHeight × brimThickness`
-        // slab (minus any silicone-cavity intrusion). For sideCount=2
-        // (single brim per piece):
-        //   brim gross ≈ (3 + 10) × shellHeight × 3 = 39·shellHeight
-        //                                                mm³
-        //   part of that overlaps existing shell material (the
-        //   bondOverlap portion sits inside the shell wall) → the
-        //   net volume gain is strictly less than gross.
+        // Post-conformal-fix volume bounds — the brim's 2D profile
+        // at each cut plane is the shell silhouette offset outward
+        // by `brimWidth`, clipped to the shell's Y range, minus the
+        // shell silhouette shrunk inward by `bondOverlap`.
+        //
+        // For the ring-cube fixture (20 mm cube, 10 mm inner void) on
+        // sideCount=2 (cut plane at θ=90°, radial = +Z):
+        //   shell silhouette (slice at Z=0) is the full 20×20 square
+        //     (filled after hole removal);
+        //   outward offset by +10 with round joins → rounded
+        //     40×40 square;
+        //   clipped to Y ∈ [-10, 10] (shell Y range) → ~40×20
+        //     rectangle with minor rounded corners;
+        //   inward offset by -6 → ~8×8 square;
+        //   ring area (outer − inner) ~ 800 - 64 = ~736 mm²;
+        //   extruded by 3 mm thickness → ~2200 mm³ gross brim prism;
+        //   after siliconeOuter carve (brim inside inner cube
+        //     [-5,5]³): ~100 mm³ carved.
+        //
+        // Of that gross brim, the part OUTSIDE the piece (the
+        // "net new" volume we measure as brimmedVol - pieceVol) is
+        // the outer-flange region radially outside the 20×20 shell
+        // footprint (|z| > 10 or |y| > 10, neither in this case
+        // since Y is clipped to shell range). For sideCount=2 piece 0
+        // that's two rectangular slabs (at z ∈ [10, 20] and z ∈
+        // [-20, -10]) of dimensions ~10 × 20 × 3 = 600 each, total
+        // ~1200 mm³.
         expect(brimmedVol).toBeGreaterThan(pieceVol);
-        const shellHeight =
-          shellBbox.max[1]! - shellBbox.min[1]! - 4; // 2mm margin top+bottom
-        const outerFlangeVol = brimWidth * shellHeight * brimThickness;
-        // Issue #96 taper: the outer radial half of the trapezoidal
-        // prism contributes `brimWidth × (ySize × (1 + k) / 2) ×
-        // brimThickness` averaged over its Z-length. For k = 0.5 that's
-        // 75 % of the pre-#96 box volume in the outer-flange region.
-        // Lower bound stays at half the pre-#96 rectangular estimate —
-        // still safely exceeded by the tapered prism minus shell
-        // absorption.
-        expect(brimmedVol - pieceVol).toBeGreaterThan(outerFlangeVol * 0.5);
-        // Upper bound on the volume gain. Issue #97 Fix 4 (polish
-        // dogfood round 3) bumped the bond-overlap multiplier 1.5 →
-        // 2.0; issue #96 (taper) replaced the rectangular box with a
-        // trapezoidal prism whose volume is `BRIM_TAPER_VOLUME_FACTOR
-        // × grossBoxVol` where the volume factor is `(1 +
-        // BRIM_TAPER_FACTOR) / 2 = 0.75` at the production taper of
-        // 0.5. We still use the un-tapered gross box × 1.1 as an upper
-        // bound (loose), since 0.75 < 1 < 1.1.
-        const BOND_OVERLAP_MULTIPLIER = 2.0;
-        const BRIM_TAPER_FACTOR = 0.5;
-        const BRIM_TAPER_VOLUME_FACTOR = (1 + BRIM_TAPER_FACTOR) / 2;
-        const grossBoxVol =
-          (BOND_OVERLAP_MULTIPLIER * printShellThickness + brimWidth) *
-          shellHeight *
-          brimThickness;
-        expect(brimmedVol - pieceVol).toBeLessThan(grossBoxVol * 1.1);
-        // Tighter upper bound reflecting the taper: gain is at most
-        // `trapezoidalPrismVol × 1.1` (10 % slack for kernel slop).
-        const trapezoidalPrismVol = grossBoxVol * BRIM_TAPER_VOLUME_FACTOR;
-        expect(brimmedVol - pieceVol).toBeLessThan(trapezoidalPrismVol * 1.1);
+        const shellYSpan =
+          shellBbox.max[1]! - shellBbox.min[1]!; // 20
+        // Lower bound: at least one rectangular outer-flange slab
+        // (catches regressions that lose half the brim).
+        const oneOuterSlab = brimWidth * shellYSpan * brimThickness; // 600
+        expect(brimmedVol - pieceVol).toBeGreaterThan(oneOuterSlab * 0.9);
+        // Upper bound: brim gross volume = outer 2D profile area ×
+        // brimThickness. Outer profile (rounded 40×40 clipped to
+        // Y ∈ [-10, 10]) bounded by 40 × 20 + π·10² ≈ 1114 mm² —
+        // times 3 = ~3342 mm³. Loose upper bound 5 × oneOuterSlab
+        // covers this with slack for kernel slop.
+        expect(brimmedVol - pieceVol).toBeLessThan(oneOuterSlab * 5);
         expect(brimmedVol).toBeLessThan(shellVol * 3);
         brimmed.delete();
       } catch (err) {
@@ -149,6 +150,7 @@ describe('addBrim — sideCount=2 single-cut case', () => {
       // Cleanup piece 1 (piece 0 was consumed by addBrim).
       pieces[1]!.delete();
       siliconeOuter.delete();
+      shell.delete();
     }
   });
 });
@@ -162,7 +164,7 @@ describe('addBrim — sideCount=4 two-cut case', () => {
     const shellBbox = shell.boundingBox();
     const siliconeOuter = buildInnerCavity(toplevel, INNER);
     const pieces = sliceShellRadial(toplevel, shell, 4, { x: 0, z: 0 });
-    shell.delete();
+    // Conformal-brim fix: keep shell alive; deleted in finally.
 
     try {
       const pieceBboxPre = pieces[0]!.boundingBox();
@@ -183,6 +185,7 @@ describe('addBrim — sideCount=4 two-cut case', () => {
             z: shellBbox.max[2]!,
           },
         },
+        shellManifold: shell,
         xzCenter: { x: 0, z: 0 },
         brimWidth_mm: 10,
         brimThickness_mm: 3,
@@ -194,20 +197,17 @@ describe('addBrim — sideCount=4 two-cut case', () => {
 
         // Piece 0 at sideCount=4 occupies arc [45°, 135°] (+Z
         // quadrant). Brim flanges extend along the two cut directions
-        // (45° and 135°). After the issue #89 fix the brim's outer
-        // edge sits at radial `outerRadius + brimWidth = 20 mm`
-        // (not `pieceBboxPre.max[0] + brimWidth` as pre-#89). Its
-        // projection onto +X for a 45° cut is `20 / sqrt(2) ≈
-        // 14.14 mm`, which is the new x-bbox-max of the brimmed
-        // piece. The raw piece's bbox.max[0] was ~10 mm (half the
-        // ring-shell outer width), so the brim adds ~4.1 mm outward
-        // growth on +X. Use ~70 % of that analytic growth as a
-        // tolerance-resistant lower bound.
+        // (45° and 135°). Post-conformal-fix the brim's 2D profile at
+        // each cut plane is (shell silhouette at that plane) offset
+        // outward by `brimWidth`, clipped to the shell's Y range.
+        // For the ring-cube fixture the silhouette at a 45° cut
+        // plane is a rectangle (the cube intersected with the plane),
+        // offset outward by 10 mm gives a rounded-corner rectangle
+        // whose +X radial edge sits further out than the pre-fix
+        // trapezoidal prism. The +X growth is at least the pre-fix
+        // analytic value (pre-fix: `(outerRadius + brimWidth) /
+        // sqrt(2) - pieceBboxPre.max[0]`), kept as the lower bound.
         const brimmedBbox = brimmed.boundingBox();
-        // Analytic +X growth for a sideCount=4 piece 0 brim: the
-        // +45° cut flange's outer corner projects at
-        // `(outerRadius + brimWidth) / sqrt(2) ≈ 14.14 mm`, minus
-        // the pre-brim max (~10 mm) → ~4.14 mm growth.
         const projectedGrowth =
           (10 + 10) / Math.SQRT2 - pieceBboxPre.max[0]!;
         const looseBound = projectedGrowth * 0.7;
@@ -227,6 +227,7 @@ describe('addBrim — sideCount=4 two-cut case', () => {
     } finally {
       for (let i = 1; i < pieces.length; i++) pieces[i]!.delete();
       siliconeOuter.delete();
+      shell.delete();
     }
   });
 
@@ -238,7 +239,7 @@ describe('addBrim — sideCount=4 two-cut case', () => {
     const shellBbox = shell.boundingBox();
     const siliconeOuter = buildInnerCavity(toplevel, INNER);
     const pieces = sliceShellRadial(toplevel, shell, 3, { x: 0, z: 0 });
-    shell.delete();
+    // Conformal-brim fix: keep shell alive; deleted in finally.
 
     const brimmed: Manifold[] = [];
     try {
@@ -260,6 +261,7 @@ describe('addBrim — sideCount=4 two-cut case', () => {
               z: shellBbox.max[2]!,
             },
           },
+          shellManifold: shell,
           xzCenter: { x: 0, z: 0 },
           brimWidth_mm: 10,
           brimThickness_mm: 3,
@@ -276,6 +278,7 @@ describe('addBrim — sideCount=4 two-cut case', () => {
     } finally {
       for (const p of brimmed) p.delete();
       siliconeOuter.delete();
+      shell.delete();
     }
   });
 });
@@ -318,7 +321,7 @@ describe('addBrim — issue #89 no-cavity-intrusion invariant', () => {
     // So the assertion we can make robustly is: `brim ∩ siliconeOuter
     // = 0` (no cavity intrusion), which we cover below directly.
     const pieces = sliceShellRadial(toplevel, shell, 4, { x: 0, z: 0 });
-    shell.delete();
+    // Conformal-brim fix: keep shell alive; deleted in finally.
 
     try {
       const brimmed = addBrim({
@@ -338,6 +341,7 @@ describe('addBrim — issue #89 no-cavity-intrusion invariant', () => {
             z: shellBbox.max[2]!,
           },
         },
+        shellManifold: shell,
         xzCenter: { x: 0, z: 0 },
         brimWidth_mm: BRIM_W,
         brimThickness_mm: 3,
@@ -359,6 +363,7 @@ describe('addBrim — issue #89 no-cavity-intrusion invariant', () => {
     } finally {
       for (let i = 1; i < pieces.length; i++) pieces[i]!.delete();
       siliconeOuter.delete();
+      shell.delete();
     }
   });
 
@@ -375,7 +380,7 @@ describe('addBrim — issue #89 no-cavity-intrusion invariant', () => {
     const siliconeOuter = buildInnerCavity(toplevel, INNER);
 
     const pieces = sliceShellRadial(toplevel, shell, 4, { x: 0, z: 0 });
-    shell.delete();
+    // Conformal-brim fix: keep shell alive; deleted in finally.
 
     try {
       // Keep a COPY of piece 0 so we can compute the post-brim delta.
@@ -402,6 +407,7 @@ describe('addBrim — issue #89 no-cavity-intrusion invariant', () => {
             z: shellBbox.max[2]!,
           },
         },
+        shellManifold: shell,
         xzCenter: { x: 0, z: 0 },
         brimWidth_mm: 10,
         brimThickness_mm: 3,
@@ -446,6 +452,7 @@ describe('addBrim — issue #89 no-cavity-intrusion invariant', () => {
     } finally {
       for (let i = 1; i < pieces.length; i++) pieces[i]!.delete();
       siliconeOuter.delete();
+      shell.delete();
     }
   });
 
@@ -464,7 +471,7 @@ describe('addBrim — issue #89 no-cavity-intrusion invariant', () => {
         sideCount,
         { x: 0, z: 0 },
       );
-      shell.delete();
+      // Conformal-brim fix: keep shell alive; deleted in finally.
 
       const brimmed: Manifold[] = [];
       try {
@@ -487,6 +494,7 @@ describe('addBrim — issue #89 no-cavity-intrusion invariant', () => {
                   z: shellBbox.max[2]!,
                 },
               },
+              shellManifold: shell,
               xzCenter: { x: 0, z: 0 },
               brimWidth_mm: 10,
               brimThickness_mm: 3,
@@ -522,6 +530,7 @@ describe('addBrim — issue #89 no-cavity-intrusion invariant', () => {
       } finally {
         for (const p of brimmed) p.delete();
         siliconeOuter.delete();
+        shell.delete();
       }
     },
   );
@@ -549,7 +558,7 @@ describe('addBrim — user cut-plane overrides', () => {
       xzCenter,
       rotatedAngles,
     );
-    shell.delete();
+    // Conformal-brim fix: keep shell alive; deleted in finally.
 
     const brimmed: Manifold[] = [];
     try {
@@ -572,6 +581,7 @@ describe('addBrim — user cut-plane overrides', () => {
                 z: shellBbox.max[2]!,
               },
             },
+            shellManifold: shell,
             xzCenter,
             angles: rotatedAngles,
             brimWidth_mm: 10,
@@ -603,21 +613,32 @@ describe('addBrim — user cut-plane overrides', () => {
     } finally {
       for (const p of brimmed) p.delete();
       siliconeOuter.delete();
+      shell.delete();
     }
   });
 });
 
-// Issue #96 regression coverage — tapered trapezoidal brim.
+// Conformal-brim regression coverage (2026-04-22 PM fix replacing the
+// pre-fix tapered trapezoidal prism).
 //
-// The brim is built as a trapezoidal prism that is FULL height
-// (`ySize`) at the inner (shell-junction) edge and tapers DOWN to
-// `BRIM_TAPER_FACTOR × ySize` at the outer radial edge. The direction
-// of the taper matters: "inner Y-span > outer Y-span" reading from the
-// shell outward.
+// The brim's 2D profile at each cut plane is derived from slicing the
+// full shell at that plane, then offsetting outward by `brimWidth` and
+// inward by `bondOverlap`. The outward profile is CLIPPED to the
+// shell's Y range so the brim never overshoots the shell vertically.
+// Consequences versus the pre-fix trapezoidal prism:
+//
+//   - Inner Y-span ≈ Outer Y-span (both clipped to shell Y range).
+//     The old "outer strictly narrower than inner" taper test is
+//     dropped.
+//   - On a square-ring-cube fixture with vertical walls, the brim's
+//     outer flange (radially outside the shell) is a uniform-height
+//     rectangle `brimWidth × shellYSpan × brimThickness`, NOT a
+//     trapezoidal prism. The volume of the brim-only delta matches
+//     this rectangular analytic prediction.
 
-describe('addBrim — issue #96 trapezoidal taper', () => {
+describe('addBrim — conformal profile', () => {
   test(
-    'sideCount=2: inner (shell-junction) Y-span strictly exceeds outer Y-span',
+    'sideCount=2: Y-span matches shell Y range at inner and outer radial edges',
     async () => {
       const toplevel = await initManifold();
       const OUTER = 20;
@@ -629,12 +650,8 @@ describe('addBrim — issue #96 trapezoidal taper', () => {
       const shellBbox = shell.boundingBox();
       const siliconeOuter = buildInnerCavity(toplevel, INNER);
       const pieces = sliceShellRadial(toplevel, shell, 2, { x: 0, z: 0 });
-      shell.delete();
 
       try {
-        // Keep a fresh handle on piece 0 via a no-op translate, so we
-        // can recover the "brim only" delta after addBrim consumes the
-        // piece.
         const pieceCopy = pieces[0]!.translate([0, 0, 0]);
         const brimmed = addBrim({
           toplevel,
@@ -653,6 +670,7 @@ describe('addBrim — issue #96 trapezoidal taper', () => {
               z: shellBbox.max[2]!,
             },
           },
+          shellManifold: shell,
           xzCenter: { x: 0, z: 0 },
           brimWidth_mm: BRIM_W,
           brimThickness_mm: BRIM_T,
@@ -663,35 +681,20 @@ describe('addBrim — issue #96 trapezoidal taper', () => {
           const brimOnly = toplevel.Manifold.difference([brimmed, pieceCopy]);
           try {
             // sideCount=2 piece 0 cut angle is 90° — radial direction
-            // is +Z (see `src/geometry/sideAngles.ts`). The brim spans
-            // `z ∈ [outerRadius - bondOverlap, outerRadius + brimWidth]`
-            // = `[10 - 6, 10 + 10]` = `[4, 20]` with
-            // `BOND_OVERLAP_MULTIPLIER = 2.0`.
+            // is +Z. The brim's outer-flange (radially outside the
+            // shell at z > outerRadius = 10) is a uniform rectangle
+            // `brimWidth × shellYSpan × brimThickness` centred on the
+            // shell's Y midpoint.
             //
-            // For the ring-shell fixture the entire inner cube
-            // (|x|,|y|,|z| ≤ 5) is both the silicone cavity AND the
-            // void between shell walls — so the brim's bondOverlap
-            // region (z ∈ [4, 5]) is carved by siliconeOuter and the
-            // surviving z ∈ [5, 10] region falls INSIDE the piece's
-            // shell-wall material. Probing there would measure zero
-            // brimOnly content.
-            //
-            // The reliable probe for the TAPER DIRECTION is on the
-            // OUTER-flange portion only — where brimOnly is uniquely
-            // brim material. Compare the Y-span at the inner end of
-            // the pure-flange region (z ≈ outerRadius + ε, just past
-            // the shell wall) vs. the outer end (z ≈ outerRadius +
-            // brimWidth − ε).
+            // Probe at two z positions: just past the shell wall and
+            // near the outer radial edge. Compare Y-spans — they should
+            // be ~equal (no taper), both ~= shellYSpan (= 20 mm).
             const SLAB_T = 0.5; // mm slab thickness along Z
             const SLAB_HALF = SLAB_T / 2;
-            const SLAB_XY = 200; // mm, large enough to enclose entire brim in X and Y
+            const SLAB_XY = 200; // mm
             const outerRadius = OUTER / 2; // 10
             const outerZ = outerRadius + BRIM_W; // 20
-            // Inner-flange probe: z slightly past the shell wall (z =
-            // 10) so we're purely in brim material, not shell-wall
-            // overlap.
             const nearShellZ = outerRadius + 0.25; // 10.25
-            // Outer-flange probe: near the outer edge.
             const farEdgeZ = outerZ - SLAB_HALF; // 19.75
 
             const innerProbeBase = toplevel.Manifold.cube(
@@ -732,31 +735,23 @@ describe('addBrim — issue #96 trapezoidal taper', () => {
               const outerBb = outerHit.boundingBox();
               const innerYSpan = innerBb.max[1]! - innerBb.min[1]!;
               const outerYSpan = outerBb.max[1]! - outerBb.min[1]!;
-              // Core taper invariant: outer is STRICTLY narrower.
-              expect(outerYSpan).toBeLessThan(innerYSpan);
-              // Quantitative: the taper is linear in Z, so the ratio
-              // of Y-spans at two Z positions equals
-              // `(1 + k·(Z2 - Zbase)/width) / (1 + k·(Z1 - Zbase)/
-              // width)` where `k = BRIM_TAPER_FACTOR - 1 = -0.5` and
-              // `Zbase = outerRadius - bondOverlap = 4`, `width = 16`.
-              //   Z1 = 10.25 → fraction = 0.390625, y-scale = 1 +
-              //     (-0.5)(0.390625) = 0.8047
-              //   Z2 = 19.75 → fraction = 0.984375, y-scale = 1 +
-              //     (-0.5)(0.984375) = 0.5078
-              //   expectedRatio = 0.5078 / 0.8047 = 0.6311.
-              // Allow ± 20 % of analytic for kernel slop and slab
-              // thickness effects.
-              const bondOverlap = 2.0 * SHELL_THICKNESS; // 6
-              const width = bondOverlap + BRIM_W; // 16
-              const Zbase = outerRadius - bondOverlap; // 4
-              const BRIM_TAPER_FACTOR = 0.5;
-              const k = BRIM_TAPER_FACTOR - 1; // -0.5
-              const yScale = (z: number): number =>
-                1 + (k * (z - Zbase)) / width;
-              const expectedRatio = yScale(farEdgeZ) / yScale(nearShellZ);
-              const actualRatio = outerYSpan / innerYSpan;
-              expect(actualRatio).toBeGreaterThan(expectedRatio * 0.8);
-              expect(actualRatio).toBeLessThan(expectedRatio * 1.2);
+              // Conformal profile: Y-span is (approximately) uniform
+              // across the flange's radial extent because the outward
+              // 2D offset is clipped to the shell's Y range. Both
+              // spans should be within 10 % of the shell Y span
+              // (= 20 mm).
+              const shellYSpan =
+                shellBbox.max[1]! - shellBbox.min[1]!; // 20
+              expect(innerYSpan).toBeGreaterThan(shellYSpan * 0.9);
+              expect(innerYSpan).toBeLessThan(shellYSpan * 1.05);
+              expect(outerYSpan).toBeGreaterThan(shellYSpan * 0.9);
+              expect(outerYSpan).toBeLessThan(shellYSpan * 1.05);
+              // Inner and outer spans agree within 15 % (no taper
+              // direction). This catches regressions that would
+              // reintroduce a vertical taper.
+              const ratio = outerYSpan / innerYSpan;
+              expect(ratio).toBeGreaterThan(0.85);
+              expect(ratio).toBeLessThan(1.15);
             } finally {
               innerHit.delete();
               outerHit.delete();
@@ -771,18 +766,21 @@ describe('addBrim — issue #96 trapezoidal taper', () => {
       } finally {
         pieces[1]!.delete();
         siliconeOuter.delete();
+        shell.delete();
       }
     },
   );
 
   test(
-    'taper reduces brim volume ~25 % vs untapered rectangular box',
+    'brim-only outer-flange volume matches analytic rectangular prism',
     async () => {
-      // Trapezoidal prism volume at scaleTop Y = 0.5 is
-      // `(1 + 0.5) / 2 = 0.75` × the un-tapered box volume — a 25 %
-      // reduction. Verify by comparing against the analytic box volume
-      // for the brim-only region (i.e. the OUTER-flange portion that
-      // doesn't overlap shell material).
+      // Conformal brim's outer-flange region (radially outside the
+      // shell) is a uniform `brimWidth × shellYSpan × brimThickness`
+      // rectangular prism per cut plane. The brimOnly volume (= brim −
+      // piece) should match this analytic value within a generous
+      // slack to account for the rounded-corner edges of the 2D
+      // offset (which extend slightly past the pure-rectangular
+      // prediction) and the inward-offset ring contribution (small).
       const toplevel = await initManifold();
       const OUTER = 20;
       const INNER = 10;
@@ -793,7 +791,6 @@ describe('addBrim — issue #96 trapezoidal taper', () => {
       const shellBbox = shell.boundingBox();
       const siliconeOuter = buildInnerCavity(toplevel, INNER);
       const pieces = sliceShellRadial(toplevel, shell, 2, { x: 0, z: 0 });
-      shell.delete();
 
       try {
         const pieceCopy = pieces[0]!.translate([0, 0, 0]);
@@ -814,6 +811,7 @@ describe('addBrim — issue #96 trapezoidal taper', () => {
               z: shellBbox.max[2]!,
             },
           },
+          shellManifold: shell,
           xzCenter: { x: 0, z: 0 },
           brimWidth_mm: BRIM_W,
           brimThickness_mm: BRIM_T,
@@ -824,33 +822,25 @@ describe('addBrim — issue #96 trapezoidal taper', () => {
           const brimOnly = toplevel.Manifold.difference([brimmed, pieceCopy]);
           try {
             const brimOnlyVol = brimOnly.volume();
-            // Analytic un-tapered box volume for the BRIM-ONLY outer
-            // flange (i.e. everything radially outside the shell, so
-            // just the `brimWidth × ySize × brimThickness` prism). The
-            // bondOverlap portion sits inside the shell wall and is
-            // absorbed by the difference, so it doesn't contribute to
-            // brimOnlyVol.
-            const shellHeight =
-              shellBbox.max[1]! - shellBbox.min[1]! - 4; // 2 mm margin top+bottom
-            const BRIM_TAPER_FACTOR = 0.5;
-            const untaperedFlangeVol = BRIM_W * shellHeight * BRIM_T;
-            const taperedFlangeVol =
-              untaperedFlangeVol * (1 + BRIM_TAPER_FACTOR) / 2;
-            // brimOnlyVol should sit near the tapered volume (slightly
-            // less, since the carve against siliconeOuter can remove
-            // a sliver at the inner-edge interface, and the bondOverlap
-            // region's delta may subtract a thin slab near the shell
-            // surface). Use a generous range: 60 % .. 95 % of the
-            // untapered volume. At the analytic 75 % this comfortably
-            // passes; < 60 % catches regressions that reverse or
-            // over-taper.
-            expect(brimOnlyVol).toBeGreaterThan(untaperedFlangeVol * 0.6);
-            expect(brimOnlyVol).toBeLessThan(untaperedFlangeVol * 0.95);
-            // And near the analytic tapered prediction within ±25 %
-            // (covers kernel slop + shell absorption of the bondOverlap
-            // region).
-            expect(brimOnlyVol).toBeGreaterThan(taperedFlangeVol * 0.75);
-            expect(brimOnlyVol).toBeLessThan(taperedFlangeVol * 1.25);
+            // sideCount=2 piece 0 has ONE cut plane (θ=90°). The
+            // outer-flange on each side of the shell profile is
+            // `brimWidth × shellYSpan × brimThickness`. A 2D profile
+            // on the ring-cube at the cut plane extends from x_cs ∈
+            // [-10, 10] to [-20, 20] after the +10 offset → TWO
+            // outer-flange slabs (one at x_cs ∈ [10, 20], one at
+            // [-20, -10]). Plus a bit of rounded-corner material at
+            // the top/bottom of the inner profile and a small
+            // contribution where the 2D inward offset leaves brim
+            // material outside the original shell footprint. Lower
+            // bound: at least one outer-flange slab (catches
+            // regressions that lost half the brim); upper bound:
+            // roughly 3× one slab (covers the two outer slabs plus
+            // rounded corners + any inward-offset residual).
+            const shellYSpan =
+              shellBbox.max[1]! - shellBbox.min[1]!; // 20
+            const oneFlangeSlab = BRIM_W * shellYSpan * BRIM_T; // 600
+            expect(brimOnlyVol).toBeGreaterThan(oneFlangeSlab * 0.9);
+            expect(brimOnlyVol).toBeLessThan(oneFlangeSlab * 3.5);
           } finally {
             brimOnly.delete();
           }
@@ -861,6 +851,7 @@ describe('addBrim — issue #96 trapezoidal taper', () => {
       } finally {
         pieces[1]!.delete();
         siliconeOuter.delete();
+        shell.delete();
       }
     },
   );

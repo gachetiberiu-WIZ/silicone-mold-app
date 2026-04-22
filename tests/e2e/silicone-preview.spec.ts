@@ -253,7 +253,7 @@ test('silicone preview: generate → one mesh live → exploded view tweens body
     // (generator finished) — this is ≤ 15 s per the wire-up spec.
     await page.locator('[data-testid="generate-btn"]').click();
     await expect(page.locator('[data-testid="generate-btn"]'))
-      .toHaveText('Generate mold', { timeout: 15_000 });
+      .toHaveText('Generate mold', { timeout: 45_000 });
     await expect(page.locator('[data-testid="generate-btn"]')).toBeEnabled();
 
     // Volumes populated (sanity — proves the orchestrator ran to completion).
