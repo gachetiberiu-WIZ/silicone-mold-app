@@ -59,7 +59,7 @@ import { addBrim, buildCutPlaneSlice, disposeCutPlaneSlice } from './brim';
 import { CIRCULAR_SEGMENTS } from './primitives';
 import { effectiveCutAngles } from './sideAngles';
 import { initManifold } from './initManifold';
-import { sliceShellRadial } from './shellSlicer';
+import { applyTongueAndGrooveSeals, sliceShellRadial } from './shellSlicer';
 
 /**
  * Error raised on invalid `MoldParameters` input to `generateSiliconeShell`
@@ -1303,6 +1303,59 @@ export async function generateSiliconeShell(
           printShellFull = undefined;
           const tBrim = performance.now();
 
+          // Step 5.5 (issue piece-seal, 2026-04-22 dogfood): apply
+          // tongue-and-groove seals to every shared cut plane so
+          // silicone poured into the assembled mold can't find a
+          // straight path out along the seam. Each cut face's upper
+          // half is stepped by SEAL_STEP_MM — piece on +n_CCW side of
+          // the cut gets a groove, mating piece on -n side gets a
+          // tongue (smaller by SEAL_CLEARANCE_MM). See
+          // `./shellSlicer.ts` for the geometric spec.
+          //
+          // Radial extent for the step block: shell outer radius +
+          // brim width + slack. The shell+brim's max extent from
+          // xzCenter is (shell bbox half-width + brimWidth_mm); we
+          // derive the half-width from shellBboxWorld.
+          const shellOuterHalfExtent = Math.max(
+            shellBboxWorld.max.x - xzCenter.x,
+            xzCenter.x - shellBboxWorld.min.x,
+            shellBboxWorld.max.z - xzCenter.z,
+            xzCenter.z - shellBboxWorld.min.z,
+          );
+          const sealRadialMax_mm =
+            shellOuterHalfExtent + parameters.brimWidth_mm;
+          // `applyTongueAndGrooveSeals` consumes shellPieces and
+          // returns fresh handles. On success the old handles are
+          // already released inside the function; on failure the
+          // function releases any remaining intermediates and
+          // re-throws, leaving `shellPieces` with its old contents
+          // released — we then set `shellPieces = undefined` to avoid
+          // the outer `catch` trying to re-release. Achieve this by
+          // swap-then-assign.
+          const preSealPieces = shellPieces;
+          shellPieces = undefined;
+          try {
+            shellPieces = applyTongueAndGrooveSeals({
+              toplevel,
+              pieces: preSealPieces,
+              sideCount: parameters.sideCount,
+              xzCenter,
+              angles: effectiveCutAngles_,
+              shellY: {
+                minY: shellBboxWorld.min.y,
+                maxY: shellBboxWorld.max.y,
+              },
+              radialMax_mm: sealRadialMax_mm,
+            });
+          } catch (err) {
+            // applyTongueAndGrooveSeals handled the partial cleanup;
+            // preSealPieces is empty / its entries are dead. Rethrow
+            // to the outer catch which will find shellPieces ===
+            // undefined and skip the re-release loop.
+            throw err;
+          }
+          const tSeal = performance.now();
+
           if (onPhase) await onPhase('slab');
           // Step 6: Wave D base slab + plug. Slice the transformed
           // master at its lowest Y, offset the footprint twice (outer
@@ -1393,7 +1446,8 @@ export async function generateSiliconeShell(
               `shell-trim=${(tPrintShell - tShellLevel).toFixed(1)} ` +
               `shell-slice=${(tSlice - tPrintShell).toFixed(1)} ` +
               `shell-brims=${(tBrim - tSlice).toFixed(1)} ` +
-              `baseSlab-build=${(tBaseSlab - tBrim).toFixed(1)} ` +
+              `shell-seal=${(tSeal - tBrim).toFixed(1)} ` +
+              `baseSlab-build=${(tBaseSlab - tSeal).toFixed(1)} ` +
               `total=${(tBaseSlab - t0).toFixed(1)} ` +
               `(edgeLength=${edgeLength.toFixed(2)} mm, ` +
               `sideCount=${parameters.sideCount}) ` +
