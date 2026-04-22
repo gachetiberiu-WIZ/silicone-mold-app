@@ -56,9 +56,10 @@ import { manifoldToBufferGeometry, isManifold } from './adapters';
 import { buildBaseSlab, BASE_SLAB_PLUG_HEIGHT_MM } from './baseSlab';
 import type { CutPlaneSlice } from './brim';
 import { addBrim, buildCutPlaneSlice, disposeCutPlaneSlice } from './brim';
+import { CIRCULAR_SEGMENTS } from './primitives';
 import { effectiveCutAngles } from './sideAngles';
 import { initManifold } from './initManifold';
-import { sliceShellRadial } from './shellSlicer';
+import { applyTongueAndGrooveSeals, sliceShellRadial } from './shellSlicer';
 
 /**
  * Error raised on invalid `MoldParameters` input to `generateSiliconeShell`
@@ -352,32 +353,52 @@ interface SdfStats {
 }
 
 /**
- * Build a vertical prism (pour channel) whose XZ footprint matches the
- * silicone-outer's silhouette at world-Y = `masterMaxYInWorld`, extending
- * from `masterMaxYInWorld` upward by `channelHeight`. Used to carve an
- * open-top pour hole through the shell's dome cap (issue #94 Fix 1).
+ * Slice the silicone-outer Manifold at world-Y = `masterMaxYInWorld`
+ * and return its horizontal silhouette as a 2D `CrossSection` in the
+ * (X, Z)-of-our-world plane (mapped into the CrossSection's native
+ * (X, Y) axes via the `rotate([90,0,0])` forward pass — matching the
+ * convention in `./baseSlab.ts`).
  *
- * Pre-#94 the print shell had a CLOSED cap at the top: the levelSet that
- * built the shell's outer body produced a dome that extended PAST the
- * silicone outer's dome (the shell outset is larger), and the single top-
- * trim plane at `masterMaxY + siliconeThickness + PRINT_SHELL_POUR_EDGE_MM`
- * only sliced the tip — leaving solid shell material covering the pour
- * well. For the mold to actually be pourable end-to-end, the user needs
- * a THROUGH-HOLE from above.
+ * Used by BOTH the pour-channel subtract and the top-tube builder
+ * (issue shell-top fix, 2026-04-22) so the shell's top region shares
+ * its inner silhouette with the pour hole's footprint.
+ *
+ * Ownership: the returned `CrossSection` is a fresh handle owned by the
+ * caller; `.delete()` when done. Intermediates (the rotated Manifold)
+ * are disposed here. Returns `undefined` if the slice is degenerate
+ * (empty cross-section / zero contours).
+ */
+function buildSiliconeOuterSilhouetteAtY(
+  siliconeOuter: Manifold,
+  masterMaxYInWorld: number,
+): CrossSection | undefined {
+  // Forward pass: our-Y → rotated-Z. Matches `./baseSlab.ts`.
+  const rotatedSiliconeOuter = siliconeOuter.rotate([90, 0, 0]);
+  try {
+    const cs = rotatedSiliconeOuter.slice(masterMaxYInWorld);
+    if (cs.isEmpty() || cs.numContour() === 0) {
+      cs.delete();
+      return undefined;
+    }
+    return cs;
+  } finally {
+    rotatedSiliconeOuter.delete();
+  }
+}
+
+/**
+ * Extrude the silicone-outer silhouette at `masterMaxY` vertically to
+ * build the pour-channel prism (through-hole footprint). See the
+ * pour-channel subtract usage note further down in this file.
  *
  * Algorithm:
  *
- *   1. Rotate siliconeOuter `[90, 0, 0]` so our-world +Y maps to rotated
- *      +Z (Manifold's slice frame is XY plane at z=height; matches the
- *      convention in `./baseSlab.ts`).
- *   2. `slice(masterMaxYInWorld)` returns a CrossSection equal to the
- *      horizontal silhouette of the silicone outer at the master's top
- *      face — exactly the XZ footprint of the pour well.
- *   3. `extrude(channelHeight)` pushes that 2D silhouette up by the given
- *      height; the extruded prism sits in rotated-frame Z ∈ [0, height].
- *   4. Rotate back `[-90, 0, 0]` to our-world, then translate so the
- *      base sits at world-Y = `masterMaxYInWorld` and the top at
- *      `masterMaxYInWorld + channelHeight`.
+ *   1. Build `silhouetteCs` via `buildSiliconeOuterSilhouetteAtY`
+ *      (silicone outer footprint at the master's top Y).
+ *   2. `extrude(channelHeight)` pushes that 2D silhouette up by the
+ *      given height in the rotated frame (Z ∈ [0, height]).
+ *   3. Rotate back `[-90, 0, 0]` to our Y-up world.
+ *   4. Translate so the base sits at world-Y = `masterMaxYInWorld`.
  *
  * If the silicone-outer slice at `masterMaxYInWorld` is empty or has
  * zero contours (degenerate master-top geometry), returns `undefined` —
@@ -393,16 +414,14 @@ function buildPourChannelPrism(
   masterMaxYInWorld: number,
   channelHeight: number,
 ): Manifold | undefined {
-  // Forward pass: our-Y → rotated-Z. Matches `./baseSlab.ts`.
-  const rotatedSiliconeOuter = siliconeOuter.rotate([90, 0, 0]);
-  let silhouetteCs: CrossSection | undefined;
+  const silhouetteCs = buildSiliconeOuterSilhouetteAtY(
+    siliconeOuter,
+    masterMaxYInWorld,
+  );
+  if (!silhouetteCs) return undefined;
   let channelInRotated: Manifold | undefined;
   let channelInWorld: Manifold | undefined;
   try {
-    silhouetteCs = rotatedSiliconeOuter.slice(masterMaxYInWorld);
-    if (silhouetteCs.isEmpty() || silhouetteCs.numContour() === 0) {
-      return undefined;
-    }
     // Extrude in rotated frame — prism spans rotated-Z ∈ [0, channelHeight].
     channelInRotated = silhouetteCs.extrude(channelHeight);
     // Rotate back to our-world Y-up frame. `.rotate([-90,0,0])` maps
@@ -420,10 +439,95 @@ function buildPourChannelPrism(
     channelInWorld = undefined;
     return out;
   } finally {
-    rotatedSiliconeOuter.delete();
-    if (silhouetteCs) silhouetteCs.delete();
+    silhouetteCs.delete();
     if (channelInRotated) channelInRotated.delete();
     if (channelInWorld) channelInWorld.delete();
+  }
+}
+
+/**
+ * Build a clean VERTICAL TUBE for the shell's top region above
+ * `masterMaxY`, replacing the outer DOME that `Manifold.levelSet`
+ * produces above that Y.
+ *
+ * Rationale (issue shell-top-vertical-tube, 2026-04-22 dogfood):
+ * `levelSet` at `-totalOffset` outsets the master's SDF everywhere,
+ * so above the master's top face the shell's outer surface continues
+ * as a smooth rounded cap (radius ≈ `totalOffset`). After the top-trim
+ * plane at `masterMaxY + siliconeThickness + PRINT_SHELL_POUR_EDGE_MM`
+ * and the pour-channel subtract (which carves a hole matching the
+ * silicone silhouette at `masterMaxY` upward), the shell's TOP FACE is
+ * a horizontal ring extending from the dome's wide outer edge radially
+ * INWARD to the narrower pour channel — a visible overhang into the
+ * pour opening. We want the shell's outer wall above `masterMaxY` to
+ * be a clean VERTICAL tube (not a dome), so the top face is a narrow
+ * ring with thickness ≈ `shellThickness` and no inward overhang.
+ *
+ * The tube's XZ profile:
+ *   - Inner silhouette = silicone-outer silhouette at `masterMaxY`.
+ *     (same curve the pour channel uses — matches the silicone's
+ *     top opening exactly so the tube's inner wall is flush with the
+ *     pour well).
+ *   - Outer silhouette = inner silhouette offset OUTWARD by
+ *     `shellThickness` (Round joins; matches the rest of the shell's
+ *     radial wall thickness).
+ *
+ * The tube extrudes vertically from `masterMaxY` to `topY` (both
+ * world-Y), so it's a prism with a ring-shaped cross-section.
+ *
+ * Ownership: every intermediate CrossSection + Manifold is disposed
+ * inside this helper. Returned Manifold is a fresh handle owned by
+ * the caller. Returns `undefined` if the silicone silhouette at
+ * `masterMaxY` is degenerate (empty / zero-contour slice).
+ */
+function buildShellTopTube(
+  siliconeOuter: Manifold,
+  masterMaxYInWorld: number,
+  topYInWorld: number,
+  shellThickness: number,
+): Manifold | undefined {
+  const tubeHeight = topYInWorld - masterMaxYInWorld;
+  if (!(tubeHeight > 0)) return undefined;
+  const innerCs = buildSiliconeOuterSilhouetteAtY(
+    siliconeOuter,
+    masterMaxYInWorld,
+  );
+  if (!innerCs) return undefined;
+  let outerCs: CrossSection | undefined;
+  let ringCs: CrossSection | undefined;
+  let tubeRotated: Manifold | undefined;
+  let tubeUnrotated: Manifold | undefined;
+  let tubeInWorld: Manifold | undefined;
+  try {
+    outerCs = innerCs.offset(
+      shellThickness,
+      'Round',
+      2,
+      CIRCULAR_SEGMENTS,
+    );
+    if (outerCs.isEmpty() || outerCs.numContour() === 0) return undefined;
+    ringCs = outerCs.subtract(innerCs);
+    if (ringCs.isEmpty() || ringCs.numContour() === 0) return undefined;
+    // Extrude in rotated frame — prism spans rotated-Z ∈ [0, tubeHeight].
+    tubeRotated = ringCs.extrude(tubeHeight);
+    // Rotate back to our Y-up world: rotated +Z → world +Y.
+    tubeUnrotated = tubeRotated.rotate([-90, 0, 0]);
+    tubeRotated.delete();
+    tubeRotated = undefined;
+    // Translate so the base sits at world-Y = masterMaxY.
+    tubeInWorld = tubeUnrotated.translate([0, masterMaxYInWorld, 0]);
+    tubeUnrotated.delete();
+    tubeUnrotated = undefined;
+    const out = tubeInWorld;
+    tubeInWorld = undefined;
+    return out;
+  } finally {
+    innerCs.delete();
+    if (outerCs) outerCs.delete();
+    if (ringCs) ringCs.delete();
+    if (tubeRotated) tubeRotated.delete();
+    if (tubeUnrotated) tubeUnrotated.delete();
+    if (tubeInWorld) tubeInWorld.delete();
   }
 }
 
@@ -946,54 +1050,107 @@ export async function generateSiliconeShell(
             if (shellTrimTop) shellTrimTop.delete();
           }
 
-          // Step 4e (issue #94 Fix 1): carve an OPEN POUR CHANNEL through
-          // the shell's top cap. The levelSet-built shellOuter extends
-          // past siliconeOuter's dome (the shell outset is larger), so
-          // the step-4c top trim at `masterMaxY + siliconeThickness +
-          // PRINT_SHELL_POUR_EDGE_MM` only slices the tip — leaving a
-          // solid cap over the pour well. For the mold to be actually
-          // pourable end-to-end, we subtract a vertical prism whose XZ
-          // footprint matches siliconeOuter's silhouette at
-          // `master.max.y`, extruded upward past the shell's top trim
-          // plane. The result is a through-hole from the shell's top
-          // face down to the silicone's pour opening.
+          // Step 4e (issue shell-top-vertical-tube, 2026-04-22 dogfood):
+          // REPLACE the shell's Y > `masterMaxY` region — a levelSet-
+          // produced outer DOME that, after the top trim + inward-facing
+          // pour-channel subtract, left a wide horizontal ring of shell
+          // material overhanging into the pour opening — with a clean
+          // VERTICAL TUBE. The tube's inner silhouette is the silicone-
+          // outer silhouette at `masterMaxY` (flush with the silicone's
+          // top opening, matching the pour well), and its outer
+          // silhouette is that same curve offset outward by
+          // `shellThickness`. Extruded from `masterMaxY` to
+          // `masterMaxY + siliconeThickness + PRINT_SHELL_POUR_EDGE_MM`.
+          //
+          // This SUPERSEDES the pour-channel subtract that lived here
+          // pre-fix (issue #94 Fix 1). The channel was carving a hole
+          // in a closed cap; with the tube approach the top region is
+          // open-topped by construction — no subtract needed above
+          // `masterMaxY`.
+          //
+          // Strategy: split the current shell at Y = `masterMaxY`,
+          // KEEP the Y ≤ `masterMaxY` region (where the surface-
+          // conforming dome is exactly what we want — it hugs the
+          // master's upper profile inside the silicone jacket), and
+          // UNION in a fresh ring prism for Y ∈ [masterMaxY, topY].
           const masterMaxYInWorld = masterBbox.max[1];
-          // Channel height measured from `masterMaxY`: enough to poke
-          // past the shell's top-trim plane (at masterMaxY + silicone +
-          // PRINT_SHELL_POUR_EDGE_MM) with a safety slop so
-          // `shell.difference(channel)` fully removes the remaining cap.
-          const pourChannelHeight =
-            siliconeThickness +
-            PRINT_SHELL_POUR_EDGE_MM +
-            PRINT_SHELL_POUR_CHANNEL_SLOP_MM;
-          const pourChannel = buildPourChannelPrism(
-            siliconeOuter,
-            masterMaxYInWorld,
-            pourChannelHeight,
+          const topY = masterBbox.max[1] + siliconeThickness + PRINT_SHELL_POUR_EDGE_MM;
+
+          // Step 4e.i: split the trimmed shell at Y = masterMaxY. Keep
+          // the lower half (Y ≤ masterMaxY) as-is; its geometry
+          // continues to hug the silicone jacket's outer surface
+          // beneath the top face.
+          const shellBelow = printShellFull.trimByPlane(
+            [0, -1, 0],
+            -masterMaxYInWorld,
           );
-          if (pourChannel) {
-            try {
-              const closedShell = printShellFull;
-              const shellWithHole = toplevel.Manifold.difference([
-                closedShell,
-                pourChannel,
-              ]);
+          try {
+            assertManifold(shellBelow, 'shellBelow (trimmed at masterMaxY)');
+            // Step 4e.ii: build the replacement top tube.
+            const topTube = buildShellTopTube(
+              siliconeOuter,
+              masterMaxYInWorld,
+              topY,
+              shellThickness,
+            );
+            if (topTube) {
               try {
-                assertManifold(
-                  shellWithHole,
-                  'print-shell after pour-channel subtract',
-                );
-              } catch (err) {
-                shellWithHole.delete();
-                throw err;
+                // Step 4e.iii: union lower shell + top tube.
+                const combined = toplevel.Manifold.union(shellBelow, topTube);
+                try {
+                  assertManifold(
+                    combined,
+                    'print-shell after top-tube replacement',
+                  );
+                } catch (err) {
+                  combined.delete();
+                  throw err;
+                }
+                // Swap: printShellFull now owns the combined shell.
+                printShellFull.delete();
+                printShellFull = combined;
+              } finally {
+                topTube.delete();
               }
-              // Swap: printShellFull now owns the through-holed shell,
-              // and the old closed-cap shell is released.
-              closedShell.delete();
-              printShellFull = shellWithHole;
-            } finally {
-              pourChannel.delete();
+            } else {
+              // Degenerate silicone silhouette at masterMaxY. Fall back
+              // to keeping the original trimmed shell with a pour-
+              // channel subtract — preserves the pre-fix behaviour on
+              // pathological inputs.
+              const pourChannelHeight =
+                siliconeThickness +
+                PRINT_SHELL_POUR_EDGE_MM +
+                PRINT_SHELL_POUR_CHANNEL_SLOP_MM;
+              const pourChannel = buildPourChannelPrism(
+                siliconeOuter,
+                masterMaxYInWorld,
+                pourChannelHeight,
+              );
+              if (pourChannel) {
+                try {
+                  const closedShell = printShellFull;
+                  const shellWithHole = toplevel.Manifold.difference([
+                    closedShell,
+                    pourChannel,
+                  ]);
+                  try {
+                    assertManifold(
+                      shellWithHole,
+                      'print-shell after pour-channel subtract (fallback)',
+                    );
+                  } catch (err) {
+                    shellWithHole.delete();
+                    throw err;
+                  }
+                  closedShell.delete();
+                  printShellFull = shellWithHole;
+                } finally {
+                  pourChannel.delete();
+                }
+              }
             }
+          } finally {
+            shellBelow.delete();
           }
 
           const tPrintShell = performance.now();
@@ -1146,6 +1303,55 @@ export async function generateSiliconeShell(
           printShellFull = undefined;
           const tBrim = performance.now();
 
+          // Step 5.5 (issue piece-seal, 2026-04-22 dogfood): apply
+          // tongue-and-groove seals to every shared cut plane so
+          // silicone poured into the assembled mold can't find a
+          // straight path out along the seam. Each cut face's upper
+          // half is stepped by SEAL_STEP_MM — piece on +n_CCW side of
+          // the cut gets a groove, mating piece on -n side gets a
+          // tongue (smaller by SEAL_CLEARANCE_MM). See
+          // `./shellSlicer.ts` for the geometric spec.
+          //
+          // Radial extent for the step block: shell outer radius +
+          // brim width + slack. The shell+brim's max extent from
+          // xzCenter is (shell bbox half-width + brimWidth_mm); we
+          // derive the half-width from shellBboxWorld.
+          const shellOuterHalfExtent = Math.max(
+            shellBboxWorld.max.x - xzCenter.x,
+            xzCenter.x - shellBboxWorld.min.x,
+            shellBboxWorld.max.z - xzCenter.z,
+            xzCenter.z - shellBboxWorld.min.z,
+          );
+          const sealRadialMax_mm =
+            shellOuterHalfExtent + parameters.brimWidth_mm;
+          // `applyTongueAndGrooveSeals` consumes shellPieces and
+          // returns fresh handles. On success the old handles are
+          // already released inside the function; on failure the
+          // function releases any remaining intermediates and
+          // re-throws, leaving `shellPieces` with its old contents
+          // released — we then set `shellPieces = undefined` to avoid
+          // the outer `catch` trying to re-release. Achieve this by
+          // swap-then-assign.
+          // applyTongueAndGrooveSeals handles its own partial cleanup
+          // on throw (releases any surviving piece Manifolds). On throw
+          // `shellPieces` stays undefined so the outer catch skips the
+          // re-release loop.
+          const preSealPieces = shellPieces;
+          shellPieces = undefined;
+          shellPieces = applyTongueAndGrooveSeals({
+            toplevel,
+            pieces: preSealPieces,
+            sideCount: parameters.sideCount,
+            xzCenter,
+            angles: effectiveCutAngles_,
+            shellY: {
+              minY: shellBboxWorld.min.y,
+              maxY: shellBboxWorld.max.y,
+            },
+            radialMax_mm: sealRadialMax_mm,
+          });
+          const tSeal = performance.now();
+
           if (onPhase) await onPhase('slab');
           // Step 6: Wave D base slab + plug. Slice the transformed
           // master at its lowest Y, offset the footprint twice (outer
@@ -1236,7 +1442,8 @@ export async function generateSiliconeShell(
               `shell-trim=${(tPrintShell - tShellLevel).toFixed(1)} ` +
               `shell-slice=${(tSlice - tPrintShell).toFixed(1)} ` +
               `shell-brims=${(tBrim - tSlice).toFixed(1)} ` +
-              `baseSlab-build=${(tBaseSlab - tBrim).toFixed(1)} ` +
+              `shell-seal=${(tSeal - tBrim).toFixed(1)} ` +
+              `baseSlab-build=${(tBaseSlab - tSeal).toFixed(1)} ` +
               `total=${(tBaseSlab - t0).toFixed(1)} ` +
               `(edgeLength=${edgeLength.toFixed(2)} mm, ` +
               `sideCount=${parameters.sideCount}) ` +

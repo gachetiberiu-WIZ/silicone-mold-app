@@ -274,7 +274,14 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
             // to the pre-conformal value), catching any regression
             // that undoes the caching or re-introduces the per-brim
             // shell-rotate.
-            expect(elapsed).toBeLessThan(12_000);
+            // Round-12 top-tube + tongue-and-groove seal (2026-04-22)
+            // adds ~1-2 s on ubuntu CI: one extra trim + silhouette +
+            // offset + extrude for the vertical top tube, and N shared-
+            // cut passes each building a step-block + trim pair for
+            // the per-piece tongue/groove. Observed 13.1 s peak on
+            // post-merge main; bump 12 s → 15 s for comfortable
+            // headroom.
+            expect(elapsed).toBeLessThan(15_000);
           }
 
           expect(isManifold(result.silicone)).toBe(true);
@@ -450,22 +457,17 @@ describe('generateSiliconeShell — shell pieces invariants (Wave C+E+F)', () =>
 
         // Y range: pieces cover [bot, top] from the pre-slice shell.
         //
-        // Issue #94 Fix 1: the pour channel carves out the shell's top
-        // cap by subtracting a vertical prism whose XZ footprint equals
-        // siliconeOuter's silhouette at masterMaxY. For a 4×4×4 cube
-        // master, that silhouette is a 14×14 rounded square — wide
-        // enough to fully contain the shell's dome tip (which tapers
-        // to a point at y = masterMaxY + silicone + POUR_EDGE = 10).
-        // The shell's effective top Y thus drops to where the shellOuter
-        // surface meets the channel silhouette: around y ≈ masterMaxY +
-        // silicone (≈ 7 mm for this fixture) — i.e. the shell is now
-        // open at the top with only a rim of shell material around the
-        // perimeter of the silicone outer. We assert the new top is
-        // STRICTLY BELOW the original trim plane (proving the cap is
-        // gone) but still STRICTLY ABOVE masterMaxY (shell walls still
-        // exist above the master).
-        const originalTrimY = 2 + SILICONE + POUR_EDGE;
-        expect(unionMax[1]!).toBeLessThan(originalTrimY);
+        // Issue shell-top-vertical-tube (2026-04-22): the shell's top
+        // region above masterMaxY is now a CLEAN VERTICAL TUBE whose
+        // inner silhouette is the silicone-outer silhouette at
+        // masterMaxY and whose outer silhouette is that curve offset
+        // outward by shellThickness. The tube extrudes exactly from
+        // masterMaxY to topY = masterMaxY + silicone + POUR_EDGE. So
+        // the union's max Y sits AT the trim plane (not strictly
+        // below, as the pre-fix pour-channel carve left it). Allow a
+        // small tolerance for kernel slop.
+        const topY = 2 + SILICONE + POUR_EDGE;
+        expect(unionMax[1]!).toBeCloseTo(topY, 2);
         expect(unionMax[1]!).toBeGreaterThan(2);
         expect(unionMin[1]!).toBeCloseTo(-2 - 2, 3);
 
@@ -513,14 +515,12 @@ describe('generateSiliconeShell — shell pieces invariants (Wave C+E+F)', () =>
       try {
         // Union Y extent across every piece.
         //
-        // Pre-#94: top = 17+5+3=25 (shell trim plane).
-        // Post-#94: the pour channel subtract carves the shell cap;
-        //   the effective top Y is below the trim plane but above
-        //   masterMaxY=17. We assert the trim plane is a hard upper
-        //   bound and the top is tracking the transformed master (not
-        //   the world origin), which is the actual invariant this test
-        //   was pinning.
-        // Bot unchanged: trim at master.min.y - 2 = 13 - 2 = 11.
+        // Post-shell-top-vertical-tube (2026-04-22): the tube's top
+        // face sits AT the trim plane. Pre-fix (pour-channel carve)
+        // the effective top Y dropped below the plane; the new tube
+        // goes all the way up.
+        //   top = masterMaxY + silicone + POUR_EDGE = 17+5+3 = 25
+        //   bot = masterMinY - 2 (Wave D plug wrap) = 13-2 = 11
         let yMin = Infinity;
         let yMax = -Infinity;
         for (const piece of result.shellPieces) {
@@ -528,7 +528,7 @@ describe('generateSiliconeShell — shell pieces invariants (Wave C+E+F)', () =>
           if (bb.min[1]! < yMin) yMin = bb.min[1]!;
           if (bb.max[1]! > yMax) yMax = bb.max[1]!;
         }
-        expect(yMax).toBeLessThanOrEqual(17 + 5 + 3 + 0.1);
+        expect(yMax).toBeCloseTo(17 + 5 + 3, 2);
         expect(yMax).toBeGreaterThan(17);
         expect(yMin).toBeCloseTo(13 - 2, 3);
       } finally {
@@ -615,11 +615,12 @@ describe('generateSiliconeShell — open pour channel (issue #94 Fix 1)', () => 
           }
 
           // Union bbox over all pieces → shell's outer AABB including
-          // the top edge. The pour channel carves away the shell's dome
-          // cap, so the effective top Y drops below the original trim
-          // plane (`masterMaxY + silicone + POUR_EDGE`) but remains
-          // STRICTLY ABOVE masterMaxY (the shell walls above the master
-          // still exist around the perimeter of the pour opening).
+          // the top edge. Post-shell-top-vertical-tube the shell's top
+          // region is a vertical ring extrusion from masterMaxY up to
+          // the trim plane `masterMaxY + silicone + POUR_EDGE`, so
+          // unionMaxY == expectedShellTopY (no dome). Pre-fix the pour-
+          // channel carve left unionMaxY strictly BELOW the trim plane;
+          // now the tube goes all the way up.
           let unionMaxY = -Infinity;
           let unionMinY = Infinity;
           for (const piece of result.shellPieces) {
@@ -627,8 +628,8 @@ describe('generateSiliconeShell — open pour channel (issue #94 Fix 1)', () => 
             if (bb.max[1]! > unionMaxY) unionMaxY = bb.max[1]!;
             if (bb.min[1]! < unionMinY) unionMinY = bb.min[1]!;
           }
-          // Shell top is below the original (closed-cap) trim plane.
-          expect(unionMaxY).toBeLessThan(expectedShellTopY);
+          // Shell top sits at the trim plane (within kernel slop).
+          expect(unionMaxY).toBeCloseTo(expectedShellTopY, 2);
           // And above the master top, so the shell still has vertical
           // walls above the master to form the pour well's rim.
           expect(unionMaxY).toBeGreaterThan(masterMaxY);
