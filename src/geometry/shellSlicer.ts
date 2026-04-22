@@ -66,7 +66,7 @@
 //   Piece 0 arc [45°, 135°] has mid direction radial(90°) = (0, 0, 1),
 //   i.e. +Z — the "+Z half-quadrant" per the issue spec. ✓
 
-import type { Manifold, ManifoldToplevel, Vec3 } from 'manifold-3d';
+import type { CrossSection, Manifold, ManifoldToplevel, SimplePolygon, Vec3 } from 'manifold-3d';
 
 import { SIDE_CUT_ANGLES } from './sideAngles';
 
@@ -205,227 +205,275 @@ export function radialUnit(angleRad: number): Vec3 {
 }
 
 // ============================================================================
-// Inter-piece tongue-and-groove seal (issue piece-seal, 2026-04-22 dogfood).
+// Inter-piece V-chevron seal (issue piece-seal round 2, 2026-04-22 dogfood).
 // ============================================================================
 //
 // After `sliceShellRadial` (+ brim) each piece's cut face is a flat vertical
 // plane. When the user pours silicone into the assembled mold, any
 // microscopic gap along the seam between two pieces lets silicone flow out.
-// Industry-standard fix: a half-height STEP on each cut face that forms a
-// tongue-and-groove interlock when assembled, turning a straight leak path
-// into a labyrinth.
+// The first fix (PR #115) put a half-height Y-step on the cut face — which
+// was rejected in dogfood for being in the wrong orientation (a vertical
+// step instead of the horizontal V-chevron the user wants running the FULL
+// shell height).
 //
-// Geometry:
+// Geometry: at each cut plane between piece N (on +n_CCW side) and the
+// mating piece (on −n_CCW side) we subtract/add a TRIANGULAR PRISM whose
+// cross-section is a V-chevron viewed from above (in the horizontal plane),
+// extruded along world-Y for the full shell height.
 //
-//   At each cut plane at angle θ through `xzCenter`, the plane's normal is
-//   `n_CCW(θ) = (-sin θ, 0, cos θ)`. Piece N on the +n_CCW side has its
-//   interior at `dot(p, n_CCW) > 0`; piece N+1 on the -n side has interior
-//   at `dot(p, n_CCW) < 0`. Partition the cut face horizontally at
-//   `midShellY = (shellMinY + shellMaxY) / 2`:
+// Cut-local frame (post forward-rotate by +θ_deg about +Y):
 //
-//     - LOWER half (Y < midShellY): cut face STAYS at Z_cs = 0 (unchanged).
-//     - UPPER half (Y > midShellY): piece N GROOVE — subtract a block that
-//       occupies piece N's near-cut material at Z_cs ∈ [0, SEAL_STEP_MM].
-//       After subtraction, piece N's upper cut face is at Z_cs = SEAL_STEP.
+//   X_cs = radial outward (world X after rotation)
+//   Y_cs = world vertical (unchanged)
+//   Z_cs = +n_CCW direction (world Z after rotation)
 //
-//     - UPPER half, piece N+1 (on -n side): TONGUE — UNION a block that
-//       extends into piece N's territory at Z_cs ∈ [0, SEAL_STEP - CLEARANCE].
-//       This tongue slides into the groove when assembled.
+// Triangle cross-section in (X_cs, Z_cs), apex pointing into +Z_cs so it
+// pokes into piece N's territory:
 //
-//   Clearance: `SEAL_CLEARANCE_MM` keeps the tongue slightly thinner than the
-//   groove so FDM parts slide together without binding.
+//   A = (X_apex − halfWidth, 0)     base-left on the cut plane
+//   B = (X_apex + halfWidth, 0)     base-right on the cut plane
+//   C = (X_apex, +apexDepth)        apex in piece N's territory (+Z_cs)
 //
-// Cut-plane-local frame:
+// With `halfWidth == apexDepth` the two tilted sides are at 45° — matches
+// the 45° tongue-and-groove angle the user requested.
 //
-//   Manifold.cube builds axis-aligned prisms. Rather than build a
-//   half-space-normal-aligned block from scratch (non-trivial), we build
-//   the block in a LOCAL frame where the cut plane coincides with the
-//   world XY plane (Z_cs = 0), then rotate + translate it back to world.
+// Radial centering: `X_apex` sits on the SHELL OUTER silhouette (the
+// shell-outer radius relative to `xzCenter`). The V then straddles the
+// shell wall / brim junction, which is where the mechanical seam lives
+// — the chevron locks the two pieces against lateral slide at the
+// junction rather than at the silicone cavity's inner wall (bad — would
+// intrude on the cavity) or the brim's outer edge (bad — would be a
+// cantilevered key with nothing behind it on one side).
 //
-//   Forward transform to local frame (mirrors `brim.ts`):
-//     1. Translate by `(-xzCenter.x, 0, -xzCenter.z)` so the cut axis passes
-//        through world origin.
-//     2. Rotate about +Y by `+θ_deg`. Maps `radial(θ) → +X_cs`, `n_CCW(θ) →
-//        +Z_cs`.
+// Per-piece boolean assignment:
 //
-//   Inverse transform:
-//     1. Rotate about +Y by `-θ_deg`.
-//     2. Translate by `+xzCenter`.
+//   - piece N (`grooveIdx = c`, on +n_CCW side via its a_0 lower-CCW
+//     bound): SUBTRACT the triangular prism → the apex region carves a
+//     GROOVE into piece N.
+//   - mating piece (`tongueIdx = (c − 1 + sideCount) % sideCount`, on
+//     −n_CCW side): UNION a slightly smaller triangular prism → apex
+//     bulges into +Z_cs as a TONGUE that slides into the groove.
 //
-// sideCount=2 case:
+// Clearance: the tongue prism is shrunk by `SEAL_CLEARANCE_MM / 2` on
+// both halfWidth and apexDepth (so the tongue is CLEARANCE mm thinner
+// on each of the two sloped sides + CLEARANCE mm shorter at the apex).
+// The groove prism is INFLATED by the same amount. That yields a
+// CLEARANCE mm air gap on every tongue-groove contact surface when
+// assembled — FDM parts slide together without binding.
 //
-//   Only one unique cut plane (the two angles 90° and 270° define the same
-//   vertical plane). Piece 0 is on +n_CCW(90°) = -X side; piece 1 is on +X
-//   side. Apply the groove to piece 0 and the tongue to piece 1 — consistent
-//   with the "piece i on +n_CCW(a_i) side gets groove, piece i+1 gets tongue"
-//   rule applied to the single a_0 = 90°.
+// sideCount=2: angles = [90°, 270°] define the same vertical cut plane
+// (opposite normals). Apply ONE seal at a_0 = 90°: piece 0 = grooveIdx
+// (on +n_CCW(90°) = −X side) gets the groove; piece 1 = tongueIdx (on
+// +X side) gets the tongue. Consistent with the `cutCount = 1` branch
+// in the existing slicer.
 //
-// Ownership:
-//
-//   - Input pieces are CONSUMED (`.delete()`-ed) on both success and
-//     failure. Returned array contains FRESH Manifold handles the caller
-//     owns.
-//   - On partial failure, every remaining consumed/replaced piece is
-//     cleaned up before re-throw.
+// Ownership: the returned array contains FRESH Manifold handles. Input
+// pieces are CONSUMED on both success and failure paths. On partial
+// failure every surviving slot is released before re-throw.
 
 /**
- * Groove depth (mm). The step cut INTO piece N at the cut plane. Picked at
- * 2 mm per issue spec — large enough to form a labyrinth even after FDM
- * layer-by-layer smoothing, small enough to fit within the shell wall on
- * the minimum-viable printShellThickness (3 mm default).
+ * Half-width of the V-chevron's base along the radial direction (mm).
+ * The V spans `2 × SEAL_HALF_WIDTH_MM = 6 mm` radially at the cut plane.
+ * Chosen to fit inside the default 10 mm `brimWidth_mm` plus a few mm of
+ * shell wall thickness without spilling past either edge.
  */
-export const SEAL_STEP_MM = 2.0;
+export const SEAL_HALF_WIDTH_MM = 3.0;
 
 /**
- * Tongue/groove clearance (mm). The tongue is made `SEAL_STEP - SEAL_CLEARANCE`
- * wide on Z_cs so FDM parts slide together without binding. Also applied
- * as vertical clearance at the step's upper Y bound so the tongue's top
- * doesn't bottom out in the groove.
+ * Depth of the V apex into piece N's territory (mm). At `apexDepth ==
+ * halfWidth` the tilted sides are 45° — matches the user's requested
+ * 45° tongue-and-groove interlock geometry.
+ */
+export const SEAL_APEX_DEPTH_MM = 3.0;
+
+/**
+ * Tongue/groove clearance (mm). `0.2 mm = 0.1 mm per sloped side` is a
+ * comfortable FDM sliding fit; the tongue is shrunk by `CLEARANCE/2`
+ * per half-extent and the groove is inflated by the same amount, so
+ * every tongue-groove contact gap is CLEARANCE mm wide.
  */
 export const SEAL_CLEARANCE_MM = 0.2;
 
 /**
- * Extra Z_cs slop (mm) on the groove-subtract block, past `SEAL_STEP_MM`.
- * Ensures the subtract block fully envelopes piece N's Z_cs ∈ [0, SEAL_STEP]
- * region even after kernel rounding. Safe because the extra slop sits in
- * Z_cs > SEAL_STEP which is ENTIRELY OUTSIDE piece N's interior — subtract
- * of empty-intersection is a no-op.
- */
-const SEAL_GROOVE_SLOP_MM = 0.5;
-
-/**
- * Radial bloat applied to the step block's X_cs half-extent past the shell
- * outer radius. Must cover the brim flange's full radial extent so the
- * groove cuts through both the shell and the brim in a single subtract.
- * 50 mm covers brims up to that width with slack — the brim parameter
- * tops out at ~20 mm in practice, so there's plenty of headroom.
- */
-const SEAL_BLOCK_RADIAL_SLOP_MM = 50;
-
-/**
- * Build one step block in world frame for the cut plane at `angleDeg`
- * through `xzCenter`. The block occupies, in cut-local frame:
+ * Build one triangular-prism Manifold in world frame for the cut plane
+ * at `angleDeg` through `xzCenter`. The prism's triangular cross-section
+ * lives in the (X_cs, Z_cs) plane of the cut-local frame:
  *
- *   X_cs ∈ [-X_half, +X_half]  — spans the full radial extent at the cut
- *   Y    ∈ [midShellY, blockMaxY]  — upper half only
- *   Z_cs ∈ [zMin, zMax]  — caller-specified (groove extent or tongue extent)
+ *   A = (X_apex − halfWidth, 0)
+ *   B = (X_apex + halfWidth, 0)
+ *   C = (X_apex, +apexDepth)       (apex toward +n_CCW)
  *
- * The block is built in the local frame via `Manifold.cube` + `.translate`,
- * then rotated `-angleDeg` about +Y and translated by `+xzCenter` to land
- * in world-space on the correct cut plane.
+ * extruded along Y from `shellMinY` to `shellMaxY`.
  *
- * Returns a fresh Manifold (caller `.delete()` when done).
+ * Construction: build a 2D triangle in the Manifold cross-section plane
+ * (2D-X = X_cs, 2D-Y = −Z_cs — note the sign flip — so that the
+ * subsequent −90° rotation about +X maps 2D-Y → world +Z_cs and the
+ * extrusion axis 2D-Z → world +Y). Extrude by `shellYSpan` so the
+ * prism's base sits at local Y=0, then translate in +Y by `shellMinY`.
+ * Rotate by `−angleDeg` about +Y (inverse of the forward cut rotation)
+ * to align X_cs with world radial(angle) and Z_cs with world n_CCW.
+ * Translate by `(xzCenter.x, 0, xzCenter.z)` to land on the cut plane.
+ *
+ * Returns a FRESH Manifold (caller `.delete()` when done).
  */
-function buildStepBlockAtCut(
+function buildVChevronAtCut(
   toplevel: ManifoldToplevel,
   angleDeg: number,
   xzCenter: XzCenter,
-  midShellY: number,
-  blockMaxY: number,
-  xHalfExtent: number,
-  zMin: number,
-  zMax: number,
+  xApex: number,
+  halfWidth: number,
+  apexDepth: number,
+  shellMinY: number,
+  shellMaxY: number,
 ): Manifold {
-  const blockYSpan = blockMaxY - midShellY;
-  const blockZSpan = zMax - zMin;
-  const blockXSpan = 2 * xHalfExtent;
-  if (!(blockYSpan > 0) || !(blockZSpan > 0) || !(blockXSpan > 0)) {
+  const shellYSpan = shellMaxY - shellMinY;
+  if (!(shellYSpan > 0) || !(halfWidth > 0) || !(apexDepth > 0)) {
     throw new Error(
-      `buildStepBlockAtCut: degenerate block span (X=${blockXSpan}, ` +
-        `Y=${blockYSpan}, Z=${blockZSpan})`,
+      `buildVChevronAtCut: degenerate prism (Yspan=${shellYSpan}, ` +
+        `halfWidth=${halfWidth}, apexDepth=${apexDepth})`,
     );
   }
-  // Centered cube → span [-xHalfExtent, xHalfExtent] × [-Y/2, Y/2] ×
-  // [-Z/2, Z/2] in its local frame. Translate so its center lands at the
-  // desired midpoint.
-  const blockCentered = toplevel.Manifold.cube(
-    [blockXSpan, blockYSpan, blockZSpan],
-    /* center */ true,
-  );
-  let blockLocal: Manifold | undefined;
-  let blockRotated: Manifold | undefined;
-  let blockWorld: Manifold | undefined;
+
+  // 2D triangle. The 2D-X axis corresponds to world X_cs (radial); the
+  // 2D-Y axis is −Z_cs so that after extruding along +Z and rotating
+  // −90° about +X, the 2D-Y → world +Z_cs (positive n_CCW) and the
+  // extrusion axis → world +Y (vertical). Verification:
+  //
+  //   Rotation of −90° about +X applied to (a, b, c) in global-frame
+  //   order (x-y-z) is (a, c, −b). So:
+  //     (X_cs, −Z_cs, 0)      → (X_cs, 0, Z_cs)             ✓ base on cut plane
+  //     (X_cs, −Z_cs, Yspan)  → (X_cs, Yspan, Z_cs)         ✓ vertical extrude
+  //
+  // Apex C at (X_apex, −apexDepth) in 2D → (X_apex, *, +apexDepth)
+  // after extrude + rotation. Apex points in +Z_cs as required.
+  const polygon: [number, number][] = [
+    [xApex - halfWidth, 0],
+    [xApex + halfWidth, 0],
+    [xApex, -apexDepth],
+  ];
+
+  let cs: CrossSection | undefined;
+  let prism0: Manifold | undefined;
+  let prismOrientedPreTranslate: Manifold | undefined;
+  let prismOriented: Manifold | undefined;
+  let prismUnrotated: Manifold | undefined;
+  let prismWorld: Manifold | undefined;
   try {
-    // In local frame (pre-inverse-rotation): cut-plane origin is at
-    // (0, 0, 0), the cut plane is Z_cs = 0 (world XY after rotation).
-    // Target block center: (0, (midShellY + blockMaxY)/2, (zMin + zMax)/2).
-    blockLocal = blockCentered.translate([
-      0,
-      (midShellY + blockMaxY) / 2,
-      (zMin + zMax) / 2,
-    ]);
-    // Inverse rotation: `-angleDeg` about +Y maps local +X → radial(θ) and
-    // local +Z → n_CCW(θ). Matches the inverse of the forward rotation
-    // used in `brim.ts` + `buildCutPlaneSlice`.
-    blockRotated = blockLocal.rotate([0, -angleDeg, 0]);
-    // Inverse translation: bring the cut-axis origin back to xzCenter.
-    blockWorld = blockRotated.translate([xzCenter.x, 0, xzCenter.z]);
-    const out = blockWorld;
-    blockWorld = undefined;
+    // `ofPolygons` with 'NonZero' fill rule doesn't care about winding,
+    // so we don't need to pre-sort vertices CCW — the triangle is
+    // uniquely determined regardless.
+    cs = toplevel.CrossSection.ofPolygons(
+      [polygon] as SimplePolygon[],
+      'NonZero',
+    );
+    // Extrude along +Z for the full shell Y span.
+    prism0 = cs.extrude(shellYSpan);
+    // After extrude: X ∈ [xApex−halfWidth, xApex+halfWidth],
+    //               Y ∈ [−apexDepth, 0],
+    //               Z ∈ [0, shellYSpan].
+    // Rotate −90° about +X (in the global-x-y-z order that `Manifold
+    // .rotate([rx,ry,rz])` uses), so (a,b,c) → (a, c, −b):
+    //     X → X, Y → −Z, Z → +Y.
+    // The prism becomes:
+    //     X ∈ [xApex−halfWidth, xApex+halfWidth]  (radial)
+    //     Y ∈ [0, shellYSpan]                      (vertical, local base)
+    //     Z ∈ [0, +apexDepth]                      (n_CCW side)
+    prismOrientedPreTranslate = prism0.rotate([-90, 0, 0]);
+    // Lift to world Y so the prism's base sits at shellMinY.
+    prismOriented = prismOrientedPreTranslate.translate([0, shellMinY, 0]);
+    prismOrientedPreTranslate.delete();
+    prismOrientedPreTranslate = undefined;
+    // Inverse forward-rotation: rotate by −angleDeg about +Y so
+    //   X (radial)      → radial(angleDeg)
+    //   Z (+n_CCW_cs)   → +n_CCW(angleDeg)
+    prismUnrotated = prismOriented.rotate([0, -angleDeg, 0]);
+    // Translate back to the cut axis (Y unchanged — the rotation was
+    // about a vertical axis through the world origin).
+    prismWorld = prismUnrotated.translate([xzCenter.x, 0, xzCenter.z]);
+    const out = prismWorld;
+    prismWorld = undefined;
     return out;
   } finally {
-    blockCentered.delete();
-    if (blockLocal) blockLocal.delete();
-    if (blockRotated) blockRotated.delete();
-    if (blockWorld) blockWorld.delete();
+    if (cs) {
+      try { cs.delete(); } catch { /* already dead */ }
+    }
+    if (prism0) {
+      try { prism0.delete(); } catch { /* already dead */ }
+    }
+    if (prismOrientedPreTranslate) {
+      try { prismOrientedPreTranslate.delete(); } catch { /* already dead */ }
+    }
+    if (prismOriented) {
+      try { prismOriented.delete(); } catch { /* already dead */ }
+    }
+    if (prismUnrotated) {
+      try { prismUnrotated.delete(); } catch { /* already dead */ }
+    }
+    if (prismWorld) {
+      try { prismWorld.delete(); } catch { /* already dead */ }
+    }
   }
 }
 
 /**
- * Y-axis bounds of the shell (pre-slice) used by the seal builder.
+ * Y-axis bounds of the shell (pre-slice) used by the seal builder. The
+ * V-chevron prism's vertical extent is exactly this range — the V runs
+ * the FULL shell height from bottom to top.
  */
 export interface ShellYBounds {
   minY: number;
   maxY: number;
 }
 
-export interface ApplyTongueAndGrooveArgs {
+export interface ApplyVChevronSealArgs {
   toplevel: ManifoldToplevel;
   /**
-   * Brimmed shell pieces in the same order as `sliceShellRadial` (piece i
-   * bounded by cut angles `[angles[i], angles[(i+1) % sideCount]]`). CONSUMED
-   * by this function: each input handle is `.delete()`-ed on both success and
-   * failure paths. Returned array contains FRESH handles.
+   * Brimmed shell pieces in the same order as `sliceShellRadial` (piece
+   * `i` bounded by cut angles `[angles[i], angles[(i+1) % sideCount]]`).
+   * CONSUMED by this function: each input handle is `.delete()`-ed on
+   * both success and failure paths. Returned array contains FRESH
+   * handles.
    */
   pieces: Manifold[];
   sideCount: 2 | 3 | 4;
   xzCenter: XzCenter;
   angles: readonly number[];
   /**
-   * Full shell's Y bounds pre-slice. The seal's step sits at the midpoint of
-   * this range; UPPER half = Y > midY.
+   * Full shell's Y bounds pre-slice. The V-chevron prism is extruded
+   * along Y from `shellY.minY` to `shellY.maxY` — full shell height.
    */
   shellY: ShellYBounds;
   /**
-   * Maximum radial extent to cover at each cut (from xzCenter outward to the
-   * brim's outer edge). The step block's X_cs half-extent is set to
-   * `radialMax_mm + SEAL_BLOCK_RADIAL_SLOP_MM` so the block spans the full
-   * shell+brim width at that cut.
+   * Radial distance from `xzCenter` to the shell's outer silhouette (mm).
+   * `xApex` is set to this value so the V straddles the shell wall /
+   * brim junction. Caller derives it from the pre-slice shell's bounding
+   * box (see `generateMold.ts`).
    */
-  radialMax_mm: number;
+  shellOuterRadius_mm: number;
 }
 
 /**
- * Apply tongue-and-groove seals to every shared cut plane between adjacent
- * pieces. For each cut plane at angle `a_c`:
+ * Apply V-chevron tongue-and-groove seals to every shared cut plane.
  *
- *   - Piece c (its lower-CCW bound, on +n_CCW(a_c) side): SUBTRACT the
- *     full-depth groove block (Z_cs ∈ [0, SEAL_STEP_MM + slop]) in upper Y half.
- *   - Piece (c - 1) mod sideCount (its upper-CCW bound, on -n side):
- *     UNION a tongue (Z_cs ∈ [0, SEAL_STEP_MM − SEAL_CLEARANCE_MM]) in upper
- *     Y half. The tongue's radial silhouette is clipped to the shell's
- *     actual shape at the cut by intersecting with the mating piece shifted
- *     +SEAL_STEP along +n_CCW, so the tongue inherits the shell's exact
- *     outline (no slab-past-the-brim).
+ * For each cut plane at angle `a_c`:
  *
- * sideCount=2 edge case: only one cut plane (a_0 = angles[0]). Piece 0 is
- * on +n_CCW(a_0) side → gets groove; piece 1 on -n side → gets tongue.
+ *   - `grooveIdx = c` (piece on +n_CCW(a_c) side): SUBTRACT an inflated
+ *     triangular prism (halfWidth + CLEARANCE/2, apexDepth + CLEARANCE/2)
+ *     — carves a GROOVE cavity into the cut face.
+ *   - `tongueIdx = (c − 1 + sideCount) % sideCount` (piece on −n_CCW
+ *     side): UNION a shrunk triangular prism (halfWidth − CLEARANCE/2,
+ *     apexDepth − CLEARANCE/2) — bulges a TONGUE into +n_CCW
+ *     territory, landing inside the mating piece's groove cavity with a
+ *     `CLEARANCE / 2` air gap on every sloped contact face.
  *
- * @returns Fresh `Manifold[]` matching `pieces.length`. Caller owns each
- *   handle and must `.delete()` them. Inputs are consumed.
+ * sideCount=2 edge case: only one unique cut plane (a_0 = angles[0]).
+ * Piece 0 is on +n_CCW(a_0) side → groove; piece 1 on −n side → tongue.
+ *
+ * @returns Fresh `Manifold[]` matching `pieces.length`. Caller owns
+ *   each handle and must `.delete()` them. Inputs are consumed.
  */
 export function applyTongueAndGrooveSeals(
-  args: ApplyTongueAndGrooveArgs,
+  args: ApplyVChevronSealArgs,
 ): Manifold[] {
   const {
     toplevel,
@@ -434,7 +482,7 @@ export function applyTongueAndGrooveSeals(
     xzCenter,
     angles,
     shellY,
-    radialMax_mm,
+    shellOuterRadius_mm,
   } = args;
 
   if (pieces.length !== sideCount) {
@@ -448,167 +496,89 @@ export function applyTongueAndGrooveSeals(
     );
   }
 
-  const midShellY = (shellY.minY + shellY.maxY) / 2;
-  const xHalfExtent = radialMax_mm + SEAL_BLOCK_RADIAL_SLOP_MM;
-
-  // Determine the unique cut planes. For sideCount=3/4 there are `sideCount`
-  // cut planes (one per angle). Piece i is bounded by a_i (its lower-CCW
-  // bound) and a_{i+1} (its upper-CCW bound), so:
-  //   - cut a_i is SHARED between piece i (on +n_CCW(a_i) side → groove)
-  //     and piece (i - 1 + sideCount) % sideCount (on -n_CCW(a_i) side →
-  //     tongue).
-  //
-  // For sideCount=2 angles = [90, 270], but both 90° and 270° define the
-  // SAME vertical plane (normals are opposites, half-space flips). Apply
-  // ONE step at a_0 = 90°: piece 0 on +n_CCW(90°) side = -X world → groove;
-  // piece 1 on +X world → tongue.
+  // Unique cut planes: sideCount=2 has one plane (the two angles define
+  // the same vertical cut); sideCount=3/4 has one per angle.
   const cutCount = sideCount === 2 ? 1 : sideCount;
 
-  // `result` aliases `pieces` slots so failure cleanup is straightforward.
-  // After each groove/tongue step we swap the slot in place.
+  // Groove prism: half-extents INFLATED by clearance/2 so the cavity is
+  // `CLEARANCE/2` mm larger on every sloped contact.
+  const grooveHalfWidth = SEAL_HALF_WIDTH_MM + SEAL_CLEARANCE_MM / 2;
+  const grooveApexDepth = SEAL_APEX_DEPTH_MM + SEAL_CLEARANCE_MM / 2;
+  // Tongue prism: half-extents SHRUNK by the same amount so the tongue
+  // is `CLEARANCE/2` mm smaller on every sloped contact (net air gap
+  // is CLEARANCE mm / 2 per side ⇒ CLEARANCE mm total across the pair).
+  const tongueHalfWidth = SEAL_HALF_WIDTH_MM - SEAL_CLEARANCE_MM / 2;
+  const tongueApexDepth = SEAL_APEX_DEPTH_MM - SEAL_CLEARANCE_MM / 2;
+  if (!(tongueHalfWidth > 0) || !(tongueApexDepth > 0)) {
+    throw new Error(
+      `applyTongueAndGrooveSeals: clearance ${SEAL_CLEARANCE_MM} consumes the ` +
+        `tongue (halfWidth=${SEAL_HALF_WIDTH_MM}, apexDepth=${SEAL_APEX_DEPTH_MM})`,
+    );
+  }
+
+  // `result` aliases `pieces` slots so failure cleanup is straightforward:
+  // whatever's in the slot (original or already-swapped) gets `.delete()`-ed
+  // on throw.
   const result = [...pieces];
 
-  // Whether a piece slot still holds the ORIGINAL input handle (false) or
-  // a fresh handle we allocated (true). Used only for error-path cleanup
-  // symmetry — either way, we `.delete()` whatever's in the slot on error.
-  const disposableSlots = new Set<number>();
-  for (let i = 0; i < result.length; i++) disposableSlots.add(i);
-
-  // Helper to replace slot `idx` with `fresh` and safely delete the old.
   const swapSlot = (idx: number, fresh: Manifold): void => {
     const old = result[idx] as Manifold;
     result[idx] = fresh;
     try { old.delete(); } catch { /* already dead */ }
   };
 
+  let done = false;
   try {
     for (let c = 0; c < cutCount; c++) {
       const angleDeg = angles[c] as number;
-      const grooveIdx = c; // piece on +n_CCW(a_c) side (its lower-CCW bound)
-      const tongueIdx = (c - 1 + sideCount) % sideCount; // piece on -n side (its upper-CCW bound)
+      const grooveIdx = c; // piece on +n_CCW(a_c) side
+      const tongueIdx = (c - 1 + sideCount) % sideCount; // piece on −n side
 
-      // Groove block: Z_cs ∈ [0, SEAL_STEP + slop], full upper-Y.
-      // Slop in +Z_cs is safe because Z_cs > SEAL_STEP is outside piece's
-      // volume entirely (piece i extends only to Z_cs = 0 at worst at the
-      // cut face; the slop carves through air).
-      const grooveBlock = buildStepBlockAtCut(
+      // Groove: subtract the inflated prism from piece on +n_CCW side.
+      const groovePrism = buildVChevronAtCut(
         toplevel,
         angleDeg,
         xzCenter,
-        midShellY,
+        shellOuterRadius_mm,
+        grooveHalfWidth,
+        grooveApexDepth,
+        shellY.minY,
         shellY.maxY,
-        xHalfExtent,
-        0,
-        SEAL_STEP_MM + SEAL_GROOVE_SLOP_MM,
       );
       try {
         const grooved = toplevel.Manifold.difference([
           result[grooveIdx] as Manifold,
-          grooveBlock,
+          groovePrism,
         ]);
         try {
-          // Swap. `grooved` may legitimately be empty on pathological
-          // inputs (tiny piece wholly inside the upper-Y step block's
-          // footprint) — we tolerate empty here rather than throwing.
           swapSlot(grooveIdx, grooved);
         } catch (err) {
           try { grooved.delete(); } catch { /* already dead */ }
           throw err;
         }
       } finally {
-        grooveBlock.delete();
+        groovePrism.delete();
       }
 
-      // Tongue block: Z_cs ∈ [0, SEAL_STEP - CLEARANCE], vertical-clamped
-      // so its TOP doesn't quite reach shellY.maxY (leaves CLEARANCE mm
-      // of air above the tongue so the mating piece's groove face
-      // doesn't bottom-out). Bottom stays at midShellY.
-      const tongueTopY = shellY.maxY - SEAL_CLEARANCE_MM;
-      const tongueZMax = SEAL_STEP_MM - SEAL_CLEARANCE_MM;
-      if (tongueTopY <= midShellY || !(tongueZMax > 0)) {
-        // Degenerate tongue (clearance ≥ step, or upper-Y span <= 0).
-        // Skip this cut's tongue. Groove still applied above.
-        continue;
-      }
-      // Build the raw tongue block with FULL radial extent — needed so
-      // the next intersect step inherits the exact shell silhouette at
-      // the cut plane rather than a box-truncated approximation.
-      const tongueBlockRaw = buildStepBlockAtCut(
+      // Tongue: union the shrunk prism onto piece on −n_CCW side. The
+      // prism's apex sticks into +n_CCW territory (which, for the
+      // mating piece, is foreign territory — exactly where we want
+      // the tongue to extend).
+      const tonguePrism = buildVChevronAtCut(
         toplevel,
         angleDeg,
         xzCenter,
-        midShellY,
-        tongueTopY,
-        xHalfExtent,
-        0,
-        tongueZMax,
+        shellOuterRadius_mm,
+        tongueHalfWidth,
+        tongueApexDepth,
+        shellY.minY,
+        shellY.maxY,
       );
       try {
-        // Clip the tongue to the shell's actual shape in the +Z_cs
-        // (piece-N) territory. The tongue sits where piece N had
-        // material pre-groove — EXACTLY the region
-        // `groovedPiece ∪ grooveBlock` restricted to Z_cs ∈ [0, tongueZMax].
-        // We reconstruct the pre-groove piece N by unioning the current
-        // (grooved) piece with the grooveBlock ∩ tongueBlockRaw sliver.
-        // Cheaper equivalent: intersect the tongueBlockRaw with
-        // (piece_N_current ∪ grooveBlock). Since the current piece
-        // doesn't reach into Z_cs > 0 (the groove was subtracted), the
-        // result lies entirely within grooveBlock ∩ tongueBlockRaw —
-        // which is the tongueBlockRaw itself (tongueZMax ≤ grooveDepth).
-        // So simpler still: intersect with the RAW piece-N-preseal,
-        // computed as grooveBlock unioned with the grooved piece.
-        //
-        // In practice the cleanest construction that clips the tongue to
-        // the shell's radial profile is:
-        //
-        //   pieceN_preseal = result[grooveIdx] ∪ grooveBlockJustRemoved
-        //                  = (current grooved piece) ∪
-        //                    (original piece_N ∩ grooveBlock)
-        //
-        // We don't have `original piece_N`, but we have the current
-        // grooved piece and the grooveBlock we subtracted. Recovering
-        // `original piece_N` precisely is equivalent to redoing the
-        // levelSet slice — too heavy. Simpler: clip by piece N+1's
-        // TWIN — piece N+1 has identical shell silhouette as piece N
-        // at the cut plane (both share the same shell wall locally),
-        // so we intersect the tongueBlockRaw with `result[tongueIdx]`
-        // shifted up by SEAL_STEP_MM along +Z_cs (world direction
-        // n_CCW(θ) × SEAL_STEP_MM). That maps piece N+1's -Z_cs
-        // material into the +Z_cs tongue region, giving us a
-        // shell-accurate tongue shape.
-        //
-        // World shift vector for +Z_cs * tongueZMax:
-        //   n_CCW(θ) = (-sin θ, 0, cos θ) → world shift = n_CCW × step
-        const thetaRad = angleDeg * (Math.PI / 180);
-        const shiftX = -Math.sin(thetaRad) * SEAL_STEP_MM;
-        const shiftZ = Math.cos(thetaRad) * SEAL_STEP_MM;
-        const shiftedPieceNplus1 = (result[tongueIdx] as Manifold).translate([
-          shiftX,
-          0,
-          shiftZ,
-        ]);
-        let tongued: Manifold | undefined;
-        try {
-          const tongueClipped = toplevel.Manifold.intersection([
-            tongueBlockRaw,
-            shiftedPieceNplus1,
-          ]);
-          try {
-            if (tongueClipped.isEmpty()) {
-              // No tongue material — skip the union (would be a no-op
-              // anyway). Continue to the next cut.
-              continue;
-            }
-            tongued = toplevel.Manifold.union(
-              result[tongueIdx] as Manifold,
-              tongueClipped,
-            );
-          } finally {
-            tongueClipped.delete();
-          }
-        } finally {
-          shiftedPieceNplus1.delete();
-        }
+        const tongued = toplevel.Manifold.union(
+          result[tongueIdx] as Manifold,
+          tonguePrism,
+        );
         try {
           swapSlot(tongueIdx, tongued);
         } catch (err) {
@@ -616,19 +586,18 @@ export function applyTongueAndGrooveSeals(
           throw err;
         }
       } finally {
-        tongueBlockRaw.delete();
+        tonguePrism.delete();
       }
     }
-    // Clear the disposables set — on success the caller owns everything.
-    disposableSlots.clear();
+    done = true;
     return result;
-  } catch (err) {
-    for (const idx of disposableSlots) {
-      const m = result[idx];
-      if (m) {
-        try { m.delete(); } catch { /* already dead */ }
+  } finally {
+    if (!done) {
+      for (const m of result) {
+        if (m) {
+          try { m.delete(); } catch { /* already dead */ }
+        }
       }
     }
-    throw err;
   }
 }

@@ -21,8 +21,9 @@ import {
   applyTongueAndGrooveSeals,
   pieceMidAngleRad,
   radialUnit,
+  SEAL_APEX_DEPTH_MM,
   SEAL_CLEARANCE_MM,
-  SEAL_STEP_MM,
+  SEAL_HALF_WIDTH_MM,
   sliceShellRadial,
 } from '@/geometry/shellSlicer';
 
@@ -289,23 +290,33 @@ describe('sliceShellRadial — user cut-plane overrides', () => {
   });
 });
 
-// Tongue-and-groove seal regression coverage (issue piece-seal, 2026-04-22
-// dogfood). The seal stamps a labyrinth onto every shared cut plane so
-// silicone poured into the assembled mold can't leak along the seam.
+// V-chevron seal regression coverage (issue piece-seal round 2, 2026-04-22
+// dogfood). The seal stamps a horizontal V-shaped tongue-and-groove
+// interlock onto every shared cut plane, running the full shell height,
+// so silicone poured into the assembled mold can't leak along the seam.
 // Invariants:
 //
-//   1. Adjacent pieces remain DISJOINT after sealing (clearance > 0 so the
-//      tongue doesn't overlap the groove-side piece).
-//   2. Adjacent pieces' volumes sum ≈ original shell volume (the tongue
-//      replaces exactly the material that was in the groove, modulo
-//      clearance — bounded above by the clearance × step × upper-Y-span).
-//   3. The "tongue piece shifted by SEAL_STEP in +n_CCW" intersects the
-//      "groove piece" (proxying the "tongue fits in groove" test described
-//      in the task spec): when the tongue is pushed all the way down into
-//      the groove, the two volumes meet — proving the tongue lies in the
-//      same Z_cs slab as the groove cavity.
+//   1. Adjacent pieces remain DISJOINT after sealing (clearance > 0 so
+//      the tongue doesn't overlap the groove piece).
+//   2. Adjacent pieces' volumes sum ≈ original shell volume within a
+//      clearance budget (the tongue/groove volume delta is bounded by
+//      the 2D chevron area × Y span × clearance).
+//   3. Tongue-piece extends past the cut plane into +n_CCW territory:
+//      specifically, the piece's bounding-box-derived extent in +n_CCW
+//      exceeds the cut plane by ≈ apexDepth − clearance/2.
+//   4. Groove-piece LOSES material at the cut plane: its bounding-box
+//      extent in −n_CCW direction (on its side of the cut) has a
+//      notch — detectable by a cross-section volume drop at the cut
+//      plane.
+//
+// Reference frame: cut-local coordinates (X_cs, Y_cs, Z_cs) after
+// rotating world by +θ_deg about +Y. With θ = 90° (the sideCount=2
+// case), that rotation sends world (cos θ, 0, sin θ) = (0, 0, 1) → +X
+// and sends n_CCW(90°) = (−1, 0, 0) → +Z. Piece 0 (grooveIdx for
+// sideCount=2) is on the +n_CCW side = world −X side; piece 1 (the
+// tongue piece) is on world +X side.
 
-describe('applyTongueAndGrooveSeals — adjacent pieces remain disjoint', () => {
+describe('applyTongueAndGrooveSeals — V-chevron: adjacent pieces disjoint', () => {
   test.each([2, 3, 4] as const)(
     'sideCount=%i: adjacent sealed pieces have near-zero intersection',
     async (sideCount) => {
@@ -330,7 +341,7 @@ describe('applyTongueAndGrooveSeals — adjacent pieces remain disjoint', () => 
             minY: shellBbox.min[1]!,
             maxY: shellBbox.max[1]!,
           },
-          radialMax_mm: OUTER / 2 + 5, // shell half-width + a pinch of slack
+          shellOuterRadius_mm: OUTER / 2,
         });
         expect(sealedPieces).toHaveLength(sideCount);
         for (const p of sealedPieces) {
@@ -338,9 +349,7 @@ describe('applyTongueAndGrooveSeals — adjacent pieces remain disjoint', () => 
           expect(p.isEmpty()).toBe(false);
           expect(p.volume()).toBeGreaterThan(0);
         }
-        // Adjacent-piece disjointness: the tongue of piece N+1 sits in
-        // piece N's groove, but with SEAL_CLEARANCE_MM of air around it,
-        // so the two volumes don't overlap.
+        // Adjacent-piece disjointness at every (i, i+1) pair.
         for (let i = 0; i < sealedPieces.length; i++) {
           const j = (i + 1) % sealedPieces.length;
           const a = sealedPieces[i]!;
@@ -348,12 +357,12 @@ describe('applyTongueAndGrooveSeals — adjacent pieces remain disjoint', () => 
           const inter = toplevel.Manifold.intersection([a, b]);
           try {
             const overlap = inter.volume();
-            const minVol = Math.min(a.volume(), b.volume());
-            // Allow 1e-2 relative slop (kernel noise at co-planar
-            // interfaces). The tongue-and-groove geometry is
-            // specifically designed so overlap is zero at the
-            // clearance gap.
-            expect(overlap).toBeLessThan(minVol * 1e-2);
+            // Allow 1 mm³ — kernel co-planar slop + float rounding at
+            // the clearance gap. The clearance itself is 0.2 mm so the
+            // analytic air-gap volume is ≈ 0, but the kernel can leave
+            // sub-mm slivers at the V's tip where tongue and groove
+            // meet.
+            expect(overlap).toBeLessThan(1);
           } finally {
             inter.delete();
           }
@@ -370,9 +379,9 @@ describe('applyTongueAndGrooveSeals — adjacent pieces remain disjoint', () => 
   );
 });
 
-describe('applyTongueAndGrooveSeals — mass conservation', () => {
+describe('applyTongueAndGrooveSeals — V-chevron: mass conservation', () => {
   test.each([2, 3, 4] as const)(
-    'sideCount=%i: sealed-piece volumes sum close to raw-slice total (within clearance budget)',
+    'sideCount=%i: sealed-piece volumes sum close to raw-slice total',
     async (sideCount) => {
       const toplevel = await initManifold();
       const OUTER = 20;
@@ -397,22 +406,31 @@ describe('applyTongueAndGrooveSeals — mass conservation', () => {
             minY: shellBbox.min[1]!,
             maxY: shellBbox.max[1]!,
           },
-          radialMax_mm: OUTER / 2 + 5,
+          shellOuterRadius_mm: OUTER / 2,
         });
         const sealedTotal = sealedPieces.reduce((s, p) => s + p.volume(), 0);
-        // The sealed total differs from rawTotal by the per-cut CLEARANCE
-        // loss: every cut removes a groove volume and replaces it with
-        // a tongue volume of size (clearance shrunk) — the delta is at
-        // most `CLEARANCE × SEAL_STEP × (shellYSpan/2) × <cut-slice-area>`.
-        // For the ring-cube fixture, cut-slice area is ~20 × 20 = 400 mm²
-        // (the shell silhouette at the cut plane); upper-bound per cut
-        // ~ 0.2 × 2 × 10 × 20 = 80 mm³ pessimistic. Number of unique
-        // cuts = sideCount === 2 ? 1 : sideCount.
+        // The sealed total differs from rawTotal by the per-cut
+        // tongue/groove volume delta. Groove = subtract inflated
+        // prism (half-extents + clearance/2); Tongue = union shrunk
+        // prism (half-extents − clearance/2). Net delta per cut ≈
+        // tongue_vol − groove_vol (both measured relative to the
+        // material at the cut plane); both are O(halfWidth ×
+        // apexDepth × shellYSpan).
+        //
+        // Upper bound per cut: (halfWidth + clearance/2) × (apexDepth
+        // + clearance/2) × shellYSpan — the groove prism volume,
+        // which is the larger of the two and the magnitude of the
+        // biggest single change to any piece's volume.
+        //
+        // With sideCount=2 we have one unique cut; sideCount=3/4 have
+        // `sideCount` cuts. Use this as a generous budget.
         const uniqueCuts = sideCount === 2 ? 1 : sideCount;
-        const perCutBudget =
-          SEAL_CLEARANCE_MM * SEAL_STEP_MM * (shellYSpan / 2) * (OUTER * 2);
-        const clearanceBudget = uniqueCuts * perCutBudget;
-        expect(Math.abs(rawTotal - sealedTotal)).toBeLessThan(clearanceBudget);
+        const perCutGrooveVol =
+          (SEAL_HALF_WIDTH_MM + SEAL_CLEARANCE_MM / 2) *
+          (SEAL_APEX_DEPTH_MM + SEAL_CLEARANCE_MM / 2) *
+          shellYSpan;
+        const budget = uniqueCuts * perCutGrooveVol;
+        expect(Math.abs(rawTotal - sealedTotal)).toBeLessThan(budget);
       } finally {
         if (sealedPieces) {
           for (const p of sealedPieces) p.delete();
@@ -425,64 +443,115 @@ describe('applyTongueAndGrooveSeals — mass conservation', () => {
   );
 });
 
-describe('applyTongueAndGrooveSeals — tongue fits in groove', () => {
-  test('sideCount=4: shift tongue piece by -SEAL_STEP in +n_CCW direction; overlaps groove piece', async () => {
-    // When the tongue piece (piece i-1) is shifted by SEAL_STEP_MM in the
-    // +n_CCW(a_c) direction (pushing the tongue DEEPER into the groove),
-    // it should INTERSECT the groove piece (piece i) at the cut face
-    // interior — proving the tongue geometry lies in the same Z_cs slab
-    // as the cavity cut out of the groove piece. Without the seal both
-    // pieces would be flush-coplanar at the cut plane and the shifted
-    // intersection would be a lower-dimensional (zero volume) set.
+describe('applyTongueAndGrooveSeals — V-chevron: tongue + groove extents', () => {
+  test('sideCount=2: tongue piece extends past cut plane into +n_CCW territory', async () => {
+    // With sideCount=2, angles=[90°, 270°]. Single cut plane at 90°.
+    // n_CCW(90°) = (−1, 0, 0) = world −X. Piece 0 = grooveIdx (on +n_CCW
+    // side → world −X). Piece 1 = tongueIdx (on −n_CCW side → world +X).
+    //
+    // Without seal, piece 1's bounding box X starts at 0 (the cut plane
+    // passes through x=0). With the tongue, piece 1 gains a triangular
+    // prism bulging into +n_CCW = world −X direction, so its bbox MIN
+    // X should drop below 0 by ≈ apexDepth − clearance/2.
     const toplevel = await initManifold();
     const OUTER = 20;
     const INNER = 10;
-    const sideCount = 4 as const;
     const shell = buildRingShell(toplevel, OUTER, INNER);
     const shellBbox = shell.boundingBox();
-    const rawPieces = sliceShellRadial(toplevel, shell, sideCount, {
-      x: 0,
-      z: 0,
-    });
+    const rawPieces = sliceShellRadial(toplevel, shell, 2, { x: 0, z: 0 });
     let sealedPieces: Manifold[] | undefined;
     try {
       sealedPieces = applyTongueAndGrooveSeals({
         toplevel,
         pieces: rawPieces,
-        sideCount,
+        sideCount: 2,
         xzCenter: { x: 0, z: 0 },
-        angles: SIDE_CUT_ANGLES[sideCount],
+        angles: SIDE_CUT_ANGLES[2],
         shellY: {
           minY: shellBbox.min[1]!,
           maxY: shellBbox.max[1]!,
         },
-        radialMax_mm: OUTER / 2 + 5,
+        shellOuterRadius_mm: OUTER / 2,
       });
-      // Pick cut c=0 at angles[0] = 45°. grooveIdx = 0; tongueIdx = 3.
-      const angleDeg = SIDE_CUT_ANGLES[sideCount][0] as number;
-      const thetaRad = (angleDeg * Math.PI) / 180;
-      // Shift by SEAL_STEP in +n_CCW direction.
-      const shiftX = -Math.sin(thetaRad) * SEAL_STEP_MM;
-      const shiftZ = Math.cos(thetaRad) * SEAL_STEP_MM;
-      const tonguePiece = sealedPieces[3]!;
-      const groovePiece = sealedPieces[0]!;
-      const shifted = tonguePiece.translate([shiftX, 0, shiftZ]);
-      try {
-        const inter = toplevel.Manifold.intersection([shifted, groovePiece]);
-        try {
-          // The tongue when pushed fully in should overlap the groove
-          // piece with a non-trivial volume (approximately the tongue's
-          // volume ≈ SEAL_STEP - CLEARANCE times upper-Y-span times
-          // shell wall thickness at the cut plane). Lower bound: just
-          // assert > 0 with a meaningful margin (1 mm³).
-          const overlap = inter.volume();
-          expect(overlap).toBeGreaterThan(1);
-        } finally {
-          inter.delete();
-        }
-      } finally {
-        shifted.delete();
+      const tonguePiece = sealedPieces[1]!; // world +X side
+      const tongueBbox = tonguePiece.boundingBox();
+      // n_CCW(90°) = world −X. Tongue bulges in +n_CCW = world −X, so
+      // the piece's MIN X goes NEGATIVE by ≈ (apexDepth − clearance/2).
+      // Be generous: accept any negative value ≥ half the expected
+      // protrusion (kernel might shave a tiny slice).
+      const expectedProtrusion = SEAL_APEX_DEPTH_MM - SEAL_CLEARANCE_MM / 2;
+      expect(tongueBbox.min[0]!).toBeLessThan(-expectedProtrusion / 2);
+      // And not more than the full apex depth + a smidge of slop.
+      expect(tongueBbox.min[0]!).toBeGreaterThan(-(expectedProtrusion + 0.5));
+    } finally {
+      if (sealedPieces) {
+        for (const p of sealedPieces) p.delete();
+      } else {
+        for (const p of rawPieces) p.delete();
       }
+      shell.delete();
+    }
+  });
+
+  test('sideCount=2: groove piece has a notch at the cut plane', async () => {
+    // Groove piece (piece 0) sits on world −X side of the cut. The
+    // groove carves a triangular cavity INTO piece 0's +n_CCW-facing
+    // boundary (which in world coords is the +X side of piece 0 —
+    // its cut face). The cavity's apex reaches Z_cs = +apexDepth →
+    // in world, X = −(apexDepth + clearance/2). So piece 0 is MISSING
+    // material in the X ∈ [0, −(apexDepth + clearance/2)] band near
+    // Y_cs centered at X_apex = +shellOuterRadius = +10 along X_cs.
+    //
+    // Verification: intersect piece 0 with a small slab near the cut
+    // plane at Y_cs ∈ [shellMinY, shellMaxY], X_cs ∈ [shellOuter −
+    // halfWidth, shellOuter + halfWidth], Z_cs ∈ [−1, 0]. The slab's
+    // volume inside piece 0 should be reduced relative to a shell
+    // piece without the groove.
+    //
+    // Simpler indirect check: the groove piece's volume is strictly
+    // LESS than the raw piece's volume by the groove prism volume
+    // (minus any outside-the-shell overhang of the prism, which in
+    // this fixture is zero because the prism sits entirely within
+    // the shell ring thickness).
+    const toplevel = await initManifold();
+    const OUTER = 20;
+    const INNER = 10;
+    const shell = buildRingShell(toplevel, OUTER, INNER);
+    const shellBbox = shell.boundingBox();
+    const rawPieces = sliceShellRadial(toplevel, shell, 2, { x: 0, z: 0 });
+    const rawGrooveVol = rawPieces[0]!.volume();
+    let sealedPieces: Manifold[] | undefined;
+    try {
+      sealedPieces = applyTongueAndGrooveSeals({
+        toplevel,
+        pieces: rawPieces,
+        sideCount: 2,
+        xzCenter: { x: 0, z: 0 },
+        angles: SIDE_CUT_ANGLES[2],
+        shellY: {
+          minY: shellBbox.min[1]!,
+          maxY: shellBbox.max[1]!,
+        },
+        shellOuterRadius_mm: OUTER / 2,
+      });
+      const sealedGroovePiece = sealedPieces[0]!;
+      const sealedGrooveVol = sealedGroovePiece.volume();
+      // The groove removes volume from piece 0. The removed volume is
+      // at most the full groove prism (halfWidth+c/2) × (apexDepth+c/2)
+      // × shellYSpan, and at least half of that (even the ring shell
+      // fixture has the cut-plane face only partially overlapping the
+      // prism — the ring wall thickness is 5 mm but the prism's X span
+      // is 6 mm, so the prism might extend past the ring on one side).
+      const shellYSpan = shellBbox.max[1]! - shellBbox.min[1]!;
+      const maxRemoved =
+        (SEAL_HALF_WIDTH_MM + SEAL_CLEARANCE_MM / 2) *
+        (SEAL_APEX_DEPTH_MM + SEAL_CLEARANCE_MM / 2) *
+        shellYSpan;
+      const delta = rawGrooveVol - sealedGrooveVol;
+      // Some material was removed — the groove is non-trivial.
+      expect(delta).toBeGreaterThan(0);
+      // Not more than the prism's full volume.
+      expect(delta).toBeLessThan(maxRemoved + 1);
     } finally {
       if (sealedPieces) {
         for (const p of sealedPieces) p.delete();
@@ -494,7 +563,7 @@ describe('applyTongueAndGrooveSeals — tongue fits in groove', () => {
   });
 });
 
-describe('applyTongueAndGrooveSeals — input validation', () => {
+describe('applyTongueAndGrooveSeals — V-chevron: input validation', () => {
   test('throws when pieces.length ≠ sideCount', async () => {
     const toplevel = await initManifold();
     const shell = buildRingShell(toplevel);
@@ -512,7 +581,7 @@ describe('applyTongueAndGrooveSeals — input validation', () => {
             minY: shellBbox.min[1]!,
             maxY: shellBbox.max[1]!,
           },
-          radialMax_mm: 20,
+          shellOuterRadius_mm: 10,
         }),
       ).toThrow(/expected 4 pieces/);
     } finally {
@@ -538,7 +607,7 @@ describe('applyTongueAndGrooveSeals — input validation', () => {
             minY: shellBbox.min[1]!,
             maxY: shellBbox.max[1]!,
           },
-          radialMax_mm: 20,
+          shellOuterRadius_mm: 10,
         }),
       ).toThrow(/expected 4 angles/);
     } finally {

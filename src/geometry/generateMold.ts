@@ -1303,39 +1303,34 @@ export async function generateSiliconeShell(
           printShellFull = undefined;
           const tBrim = performance.now();
 
-          // Step 5.5 (issue piece-seal, 2026-04-22 dogfood): apply
-          // tongue-and-groove seals to every shared cut plane so
-          // silicone poured into the assembled mold can't find a
-          // straight path out along the seam. Each cut face's upper
-          // half is stepped by SEAL_STEP_MM — piece on +n_CCW side of
-          // the cut gets a groove, mating piece on -n side gets a
-          // tongue (smaller by SEAL_CLEARANCE_MM). See
-          // `./shellSlicer.ts` for the geometric spec.
+          // Step 5.5 (issue piece-seal round 2, 2026-04-22 dogfood):
+          // apply V-chevron tongue-and-groove seals to every shared cut
+          // plane. Each cut face gains a triangular-prism interlock
+          // running the FULL shell height: piece on +n_CCW side gets a
+          // groove cavity; mating piece on −n side gets a tongue that
+          // slides into that cavity with SEAL_CLEARANCE_MM of air gap.
+          // The chevron is centred radially on the SHELL OUTER silhouette
+          // so it straddles the shell-wall / brim junction. See
+          // `./shellSlicer.ts` for the full geometric spec.
           //
-          // Radial extent for the step block: shell outer radius +
-          // brim width + slack. The shell+brim's max extent from
-          // xzCenter is (shell bbox half-width + brimWidth_mm); we
-          // derive the half-width from shellBboxWorld.
+          // Shell outer radius for X_apex placement: the max XZ extent
+          // from xzCenter. The shell is roughly axisymmetric around the
+          // master centerline, so max XZ extent ≈ outer radius at each
+          // cut angle. Good enough for seal placement; the V's 6 mm
+          // span + clearance tolerates a few mm of wobble in the
+          // radial alignment without the apex poking past the shell
+          // wall's inner surface or the brim's outer edge.
           const shellOuterHalfExtent = Math.max(
             shellBboxWorld.max.x - xzCenter.x,
             xzCenter.x - shellBboxWorld.min.x,
             shellBboxWorld.max.z - xzCenter.z,
             xzCenter.z - shellBboxWorld.min.z,
           );
-          const sealRadialMax_mm =
-            shellOuterHalfExtent + parameters.brimWidth_mm;
-          // `applyTongueAndGrooveSeals` consumes shellPieces and
-          // returns fresh handles. On success the old handles are
-          // already released inside the function; on failure the
-          // function releases any remaining intermediates and
-          // re-throws, leaving `shellPieces` with its old contents
-          // released — we then set `shellPieces = undefined` to avoid
-          // the outer `catch` trying to re-release. Achieve this by
-          // swap-then-assign.
-          // applyTongueAndGrooveSeals handles its own partial cleanup
-          // on throw (releases any surviving piece Manifolds). On throw
-          // `shellPieces` stays undefined so the outer catch skips the
-          // re-release loop.
+          // `applyTongueAndGrooveSeals` consumes shellPieces and returns
+          // fresh handles. On throw, it releases every surviving slot
+          // before re-throw (per its contract), so we swap
+          // `shellPieces = undefined` before the call to prevent the
+          // outer catch from double-releasing.
           const preSealPieces = shellPieces;
           shellPieces = undefined;
           shellPieces = applyTongueAndGrooveSeals({
@@ -1348,7 +1343,7 @@ export async function generateSiliconeShell(
               minY: shellBboxWorld.min.y,
               maxY: shellBboxWorld.max.y,
             },
-            radialMax_mm: sealRadialMax_mm,
+            shellOuterRadius_mm: shellOuterHalfExtent,
           });
           const tSeal = performance.now();
 
