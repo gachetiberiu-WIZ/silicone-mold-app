@@ -98,7 +98,7 @@
 import { DoubleSide, Ray, Vector3 } from 'three';
 import type { BufferGeometry, Matrix4 } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
-import type { Box, Manifold, ManifoldToplevel, Mat4, Vec3 } from 'manifold-3d';
+import type { Box, CrossSection, Manifold, ManifoldToplevel, Mat4, Vec3 } from 'manifold-3d';
 
 import type { MoldParameters } from '@/renderer/state/parameters';
 import { SIDE_COUNT_OPTIONS } from '@/renderer/state/parameters';
@@ -210,6 +210,21 @@ const MIN_SILICONE_THICKNESS_MM = 1;
 const PRINT_SHELL_POUR_EDGE_MM = 3;
 
 /**
+ * Safety slop (mm) added above the shell's top Y when extruding the pour-
+ * channel prism, so the channel poses past the shell's dome cap and
+ * guarantees a through-hole after subtraction.
+ *
+ * See issue #94 Fix 1. The shell's post-trim top Y sits at
+ * `masterMaxY + siliconeThickness + PRINT_SHELL_POUR_EDGE_MM`; extruding
+ * the pour channel by `siliconeThickness + PRINT_SHELL_POUR_EDGE_MM +
+ * PRINT_SHELL_POUR_CHANNEL_SLOP_MM` above `masterMaxY` puts the channel's
+ * top face above the shell's topmost geometry, so `shell.difference(channel)`
+ * fully carves out the remaining cap. 2 mm is the same slop convention
+ * used elsewhere in the pipeline for trim-past safety.
+ */
+const PRINT_SHELL_POUR_CHANNEL_SLOP_MM = 2;
+
+/**
  * LevelSet grid spacing (mm). Tuned for the mini-figurine to land under
  * the CI budget while still giving a visually plausible silicone body.
  *
@@ -294,6 +309,82 @@ interface SdfStats {
   cacheHits: number;
   farFieldSkips: number;
   bvhTimeMs: number;
+}
+
+/**
+ * Build a vertical prism (pour channel) whose XZ footprint matches the
+ * silicone-outer's silhouette at world-Y = `masterMaxYInWorld`, extending
+ * from `masterMaxYInWorld` upward by `channelHeight`. Used to carve an
+ * open-top pour hole through the shell's dome cap (issue #94 Fix 1).
+ *
+ * Pre-#94 the print shell had a CLOSED cap at the top: the levelSet that
+ * built the shell's outer body produced a dome that extended PAST the
+ * silicone outer's dome (the shell outset is larger), and the single top-
+ * trim plane at `masterMaxY + siliconeThickness + PRINT_SHELL_POUR_EDGE_MM`
+ * only sliced the tip — leaving solid shell material covering the pour
+ * well. For the mold to actually be pourable end-to-end, the user needs
+ * a THROUGH-HOLE from above.
+ *
+ * Algorithm:
+ *
+ *   1. Rotate siliconeOuter `[90, 0, 0]` so our-world +Y maps to rotated
+ *      +Z (Manifold's slice frame is XY plane at z=height; matches the
+ *      convention in `./baseSlab.ts`).
+ *   2. `slice(masterMaxYInWorld)` returns a CrossSection equal to the
+ *      horizontal silhouette of the silicone outer at the master's top
+ *      face — exactly the XZ footprint of the pour well.
+ *   3. `extrude(channelHeight)` pushes that 2D silhouette up by the given
+ *      height; the extruded prism sits in rotated-frame Z ∈ [0, height].
+ *   4. Rotate back `[-90, 0, 0]` to our-world, then translate so the
+ *      base sits at world-Y = `masterMaxYInWorld` and the top at
+ *      `masterMaxYInWorld + channelHeight`.
+ *
+ * If the silicone-outer slice at `masterMaxYInWorld` is empty or has
+ * zero contours (degenerate master-top geometry), returns `undefined` —
+ * the caller skips the subtraction in that case (no hole to carve but
+ * also no cap to worry about for that pathological input).
+ *
+ * Ownership: every intermediate CrossSection + Manifold is disposed
+ * inside this helper. The returned Manifold (if any) is fresh — caller
+ * owns it and must `.delete()` after use.
+ */
+function buildPourChannelPrism(
+  siliconeOuter: Manifold,
+  masterMaxYInWorld: number,
+  channelHeight: number,
+): Manifold | undefined {
+  // Forward pass: our-Y → rotated-Z. Matches `./baseSlab.ts`.
+  const rotatedSiliconeOuter = siliconeOuter.rotate([90, 0, 0]);
+  let silhouetteCs: CrossSection | undefined;
+  let channelInRotated: Manifold | undefined;
+  let channelInWorld: Manifold | undefined;
+  try {
+    silhouetteCs = rotatedSiliconeOuter.slice(masterMaxYInWorld);
+    if (silhouetteCs.isEmpty() || silhouetteCs.numContour() === 0) {
+      return undefined;
+    }
+    // Extrude in rotated frame — prism spans rotated-Z ∈ [0, channelHeight].
+    channelInRotated = silhouetteCs.extrude(channelHeight);
+    // Rotate back to our-world Y-up frame. `.rotate([-90,0,0])` maps
+    // rotated +Z → our-world +Y.
+    const backRotated = channelInRotated.rotate([-90, 0, 0]);
+    channelInRotated.delete();
+    channelInRotated = undefined;
+    // Translate so the prism's base sits at world-Y = masterMaxYInWorld.
+    // Post-rotation the prism lies in world-Y ∈ [0, channelHeight], so
+    // we shift by +masterMaxYInWorld on Y.
+    channelInWorld = backRotated.translate([0, masterMaxYInWorld, 0]);
+    backRotated.delete();
+    // Hand off ownership; clear the local so the finally doesn't re-delete.
+    const out = channelInWorld;
+    channelInWorld = undefined;
+    return out;
+  } finally {
+    rotatedSiliconeOuter.delete();
+    if (silhouetteCs) silhouetteCs.delete();
+    if (channelInRotated) channelInRotated.delete();
+    if (channelInWorld) channelInWorld.delete();
+  }
 }
 
 /**
@@ -809,6 +900,56 @@ export async function generateSiliconeShell(
           } finally {
             shellRaw.delete();
             if (shellTrimTop) shellTrimTop.delete();
+          }
+
+          // Step 4e (issue #94 Fix 1): carve an OPEN POUR CHANNEL through
+          // the shell's top cap. The levelSet-built shellOuter extends
+          // past siliconeOuter's dome (the shell outset is larger), so
+          // the step-4c top trim at `masterMaxY + siliconeThickness +
+          // PRINT_SHELL_POUR_EDGE_MM` only slices the tip — leaving a
+          // solid cap over the pour well. For the mold to be actually
+          // pourable end-to-end, we subtract a vertical prism whose XZ
+          // footprint matches siliconeOuter's silhouette at
+          // `master.max.y`, extruded upward past the shell's top trim
+          // plane. The result is a through-hole from the shell's top
+          // face down to the silicone's pour opening.
+          const masterMaxYInWorld = masterBbox.max[1];
+          // Channel height measured from `masterMaxY`: enough to poke
+          // past the shell's top-trim plane (at masterMaxY + silicone +
+          // PRINT_SHELL_POUR_EDGE_MM) with a safety slop so
+          // `shell.difference(channel)` fully removes the remaining cap.
+          const pourChannelHeight =
+            siliconeThickness +
+            PRINT_SHELL_POUR_EDGE_MM +
+            PRINT_SHELL_POUR_CHANNEL_SLOP_MM;
+          const pourChannel = buildPourChannelPrism(
+            siliconeOuter,
+            masterMaxYInWorld,
+            pourChannelHeight,
+          );
+          if (pourChannel) {
+            try {
+              const closedShell = printShellFull;
+              const shellWithHole = toplevel.Manifold.difference([
+                closedShell,
+                pourChannel,
+              ]);
+              try {
+                assertManifold(
+                  shellWithHole,
+                  'print-shell after pour-channel subtract',
+                );
+              } catch (err) {
+                shellWithHole.delete();
+                throw err;
+              }
+              // Swap: printShellFull now owns the through-holed shell,
+              // and the old closed-cap shell is released.
+              closedShell.delete();
+              printShellFull = shellWithHole;
+            } finally {
+              pourChannel.delete();
+            }
           }
 
           const tPrintShell = performance.now();
