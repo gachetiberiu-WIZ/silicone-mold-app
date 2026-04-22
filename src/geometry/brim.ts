@@ -206,8 +206,20 @@ import type { CrossSection, Manifold, ManifoldToplevel } from 'manifold-3d';
 import { pieceMidAngleRad } from './shellSlicer';
 import { SIDE_CUT_ANGLES } from './sideAngles';
 
-/** Margin (mm) the brim recedes from the shell's Y-min and Y-max. */
-const BRIM_Y_MARGIN_MM = 2;
+/**
+ * Margin (mm) the brim recedes from the shell's Y-min and Y-max.
+ *
+ * Originally 2 mm on each side to avoid razor-thin edges where the
+ * brim met the shell's curved top / bottom. Dogfood 2026-04-22 showed
+ * this created a visible gap above and below the brim — the flange
+ * didn't reach the shell's full height, reading as "fin doesn't
+ * touch the shell top/bottom." Dropped to 0 so the brim spans the
+ * full shell height. The silicone-cavity carve-out in step 6 of
+ * `addBrim` still prevents any brim material from poking into the
+ * pour cavity, so the only geometric consequence is the brim is now
+ * flush with the shell top and bottom.
+ */
+const BRIM_Y_MARGIN_MM = 0;
 
 /**
  * Multiplier applied to `printShellThickness_mm` to compute `bondOverlap`
