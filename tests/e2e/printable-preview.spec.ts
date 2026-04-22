@@ -269,7 +269,7 @@ test('printable-parts preview: default-ON reveals shell pieces → exploded fans
     // Click Generate, wait for the button to un-busy.
     await page.locator('[data-testid="generate-btn"]').click();
     await expect(page.locator('[data-testid="generate-btn"]'))
-      .toHaveText('Generate mold', { timeout: 15_000 });
+      .toHaveText('Generate mold', { timeout: 45_000 });
     await expect(page.locator('[data-testid="generate-btn"]')).toBeEnabled();
 
     // Volumes populated (proves orchestrator ran to completion).

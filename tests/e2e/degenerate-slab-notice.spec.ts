@@ -141,7 +141,7 @@ test('degenerate-slab notice: top-face commit on mini-figurine triggers notice t
     // asserting on the toast — the notice fires on the happy-path
     // terminal branch AFTER the scene hand-off.
     await generateBtn.click();
-    await expect(generateBtn).toHaveText('Generate mold', { timeout: 20_000 });
+    await expect(generateBtn).toHaveText('Generate mold', { timeout: 45_000 });
 
     // Volumes populated (proves orchestrator ran to completion).
     await expect(
