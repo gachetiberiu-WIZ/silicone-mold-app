@@ -366,29 +366,63 @@ export function createGenerateOrchestrator(
       busy = true;
       fireState();
 
+      // Issue #97 Fix 1 (dogfood 2026-04-21 round 3): Yield helper that
+      // waits for TWO full animation frames. A single `requestAnimationFrame`
+      // fires BEFORE the browser has actually painted — the resolve() lands
+      // in the gap between "last frame ended" and "next paint", so the
+      // following synchronous manifold op owns the thread before the
+      // banner label update reaches the screen. Double-RAF forces at
+      // least one full paint cycle between phases: the first RAF lands
+      // after layout, the second lands after compositing + paint. happy-dom
+      // / node test envs without requestAnimationFrame fall back to a
+      // short timeout — still a yield, approximates "one frame" at 60Hz.
+      const yieldForPaint = (): Promise<void> =>
+        new Promise<void>((resolve) => {
+          if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+          } else {
+            setTimeout(resolve, 32);
+          }
+        });
+
       // Issue #87 Fix 1: build the onPhase callback that forwards
       // each GeneratePhase into the status sink + yields to RAF so
       // the DOM paints the label before the next synchronous
       // manifold op starts. Using a closure over `status` so the
       // happy / stale / error paths below can share the hide logic.
+      //
+      // Issue #97 Fix 1: the yield now awaits TWO RAF ticks via
+      // `yieldForPaint` — single-RAF wasn't enough to guarantee a paint
+      // before the next manifold op kicked in and held the UI thread.
       const onPhase = status
         ? async (key: string): Promise<void> => {
             const label = translatePhase ? translatePhase(key) : key;
             status.setPhase(label);
-            // Yield to RAF so the DOM paints the new label before
-            // the next `levelSet` / boolean blocks the UI thread.
-            // happy-dom / node test envs without requestAnimationFrame
-            // degrade to a microtask hop — still a yield, just not
-            // a paint.
-            await new Promise<void>((resolve) => {
-              if (typeof requestAnimationFrame === 'function') {
-                requestAnimationFrame(() => resolve());
-              } else {
-                resolve();
-              }
-            });
+            await yieldForPaint();
           }
         : undefined;
+
+      // Issue #97 Fix 1A: show the banner IMMEDIATELY on click, BEFORE
+      // the pipeline enters its first sync block. `setTimeout(r, 32)`
+      // (not `yieldForPaint`) is used here because this fires BEFORE
+      // any onPhase await loop — a 32 ms sleep gives the browser a
+      // guaranteed paint frame regardless of when the next RAF tick
+      // lands. Under NODE_ENV=test or the orchestrator-with-no-status
+      // path this costs 32 ms per `run()`; the happy-dom vitest bundle
+      // tolerates it and no test asserts on precise timing.
+      if (status) {
+        const startingLabel = translatePhase
+          ? translatePhase('starting')
+          : 'starting';
+        status.setPhase(startingLabel);
+        await new Promise<void>((resolve) => {
+          if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+          } else {
+            setTimeout(resolve, 32);
+          }
+        });
+      }
 
       try {
         const result = await generate(
@@ -496,6 +530,17 @@ export function createGenerateOrchestrator(
           };
           fireState();
           if (onGenerateSuccess) onGenerateSuccess();
+          // Issue #97 Fix 1C: keep the progress banner visible until
+          // the scene has actually REPAINTED with the fresh silicone +
+          // printable-parts meshes. `setSilicone` + `setPrintableParts`
+          // resolved above but Three's next render still hasn't
+          // happened — yanking the banner right away leaves the user
+          // staring at the OLD scene for one more frame with no "still
+          // working" cue. Waiting for two RAF ticks flushes the
+          // rAF-driven render loop at least once, so the banner fades
+          // only after the new geometry is on screen. The `finally`
+          // block below is what calls `setPhase(null)`.
+          if (status) await yieldForPaint();
         }
       } catch (err) {
         if (epoch !== getEpoch()) {

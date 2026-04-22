@@ -694,6 +694,58 @@ describe('generateSiliconeShell — open pour channel (issue #94 Fix 1)', () => 
 });
 
 describe('generateSiliconeShell — base slab (Wave D, issue #82)', () => {
+  // Issue #97 Fix 3 (polish dogfood 2026-04-21 round 3) regression: the
+  // pour-channel subtract introduced in PR #95 routes through
+  // `buildPourChannelPrism(siliconeOuter, ...)` which internally calls
+  // `siliconeOuter.rotate(...)` to build the slice frame. If that helper
+  // ever stops treating `siliconeOuter` as CALLER-OWNED (e.g. a refactor
+  // disposes it), the subsequent `buildBaseSlab` call — and in particular
+  // every `addBrim` call that consumes `siliconeOuter` as a carve-out
+  // manifold — would run against a dead WASM handle. The failure mode
+  // would be a non-manifold error OR an unexpectedly empty slab/brim
+  // rather than a clean throw. This test pins the invariant by running
+  // the full pipeline on a cube master (where the pour channel fires
+  // AND the slab builder succeeds) and asserting the basePart is both
+  // (a) a valid manifold and (b) has volume > 0 — meaning siliconeOuter
+  // survived every stage that requires it.
+  test('pour-channel subtract does not consume siliconeOuter — slab still builds', async () => {
+    const toplevel = await initManifold();
+    const master = toplevel.Manifold.cube([4, 4, 4], true);
+    try {
+      const result = await generateSiliconeShell(
+        master,
+        params({
+          siliconeThickness_mm: 5,
+          printShellThickness_mm: 3,
+          baseSlabThickness_mm: 8,
+          baseSlabOverhang_mm: 5,
+        }),
+        new Matrix4(),
+      );
+      try {
+        // The full pipeline ran: silicone + shell (WITH pour channel
+        // subtract) + slice + brims (each consuming siliconeOuter as a
+        // carve-out) + slab. If any stage hit a dead siliconeOuter, one
+        // of the downstream results would throw or come out empty.
+        expect(isManifold(result.silicone)).toBe(true);
+        expect(result.shellPieces.length).toBeGreaterThan(0);
+        for (const piece of result.shellPieces) {
+          expect(isManifold(piece)).toBe(true);
+          expect(piece.volume()).toBeGreaterThan(0);
+        }
+        // Slab survived: basePart.volume() > 0 confirms buildBaseSlab
+        // produced non-empty output. This is the #97 Fix 3 acceptance
+        // criterion.
+        expect(result.basePart.volume()).toBeGreaterThan(0);
+        expect(result.basePart.isEmpty()).toBe(false);
+      } finally {
+        disposeAll(result);
+      }
+    } finally {
+      master.delete();
+    }
+  }, 30_000);
+
   test('basePart: watertight genus-0 + expected Y span + non-zero volume', async () => {
     const toplevel = await initManifold();
     const SIDE = 4;

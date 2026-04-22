@@ -114,10 +114,15 @@ describe('addBrim — sideCount=2 single-cut case', () => {
         // Minimum gain: at least half of the pure outer-flange volume.
         expect(brimmedVol - pieceVol).toBeGreaterThan(outerFlangeVol * 0.5);
         // Upper bound on the volume gain: gross box volume + tiny
-        // kernel slop. Much tighter than the pre-#89 5× allowance
-        // because the box is now narrow.
+        // kernel slop. Issue #97 Fix 4 (polish dogfood round 3) bumped
+        // the bond-overlap multiplier 1.5 → 2.0, so the gross box is
+        // `(2 × printShellThickness + brimWidth) × shellHeight ×
+        // brimThickness`.
+        const BOND_OVERLAP_MULTIPLIER = 2.0;
         const grossBoxVol =
-          (printShellThickness + brimWidth) * shellHeight * brimThickness;
+          (BOND_OVERLAP_MULTIPLIER * printShellThickness + brimWidth) *
+          shellHeight *
+          brimThickness;
         expect(brimmedVol - pieceVol).toBeLessThan(grossBoxVol * 1.1);
         expect(brimmedVol).toBeLessThan(shellVol * 3);
         brimmed.delete();
