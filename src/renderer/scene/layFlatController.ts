@@ -122,7 +122,7 @@ const NORMAL_QUAD_SIZE_MM = 15;
  * cursor ≥ 50 px across the canvas) but comfortably clears precision-
  * trackpad + high-DPI mouse micro-travel.
  */
-const CLICK_DRAG_THRESHOLD_PX = 10;
+const CLICK_DRAG_THRESHOLD_PX = 15;
 
 /**
  * Angle tolerance (cosine) for coplanar flood-fill during hover (issue #67).
@@ -788,41 +788,22 @@ export function createLayFlatController(
   let downY = 0;
 
   /**
-   * Relaxed target check — returns true when the event's target is
-   * (or is descended from) the canvas. Falls back to a geometric
-   * inside-canvas-rect check ONLY when the event's target is a
-   * descendant of the #viewport container (so a user click on an
-   * accent absolutely-positioned overlay — progress banner, future
-   * axes-gizmo DOM widget — still registers as a canvas click), or
-   * when the target has been detached from the DOM entirely. A click
-   * whose target lives elsewhere in the app chrome (sidebar panel,
-   * topbar) is still rejected.
+   * Returns true when the cursor is inside the canvas's bounding
+   * rect. PURE geometric — no DOM-ancestry short-circuit. The
+   * ancestry path rejected valid events whose `ev.target` had
+   * resolved to `<body>` / `<html>` / the viewport container under
+   * pointer-capture redirections on high-DPI Windows Electron,
+   * dropping commits the user visually made on the canvas.
+   *
+   * Geometric is both necessary and sufficient:
+   *   - Canvas click → cursor in canvas rect → accept.
+   *   - Sidebar / topbar click → cursor outside canvas rect → reject.
+   *   - Overlay-over-canvas click (banner, toast) → banner is
+   *     `pointer-events: none`, so the event never reaches us with
+   *     that target; if it did, the cursor is still inside the
+   *     canvas rect and commits cleanly.
    */
   function eventIsOnCanvas(ev: PointerEvent): boolean {
-    const target = ev.target as Element | null;
-    if (!target || typeof target.closest !== 'function') {
-      // Target is null / non-Element — fall through to the geometric
-      // check below so these still work.
-    } else {
-      if (target.closest('canvas') === canvas) return true;
-      // If the target isn't inside our canvas, check whether it lives
-      // inside the shared #viewport container as a STRICT descendant
-      // (not the container itself). Only container descendants
-      // qualify for the geometric rescue; clicks that target the
-      // topbar / sidebar / body / viewport container itself never
-      // commit a face.
-      const viewportEl = canvas.parentElement;
-      if (
-        !viewportEl ||
-        target === viewportEl ||
-        !viewportEl.contains(target)
-      ) {
-        return false;
-      }
-    }
-    // Geometric fallback: if the cursor is inside the canvas's
-    // bounding rect, treat the event as a canvas event even when a
-    // child overlay of the viewport absorbed the DOM target.
     const rect = canvas.getBoundingClientRect();
     return (
       ev.clientX >= rect.left &&
@@ -849,50 +830,164 @@ export function createLayFlatController(
 
   function onPointerDown(ev: PointerEvent): void {
     if (!active) return;
+    debugLog('pointerdown', {
+      clientX: ev.clientX,
+      clientY: ev.clientY,
+      button: ev.button,
+      buttons: ev.buttons,
+      pointerType: ev.pointerType,
+    });
     if (!isPrimaryButton(ev)) {
       // Non-primary button (e.g. right-drag → OrbitControls pan). Keep
       // the armed flag as-is — a parallel primary-button click isn't
       // possible (single pointer), so we simply don't re-arm here.
+      debugLog('pointerdown:non-primary-reject');
       return;
     }
     if (!eventIsOnCanvas(ev)) {
       // Pointer down originated outside our canvas — don't claim it.
+      debugLog('pointerdown:off-canvas-reject');
       return;
     }
     downArmed = true;
     downX = ev.clientX;
     downY = ev.clientY;
+    debugLog('pointerdown:armed');
   }
 
   function onPointerUp(ev: PointerEvent): void {
     if (!active) return;
+    debugLog('pointerup', {
+      downArmed,
+      clientX: ev.clientX,
+      clientY: ev.clientY,
+      button: ev.button,
+      pointerType: ev.pointerType,
+    });
     if (!downArmed) return;
     downArmed = false;
-    // pointerup's `button` reliably reports which button was
-    // released, even though `buttons` may be zero by now. Accept a
-    // bare `button === 0` here (no bitmask fallback needed).
-    if (ev.button !== 0) return;
+    // No re-check of `ev.button`. If we armed on a primary-button
+    // pointerdown, `pointerup` IS the release of that down — there's
+    // no other pointer path that would have set `downArmed`. Pen /
+    // touch releases report `button: -1`; strict `=== 0` silently
+    // dropped them even though they're valid commits.
     if (!eventIsOnCanvas(ev)) {
-      // Up landed off-canvas (user dragged off the viewport). Not a click.
+      debugLog('pointerup:off-canvas-reject');
       return;
     }
     const dx = ev.clientX - downX;
     const dy = ev.clientY - downY;
     if (Math.hypot(dx, dy) > CLICK_DRAG_THRESHOLD_PX) {
-      // Treat as a drag (OrbitControls rotate) — don't commit.
+      debugLog('pointerup:drag-reject', { travel: Math.hypot(dx, dy) });
       return;
     }
 
     const mesh = getMasterMesh();
-    if (!mesh) return;
+    if (!mesh) {
+      debugLog('pointerup:no-master');
+      return;
+    }
 
     // Re-pick at the up position so the commit acts on whatever's under
     // the cursor at the moment of release — not whatever pointermove
     // last saw, which could be one frame behind. Feels tighter.
     const pick = pickFaceUnderPointer(ev, canvas, camera, mesh);
-    if (!pick) return;
+    if (!pick) {
+      debugLog('pointerup:no-face-hit');
+      return;
+    }
 
-    commit(pick, mesh);
+    debugLog('pointerup:commit');
+    tryCommit(pick, mesh, 'pointerup');
+  }
+
+  /**
+   * Chromium-native click handler — a second, independent commit path.
+   *
+   * Why both? The pointerdown/up gate exists to commit clicks that
+   * Chromium's native `click` event suppresses (it drops `click` on
+   * down→up travel > ~5 px). But in practice we've seen Chromium /
+   * Electron / high-DPI / pointer-capture combinations where our
+   * pointerup handler silently doesn't fire at all even though the
+   * user visibly clicked. When that happens the user sees hover
+   * highlight but zero commit feedback and reports "broken".
+   *
+   * The native `click` event is Chromium-owned and runs through a
+   * completely different code path from our pointer listeners — so
+   * if our pointerup handler is being eaten (by pointer capture,
+   * passive-listener downgrade, or an upstream listener's
+   * `stopImmediatePropagation`), click still reaches us.
+   *
+   * Double-commit safety: both paths call `commit()` which invokes
+   * `disable()` mid-way. `disable()` removes all listeners including
+   * this click handler, so a pointerup-then-click sequence can't
+   * double-fire. Click events fire AFTER pointerup (Chromium order),
+   * so in the normal case pointerup commits first, disable() removes
+   * click listener, click never reaches us.
+   */
+  function onClick(ev: MouseEvent): void {
+    if (!active) return;
+    debugLog('click', {
+      clientX: ev.clientX,
+      clientY: ev.clientY,
+      button: ev.button,
+    });
+    if (ev.button !== 0) return;
+    if (!eventIsOnCanvas(ev as unknown as PointerEvent)) {
+      debugLog('click:off-canvas-reject');
+      return;
+    }
+    const mesh = getMasterMesh();
+    if (!mesh) {
+      debugLog('click:no-master');
+      return;
+    }
+    // Fake a PointerEvent shape for the shared picker. `pickFaceUnderPointer`
+    // only reads `clientX/Y` + the `canvas` rect, so a MouseEvent works.
+    const pick = pickFaceUnderPointer(
+      ev as unknown as PointerEvent,
+      canvas,
+      camera,
+      mesh,
+    );
+    if (!pick) {
+      debugLog('click:no-face-hit');
+      return;
+    }
+    debugLog('click:commit');
+    tryCommit(pick, mesh, 'click');
+  }
+
+  /**
+   * Commit wrapper with error logging. Without this, any exception
+   * thrown inside `commit()` (from picker, quaternion, frameToBox3…)
+   * would bubble up to window `error` and leave the user staring at
+   * "I clicked but nothing happened" with no signal in the UI.
+   */
+  function tryCommit(pick: PickResult, mesh: Mesh, source: string): void {
+    try {
+      commit(pick, mesh);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[layFlat] commit via ${source} threw:`, err);
+    }
+  }
+
+  /**
+   * Gated debug logger. Toggle with `window.__DEBUG_FACEPICK = true`
+   * in DevTools to see every pointer event the controller sees, plus
+   * the exact reason any commit was rejected. Zero overhead when off
+   * (single boolean check). Intentionally not removed before merge —
+   * the next face-pick regression needs this to be observable
+   * without another round of code changes.
+   */
+  function debugLog(event: string, data?: Record<string, unknown>): void {
+    const w = window as unknown as { __DEBUG_FACEPICK?: boolean };
+    if (!w.__DEBUG_FACEPICK) return;
+    // eslint-disable-next-line no-console
+    if (data) console.debug(`[layFlat] ${event}`, data);
+    // eslint-disable-next-line no-console
+    else console.debug(`[layFlat] ${event}`);
   }
 
   /**
@@ -1051,6 +1146,11 @@ export function createLayFlatController(
     // real click over the canvas would be ignored because `downArmed`
     // was never reset.
     window.addEventListener('pointerup', onPointerUp);
+    // Chromium-native `click` as a second commit path. See `onClick` for
+    // why both exist. Attached on the canvas itself — click events don't
+    // need the window-level safety net that pointerup does (click only
+    // fires when down+up both happened on the same target).
+    canvas.addEventListener('click', onClick);
     window.addEventListener('keydown', onKeyDown);
     // Invalidate the hover-pointer + seed-tri caches whenever the camera
     // moves — the same CSS-pixel now points at a different triangle.
@@ -1068,6 +1168,7 @@ export function createLayFlatController(
     canvas.removeEventListener('pointerleave', onPointerLeave);
     canvas.removeEventListener('pointerdown', onPointerDown);
     window.removeEventListener('pointerup', onPointerUp);
+    canvas.removeEventListener('click', onClick);
     window.removeEventListener('keydown', onKeyDown);
     controls.removeEventListener('change', onControlsChange);
     hideWidgets();

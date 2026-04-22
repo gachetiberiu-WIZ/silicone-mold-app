@@ -300,9 +300,10 @@ describe('LAY_FLAT_COMMITTED_EVENT — click-vs-drag gate (issue #80 dogfood)', 
    * `click`, which Chromium suppresses whenever the pointer moves more
    * than ~5 CSS px between down and up — any hand-tremor during a click
    * silently dropped the commit. We now listen for pointerdown + pointerup
-   * ourselves and gate the commit on a 10 px travel threshold (bumped
-   * from 6 px in issue #94 dogfood for high-DPI hand-tremor), so we own
-   * the click-vs-drag decision instead of relying on Chromium's heuristic.
+   * ourselves and gate the commit on a 15 px travel threshold (widened
+   * from 10 px after repeat high-DPI + precision-pad regressions), so we
+   * own the click-vs-drag decision instead of relying on Chromium's
+   * heuristic.
    */
   function dispatchDown(canvas: HTMLCanvasElement, x: number, y: number): void {
     const ev = new Event('pointerdown', { bubbles: true });
@@ -328,21 +329,21 @@ describe('LAY_FLAT_COMMITTED_EVENT — click-vs-drag gate (issue #80 dogfood)', 
     expect(controller.isCommitted()).toBe(true);
   });
 
-  test('small (<10 px) travel still commits — matches Chromium click behaviour', () => {
+  test('small (<15 px) travel still commits — matches Chromium click behaviour', () => {
     const { controller, canvas } = harness!;
     controller.enable();
     dispatchDown(canvas, 100, 100);
-    // 3 px diagonal travel — hypot(3, 0) = 3, under the 10 px threshold.
+    // 3 px diagonal travel — hypot(3, 0) = 3, well under the 15 px threshold.
     dispatchUp(canvas, 103, 100);
     expect(controller.isCommitted()).toBe(true);
   });
 
-  test('travel > 10 px (drag) does NOT commit', () => {
+  test('travel > 15 px (drag) does NOT commit', () => {
     const { controller, canvas } = harness!;
     controller.enable();
     dispatchDown(canvas, 100, 100);
-    // 20 px horizontal travel — treated as a rotate drag.
-    dispatchUp(canvas, 120, 100);
+    // 25 px horizontal travel — clearly past the 15 px gate.
+    dispatchUp(canvas, 125, 100);
     expect(controller.isCommitted()).toBe(false);
     // Controller stays in picking mode on a drag (only commits auto-exit).
     expect(controller.isActive()).toBe(true);
@@ -363,13 +364,31 @@ describe('LAY_FLAT_COMMITTED_EVENT — click-vs-drag gate (issue #80 dogfood)', 
   test('pointerdown off-canvas is ignored', () => {
     const { controller, canvas } = harness!;
     controller.enable();
-    // Fabricate a pointerdown with a non-canvas target by dispatching on
-    // body. The controller's `ev.target !== canvas` guard must reject it.
+    // Fabricate a pointerdown that never reaches the canvas's listener
+    // by dispatching on body (bubble phase goes child→parent, so body →
+    // html → document → window; the canvas's own listener is never
+    // invoked). `downArmed` therefore stays false and the subsequent
+    // pointerup hits the `!downArmed` short-circuit.
     const down = new Event('pointerdown', { bubbles: true });
     Object.assign(down, { clientX: 100, clientY: 100, button: 0 });
     document.body.dispatchEvent(down);
     dispatchUp(canvas, 100, 100);
     expect(controller.isCommitted()).toBe(false);
+  });
+
+  test('native click event commits independently of pointerup gate', () => {
+    // The controller attaches a `click` listener as a second commit path.
+    // This test dispatches ONLY a `click` event (no pointer* events) and
+    // asserts it commits — so the path is independent of the pointerdown/
+    // up state machine. Rationale: a Chromium / Electron / pointer-capture
+    // combination can silently drop our pointerup handler; the click
+    // event is a belt-and-braces second route.
+    const { controller, canvas } = harness!;
+    controller.enable();
+    const click = new Event('click', { bubbles: true });
+    Object.assign(click, { clientX: 100, clientY: 100, button: 0 });
+    canvas.dispatchEvent(click);
+    expect(controller.isCommitted()).toBe(true);
   });
 });
 
