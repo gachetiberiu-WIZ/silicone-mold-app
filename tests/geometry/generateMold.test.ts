@@ -274,7 +274,14 @@ describe('generateSiliconeShell — mini-figurine fixture', () => {
             // to the pre-conformal value), catching any regression
             // that undoes the caching or re-introduces the per-brim
             // shell-rotate.
-            expect(elapsed).toBeLessThan(12_000);
+            // Round-12 top-tube + tongue-and-groove seal (2026-04-22)
+            // adds ~1-2 s on ubuntu CI: one extra trim + silhouette +
+            // offset + extrude for the vertical top tube, and N shared-
+            // cut passes each building a step-block + trim pair for
+            // the per-piece tongue/groove. Observed 13.1 s peak on
+            // post-merge main; bump 12 s → 15 s for comfortable
+            // headroom.
+            expect(elapsed).toBeLessThan(15_000);
           }
 
           expect(isManifold(result.silicone)).toBe(true);
