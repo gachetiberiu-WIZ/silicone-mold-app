@@ -68,6 +68,7 @@
 
 import type { CrossSection, Manifold, ManifoldToplevel, SimplePolygon, Vec3 } from 'manifold-3d';
 
+import { buildCutPlaneSlice, disposeCutPlaneSlice, type CutPlaneSlice } from './brim';
 import { SIDE_CUT_ANGLES } from './sideAngles';
 
 /**
@@ -245,6 +246,40 @@ export function radialUnit(angleRad: number): Vec3 {
 // intrude on the cavity) or the brim's outer edge (bad — would be a
 // cantilevered key with nothing behind it on one side).
 //
+// Profile-follow fix (2026-04-22 PM dogfood, PR #116 follow-up)
+// -------------------------------------------------------------
+//
+// PRIOR STATE: `X_apex` was set from `shellOuterHalfExtent` — the max
+// radial distance of the full shell's world-space AABB from `xzCenter`.
+// On a rotationally-symmetric shell this is approximately the brim's
+// radial midline at every cut angle. But on a TAPERED master (mini
+// figurine, cup, cone) the shell's outer radius AT THE CUT ANGLE is
+// smaller than the AABB max at higher Y bands — so the V's apex landed
+// OUTSIDE the actual brim at those Y levels, leaving a disconnected
+// tongue floating in space beyond the brim's real edge.
+//
+// FIX: clip the V-prism to the ACTUAL cut-face 2D region at each cut
+// plane. Per cut:
+//
+//   1. Re-use the pre-computed (or locally-computed) `CutPlaneSlice`
+//      from `brim.ts` → `csFilled` is the 2D shell silhouette at that
+//      cut plane.
+//   2. Build `csOutward = csFilled.offset(brimWidth_mm, 'Round')` —
+//      same expand as the brim builder does — and clip to the shell's
+//      Y range (so the slab doesn't extend above/below the shell top/
+//      bottom). This covers the union of the shell silhouette and the
+//      brim flange at that cut.
+//   3. Extrude `csOutward` symmetrically along local +Z_cs by
+//      `2 × apexDepth`, translate to Z_cs ∈ [−apexDepth, +apexDepth].
+//      Rotate/translate back to world → `cutFaceSlab`.
+//   4. `vClipped = vPrism.intersect(cutFaceSlab)` — the V restricted
+//      to wherever the cut face actually exists at every Y.
+//
+// The V follows the shell's taper: on a shell that narrows at the top,
+// the V at high Y gets trimmed on the radial-outward side so it never
+// pokes past the brim's edge profile. On a perfectly cylindrical
+// shell the intersect is a no-op (the slab fully contains the V).
+//
 // Per-piece boolean assignment:
 //
 //   - piece N (`grooveIdx = c`, on +n_CCW side via its a_0 lower-CCW
@@ -416,6 +451,176 @@ function buildVChevronAtCut(
 }
 
 /**
+ * Clipper2 circular-segment count for round joins on the 2D offset.
+ * Matches `brim.ts` so the cut-face slab's outer silhouette is
+ * bit-identical to the brim builder's — guarantees the seal clips to
+ * exactly the brim's edge at every Y.
+ */
+const OFFSET_CIRCULAR_SEGMENTS = 32;
+
+/**
+ * Build a world-frame Manifold representing the "cut-face slab" at
+ * `angleDeg` through `xzCenter`: the 2D cross-section of the shell-
+ * with-brim at that cut plane, extruded by `± slabHalfDepth` along the
+ * cut-plane normal. Used to clip the V-chevron prism so the seal
+ * follows the shell's edge profile at every Y (see the "Profile-follow
+ * fix" note at the top of the V-chevron section).
+ *
+ * Construction (mirrors the brim builder's slice pipeline):
+ *
+ *   1. `csFilled` — the 2D filled shell silhouette at the cut plane.
+ *      Either read from `cachedSlice` or computed via `buildCutPlaneSlice`.
+ *   2. `csOutward = csFilled.offset(brimWidth_mm, 'Round')` — inflates
+ *      outward to cover the brim flange. Same offset the brim builder
+ *      uses, so the slab's outer silhouette matches the brim's outer
+ *      silhouette bit-for-bit.
+ *   3. Clip `csOutward` to Y ∈ [shellMinY, shellMaxY] so the slab
+ *      doesn't overshoot the shell's vertical extent (the 2D offset is
+ *      isotropic, so it grows the profile by brimWidth in +Y and −Y
+ *      too — clipped off here, same as `brim.ts` step 3b).
+ *   4. Extrude the clipped cross-section along +Z_cs by `2 × slabHalfDepth`.
+ *   5. Translate along Z_cs by `−slabHalfDepth` so the slab is
+ *      symmetric around Z_cs = 0.
+ *   6. Rotate by `−angleDeg` about +Y to map the cut-local frame to
+ *      world (inverse of the forward cut rotation).
+ *   7. Translate by `(xzCenter.x, 0, xzCenter.z)` to land on the cut
+ *      axis.
+ *
+ * Returns a FRESH Manifold, or `null` when the cut-plane slice is
+ * degenerate (empty shell slice, or the cache entry is `null`). When
+ * `null` is returned, the caller should skip the seal at this cut
+ * plane — the same behaviour `addBrim` exhibits for degenerate cache
+ * entries.
+ *
+ * Ownership: the returned Manifold is caller-owned. When
+ * `cachedSlice` is provided, the cached CrossSections are NOT
+ * disposed. When the slice is computed locally (cachedSlice ===
+ * undefined), the local slice is disposed before returning.
+ */
+function buildCutFaceSlabAtCut(
+  toplevel: ManifoldToplevel,
+  angleDeg: number,
+  xzCenter: XzCenter,
+  brimWidth_mm: number,
+  shellMinY: number,
+  shellMaxY: number,
+  slabHalfDepth: number,
+  cachedSlice: CutPlaneSlice | null | undefined,
+  shellManifold: Manifold,
+): Manifold | null {
+  const shellYSpan = shellMaxY - shellMinY;
+  if (!(shellYSpan > 0) || !(brimWidth_mm > 0) || !(slabHalfDepth > 0)) {
+    return null;
+  }
+
+  if (cachedSlice === null) {
+    // Caller told us this cut plane is degenerate.
+    return null;
+  }
+  let localSlice: CutPlaneSlice | null = null;
+  let slice: CutPlaneSlice;
+  if (cachedSlice !== undefined) {
+    slice = cachedSlice;
+  } else {
+    localSlice = buildCutPlaneSlice(toplevel, shellManifold, xzCenter, angleDeg);
+    if (!localSlice) {
+      return null;
+    }
+    slice = localSlice;
+  }
+
+  let csOutwardRaw: CrossSection | undefined;
+  let clipRect: CrossSection | undefined;
+  let clipRectPlaced: CrossSection | undefined;
+  let csOutward: CrossSection | undefined;
+  let prism0: Manifold | undefined;
+  let prismCentred: Manifold | undefined;
+  let prismUnrotated: Manifold | undefined;
+  let prismWorld: Manifold | undefined;
+  try {
+    csOutwardRaw = slice.csFilled.offset(
+      brimWidth_mm,
+      'Round',
+      2,
+      OFFSET_CIRCULAR_SEGMENTS,
+    );
+    if (csOutwardRaw.isEmpty()) {
+      return null;
+    }
+    // Clip to [shellMinY, shellMaxY] in Y_cs. X_cs span is unbounded
+    // by the clip — the slab must cover the full radial extent of the
+    // brim+shell so we keep the 2D X range generous.
+    const filledBounds = slice.filledBounds;
+    const clipHalfX =
+      Math.max(
+        Math.abs(filledBounds.min[0]!),
+        Math.abs(filledBounds.max[0]!),
+      ) +
+      brimWidth_mm +
+      10;
+    const clipWidthX = 2 * clipHalfX;
+    clipRect = toplevel.CrossSection.square(
+      [clipWidthX, shellYSpan],
+      /* center */ true,
+    );
+    clipRectPlaced = clipRect.translate([0, (shellMinY + shellMaxY) / 2]);
+    csOutward = csOutwardRaw.intersect(clipRectPlaced);
+    if (csOutward.isEmpty()) {
+      return null;
+    }
+    // Extrude by 2×slabHalfDepth along local +Z, then translate
+    // along Z by −slabHalfDepth so the slab is symmetric around
+    // Z_cs = 0. The slab's 2D footprint is in (X_cs, Y_cs) — which
+    // matches the brim builder's local frame.
+    prism0 = csOutward.extrude(2 * slabHalfDepth);
+    // After extrude: X ∈ outward-offset profile in X_cs,
+    //               Y ∈ csOutward's Y range (clipped to shell Y),
+    //               Z ∈ [0, 2 × slabHalfDepth].
+    // We want the slab centred on Z = 0 in world AFTER rotation.
+    // In cut-local, that means Z_cs ∈ [−slabHalfDepth, +slabHalfDepth].
+    // But note: the CrossSection's (2D-X, 2D-Y) are (X_cs, Y_cs),
+    // and extrude is along +Z (= Z_cs). So translate along +Z by
+    // −slabHalfDepth to centre on Z_cs = 0.
+    prismCentred = prism0.translate([0, 0, -slabHalfDepth]);
+    // Inverse forward-rotation: rotate by −angleDeg about +Y so the
+    // cut-local (X_cs, Y_cs, Z_cs) frame maps to world.
+    prismUnrotated = prismCentred.rotate([0, -angleDeg, 0]);
+    prismWorld = prismUnrotated.translate([xzCenter.x, 0, xzCenter.z]);
+    const out = prismWorld;
+    prismWorld = undefined;
+    return out;
+  } finally {
+    if (csOutwardRaw) {
+      try { csOutwardRaw.delete(); } catch { /* already dead */ }
+    }
+    if (clipRect) {
+      try { clipRect.delete(); } catch { /* already dead */ }
+    }
+    if (clipRectPlaced) {
+      try { clipRectPlaced.delete(); } catch { /* already dead */ }
+    }
+    if (csOutward) {
+      try { csOutward.delete(); } catch { /* already dead */ }
+    }
+    if (prism0) {
+      try { prism0.delete(); } catch { /* already dead */ }
+    }
+    if (prismCentred) {
+      try { prismCentred.delete(); } catch { /* already dead */ }
+    }
+    if (prismUnrotated) {
+      try { prismUnrotated.delete(); } catch { /* already dead */ }
+    }
+    if (prismWorld) {
+      try { prismWorld.delete(); } catch { /* already dead */ }
+    }
+    if (localSlice) {
+      disposeCutPlaneSlice(localSlice);
+    }
+  }
+}
+
+/**
  * Y-axis bounds of the shell (pre-slice) used by the seal builder. The
  * V-chevron prism's vertical extent is exactly this range — the V runs
  * the FULL shell height from bottom to top.
@@ -450,6 +655,35 @@ export interface ApplyVChevronSealArgs {
    * box (see `generateMold.ts`).
    */
   shellOuterRadius_mm: number;
+  /**
+   * Brim radial width (mm). Used to build the cut-face 2D clipping slab
+   * — `csOutward = csFilled.offset(brimWidth_mm)` matches the brim
+   * builder's outer silhouette so the V-prism can be clipped to the
+   * actual (brim + shell) cut-face footprint at every Y. Must match the
+   * `brimWidth_mm` passed to `addBrim` for the same pieces.
+   */
+  brimWidth_mm: number;
+  /**
+   * CALLER-OWNED full (pre-slice) print shell Manifold. Used as the
+   * fallback source when `cutPlaneSlices` doesn't have a pre-computed
+   * entry for a cut angle (the seal builder re-slices the shell in that
+   * case, the same way `addBrim` falls back). `applyTongueAndGrooveSeals`
+   * does NOT `.delete()` this Manifold. Pass the same handle the caller
+   * holds for `addBrim`.
+   */
+  shellManifold: Manifold;
+  /**
+   * Optional cache of pre-computed cut-plane cross-sections, same shape
+   * as `AddBrimArgs.cutPlaneSlices`. When present, the seal builder
+   * REUSES `csFilled` from the cache for each cut's slab, skipping the
+   * re-slice + hole-fill. Typical caller pattern: share the cache with
+   * the brim pass (build once per unique cut angle, feed both calls).
+   *
+   * CALLER-OWNED — entries are not disposed by the seal builder. A
+   * `null` entry means "degenerate — skip seal at this cut plane"
+   * (matches the cache semantics used by `addBrim`).
+   */
+  cutPlaneSlices?: ReadonlyMap<number, CutPlaneSlice | null>;
 }
 
 /**
@@ -483,6 +717,9 @@ export function applyTongueAndGrooveSeals(
     angles,
     shellY,
     shellOuterRadius_mm,
+    brimWidth_mm,
+    shellManifold,
+    cutPlaneSlices,
   } = args;
 
   if (pieces.length !== sideCount) {
@@ -527,6 +764,15 @@ export function applyTongueAndGrooveSeals(
     try { old.delete(); } catch { /* already dead */ }
   };
 
+  // Slab half-depth: the cut-face 2D region is extruded by ±slabHalfDepth
+  // along the cut-plane normal before intersecting the V-prism. We pick
+  // the larger of grooveApexDepth (the deepest the V extends into +Z_cs)
+  // plus a small slack so co-planar clips at Z_cs = +apexDepth don't get
+  // nicked by kernel epsilon. The V-prism lives in Z_cs ∈ [0, apexDepth];
+  // a symmetric slab [−slabHalfDepth, +slabHalfDepth] with
+  // slabHalfDepth = grooveApexDepth + 1 mm fully contains the prism.
+  const slabHalfDepth = grooveApexDepth + 1;
+
   let done = false;
   try {
     for (let c = 0; c < cutCount; c++) {
@@ -534,59 +780,108 @@ export function applyTongueAndGrooveSeals(
       const grooveIdx = c; // piece on +n_CCW(a_c) side
       const tongueIdx = (c - 1 + sideCount) % sideCount; // piece on −n side
 
-      // Groove: subtract the inflated prism from piece on +n_CCW side.
-      const groovePrism = buildVChevronAtCut(
+      // Build the cut-face clipping slab ONCE per cut plane. Reused by
+      // both the groove subtract and the tongue union so we pay the
+      // slice + offset + extrude cost only once per cut, even on
+      // sideCount=3/4 where each plane has both a groove and a tongue
+      // piece.
+      const cachedSlice = cutPlaneSlices?.get(angleDeg);
+      const cutFaceSlab = buildCutFaceSlabAtCut(
         toplevel,
         angleDeg,
         xzCenter,
-        shellOuterRadius_mm,
-        grooveHalfWidth,
-        grooveApexDepth,
+        brimWidth_mm,
         shellY.minY,
         shellY.maxY,
+        slabHalfDepth,
+        cachedSlice,
+        shellManifold,
       );
-      try {
-        const grooved = toplevel.Manifold.difference([
-          result[grooveIdx] as Manifold,
-          groovePrism,
-        ]);
-        try {
-          swapSlot(grooveIdx, grooved);
-        } catch (err) {
-          try { grooved.delete(); } catch { /* already dead */ }
-          throw err;
-        }
-      } finally {
-        groovePrism.delete();
+      if (cutFaceSlab === null) {
+        // Degenerate slice (empty shell at this cut plane, or cache
+        // entry explicitly `null`). Skip the seal for this cut — the
+        // piece stays unmodified, same behaviour as `addBrim` on a
+        // degenerate slice.
+        continue;
       }
 
-      // Tongue: union the shrunk prism onto piece on −n_CCW side. The
-      // prism's apex sticks into +n_CCW territory (which, for the
-      // mating piece, is foreign territory — exactly where we want
-      // the tongue to extend).
-      const tonguePrism = buildVChevronAtCut(
-        toplevel,
-        angleDeg,
-        xzCenter,
-        shellOuterRadius_mm,
-        tongueHalfWidth,
-        tongueApexDepth,
-        shellY.minY,
-        shellY.maxY,
-      );
       try {
-        const tongued = toplevel.Manifold.union(
-          result[tongueIdx] as Manifold,
-          tonguePrism,
+        // Groove: subtract the inflated prism (clipped to the cut
+        // face) from piece on +n_CCW side.
+        const grooveRaw = buildVChevronAtCut(
+          toplevel,
+          angleDeg,
+          xzCenter,
+          shellOuterRadius_mm,
+          grooveHalfWidth,
+          grooveApexDepth,
+          shellY.minY,
+          shellY.maxY,
         );
+        let groovePrism: Manifold;
         try {
-          swapSlot(tongueIdx, tongued);
-        } catch (err) {
-          try { tongued.delete(); } catch { /* already dead */ }
-          throw err;
+          // Clip the V-prism to the cut-face slab → follows the edge
+          // profile at every Y (no floating tongue past the brim's
+          // narrow top on a tapered shell).
+          groovePrism = toplevel.Manifold.intersection([grooveRaw, cutFaceSlab]);
+        } finally {
+          grooveRaw.delete();
+        }
+        try {
+          if (!groovePrism.isEmpty()) {
+            const grooved = toplevel.Manifold.difference([
+              result[grooveIdx] as Manifold,
+              groovePrism,
+            ]);
+            try {
+              swapSlot(grooveIdx, grooved);
+            } catch (err) {
+              try { grooved.delete(); } catch { /* already dead */ }
+              throw err;
+            }
+          }
+        } finally {
+          groovePrism.delete();
+        }
+
+        // Tongue: union the shrunk prism (clipped to the cut face)
+        // onto piece on −n_CCW side. The prism's apex sticks into
+        // +n_CCW territory (which, for the mating piece, is foreign
+        // territory — exactly where we want the tongue to extend).
+        const tongueRaw = buildVChevronAtCut(
+          toplevel,
+          angleDeg,
+          xzCenter,
+          shellOuterRadius_mm,
+          tongueHalfWidth,
+          tongueApexDepth,
+          shellY.minY,
+          shellY.maxY,
+        );
+        let tonguePrism: Manifold;
+        try {
+          tonguePrism = toplevel.Manifold.intersection([tongueRaw, cutFaceSlab]);
+        } finally {
+          tongueRaw.delete();
+        }
+        try {
+          if (!tonguePrism.isEmpty()) {
+            const tongued = toplevel.Manifold.union(
+              result[tongueIdx] as Manifold,
+              tonguePrism,
+            );
+            try {
+              swapSlot(tongueIdx, tongued);
+            } catch (err) {
+              try { tongued.delete(); } catch { /* already dead */ }
+              throw err;
+            }
+          }
+        } finally {
+          tonguePrism.delete();
         }
       } finally {
-        tonguePrism.delete();
+        cutFaceSlab.delete();
       }
     }
     done = true;
