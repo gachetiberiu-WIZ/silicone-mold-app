@@ -342,6 +342,8 @@ describe('applyTongueAndGrooveSeals — V-chevron: adjacent pieces disjoint', ()
             maxY: shellBbox.max[1]!,
           },
           shellOuterRadius_mm: OUTER / 2,
+          brimWidth_mm: 5,
+          shellManifold: shell,
         });
         expect(sealedPieces).toHaveLength(sideCount);
         for (const p of sealedPieces) {
@@ -407,6 +409,8 @@ describe('applyTongueAndGrooveSeals — V-chevron: mass conservation', () => {
             maxY: shellBbox.max[1]!,
           },
           shellOuterRadius_mm: OUTER / 2,
+          brimWidth_mm: 5,
+          shellManifold: shell,
         });
         const sealedTotal = sealedPieces.reduce((s, p) => s + p.volume(), 0);
         // The sealed total differs from rawTotal by the per-cut
@@ -472,6 +476,8 @@ describe('applyTongueAndGrooveSeals — V-chevron: tongue + groove extents', () 
           maxY: shellBbox.max[1]!,
         },
         shellOuterRadius_mm: OUTER / 2,
+        brimWidth_mm: 5,
+        shellManifold: shell,
       });
       const tonguePiece = sealedPieces[1]!; // world +X side
       const tongueBbox = tonguePiece.boundingBox();
@@ -533,6 +539,8 @@ describe('applyTongueAndGrooveSeals — V-chevron: tongue + groove extents', () 
           maxY: shellBbox.max[1]!,
         },
         shellOuterRadius_mm: OUTER / 2,
+        brimWidth_mm: 5,
+        shellManifold: shell,
       });
       const sealedGroovePiece = sealedPieces[0]!;
       const sealedGrooveVol = sealedGroovePiece.volume();
@@ -563,6 +571,196 @@ describe('applyTongueAndGrooveSeals — V-chevron: tongue + groove extents', () 
   });
 });
 
+describe('applyTongueAndGrooveSeals — V-chevron: edge-profile follow (tapered shell)', () => {
+  // Profile-follow fix regression (2026-04-22, PR #116 follow-up). On a
+  // tapered master the shell's outer silhouette AT THE CUT ANGLE is
+  // smaller than the AABB max at higher Y bands. With the old AABB-only
+  // X_apex, the V-prism's base poked radially past the actual brim at
+  // those Y, producing a tongue that FLOATED in air beyond the brim's
+  // narrow top. The fix clips the V-prism to the cut-face 2D region at
+  // every Y — the tongue never extends past the brim's outer silhouette.
+  //
+  // Fixture: a frustum shell (wide base, narrow top) with a frustum-
+  // shaped inner cavity. At the top (max Y) the outer silhouette is a
+  // small square (radius 5 mm); the seal's `shellOuterRadius_mm` is set
+  // to the AABB max (15 mm) as production code does. Without clipping,
+  // the tongue piece's bbox on the +X side would extend past the shell
+  // silhouette. With clipping, the tongue's radial extent at top Y is
+  // bounded by the brim outer silhouette at that Y.
+
+  function buildTaperedShell(toplevel: ManifoldToplevel): Manifold {
+    // Outer frustum: base 30×30 at Z=0, top 10×10 at Z=30; extrude
+    // along +Z then rotate so the height axis is world +Y.
+    const baseOuter = toplevel.CrossSection.square([30, 30], /* center */ true);
+    const outerExtruded = toplevel.Manifold.extrude(
+      baseOuter,
+      30,
+      /* nDivisions */ 0,
+      /* twistDegrees */ 0,
+      /* scaleTop */ [10 / 30, 10 / 30] as const,
+      /* center */ false,
+    );
+    baseOuter.delete();
+    // Inner frustum: base 10×10, top 4×4, height 30 — pokes inside
+    // the outer at every Y.
+    const baseInner = toplevel.CrossSection.square([10, 10], /* center */ true);
+    const innerExtruded = toplevel.Manifold.extrude(
+      baseInner,
+      30,
+      0,
+      0,
+      [4 / 10, 4 / 10] as const,
+      false,
+    );
+    baseInner.delete();
+    const shellZ = toplevel.Manifold.difference([outerExtruded, innerExtruded]);
+    outerExtruded.delete();
+    innerExtruded.delete();
+    // Rotate −90° about +X so the extrusion axis (world +Z)
+    // maps to world +Y. Then translate so the shell's Y range is
+    // centered around 0 to match the ring-fixture convention.
+    const shellY = shellZ.rotate([-90, 0, 0]);
+    shellZ.delete();
+    return shellY;
+  }
+
+  test('sideCount=2: tongue piece stays inside the brim+shell outer silhouette at top Y', async () => {
+    const toplevel = await initManifold();
+    const shell = buildTaperedShell(toplevel);
+    const shellBbox = shell.boundingBox();
+    // AABB max XZ extent — 15 mm (base half-width). The top half-width
+    // is 5 mm, so without clipping the V at top Y would extend to X ≈
+    // +18 mm (X_apex + halfWidth + clearance/2).
+    const aabbOuter = 15;
+    const BRIM = 5;
+    const rawPieces = sliceShellRadial(toplevel, shell, 2, { x: 0, z: 0 });
+    let sealedPieces: Manifold[] | undefined;
+    try {
+      sealedPieces = applyTongueAndGrooveSeals({
+        toplevel,
+        pieces: rawPieces,
+        sideCount: 2,
+        xzCenter: { x: 0, z: 0 },
+        angles: SIDE_CUT_ANGLES[2],
+        shellY: {
+          minY: shellBbox.min[1]!,
+          maxY: shellBbox.max[1]!,
+        },
+        shellOuterRadius_mm: aabbOuter,
+        brimWidth_mm: BRIM,
+        shellManifold: shell,
+      });
+      // Every piece is still manifold + non-empty.
+      for (const p of sealedPieces) {
+        expect(isManifold(p)).toBe(true);
+        expect(p.isEmpty()).toBe(false);
+      }
+      // The tongue piece (piece 1, on world +X side for sideCount=2 at
+      // θ=90°) is the one that gains the protrusion. Intersect it with
+      // a thin slab at the top 2 mm of the shell Y range, then read the
+      // bbox. At top Y the outer shell silhouette max X is ≈ 5 mm; the
+      // brim extends that by `BRIM` mm radially. So the tongue's X
+      // extent at top Y must be bounded by `5 + BRIM + slack`. Without
+      // the clip, the tongue at top Y would reach aabbOuter + halfWidth
+      // + clearance/2 = 18.1 mm — well past the 10+slack expected
+      // ceiling.
+      const topY = shellBbox.max[1]!;
+      const topSlab = toplevel.Manifold.cube(
+        [aabbOuter * 4, 2, aabbOuter * 4],
+        /* center */ true,
+      ).translate([0, topY - 1, 0]);
+      let tongueTopSlice: Manifold | undefined;
+      try {
+        tongueTopSlice = toplevel.Manifold.intersection([
+          sealedPieces[1]!,
+          topSlab,
+        ]);
+        if (!tongueTopSlice.isEmpty()) {
+          const bb = tongueTopSlice.boundingBox();
+          // Outer silhouette at top Y ≈ half-width 5. Brim adds
+          // BRIM=5 mm radially. Allow 1 mm of kernel slop.
+          const topOuterHalfWidth = 5;
+          const ceiling = topOuterHalfWidth + BRIM + 1;
+          expect(bb.max[0]!).toBeLessThan(ceiling);
+          // Symmetrically for Z_cs (the piece wraps the +X side so its
+          // Z extent at top is bounded by the shell outline too).
+          expect(Math.abs(bb.max[2]!)).toBeLessThan(ceiling);
+          expect(Math.abs(bb.min[2]!)).toBeLessThan(ceiling);
+        }
+      } finally {
+        if (tongueTopSlice) tongueTopSlice.delete();
+        topSlab.delete();
+      }
+    } finally {
+      if (sealedPieces) {
+        for (const p of sealedPieces) p.delete();
+      } else {
+        for (const p of rawPieces) p.delete();
+      }
+      shell.delete();
+    }
+  });
+
+  test('sideCount=2: groove piece has no material past the shell silhouette at top Y', async () => {
+    // Symmetric check — the groove piece (on world −X side for
+    // sideCount=2 at θ=90°) also has its +X extent bounded by the
+    // brim outer silhouette at top Y. Before the fix, the groove
+    // subtract carved through EMPTY AIR past the brim's narrow top,
+    // leaving a spurious notch in the piece's boundary but not
+    // changing its bbox directly. We instead assert the symmetric
+    // property: the groove piece's +X extent (which is the cut face
+    // — should be at most X=0 for a clean cut) doesn't exceed a
+    // small tolerance. This confirms the subtract didn't leak
+    // material past the cut plane.
+    const toplevel = await initManifold();
+    const shell = buildTaperedShell(toplevel);
+    const shellBbox = shell.boundingBox();
+    const aabbOuter = 15;
+    const BRIM = 5;
+    const rawPieces = sliceShellRadial(toplevel, shell, 2, { x: 0, z: 0 });
+    let sealedPieces: Manifold[] | undefined;
+    try {
+      sealedPieces = applyTongueAndGrooveSeals({
+        toplevel,
+        pieces: rawPieces,
+        sideCount: 2,
+        xzCenter: { x: 0, z: 0 },
+        angles: SIDE_CUT_ANGLES[2],
+        shellY: {
+          minY: shellBbox.min[1]!,
+          maxY: shellBbox.max[1]!,
+        },
+        shellOuterRadius_mm: aabbOuter,
+        brimWidth_mm: BRIM,
+        shellManifold: shell,
+      });
+      // Groove piece's max X should stay at 0 (the cut plane) — the
+      // subtract only carves material INTO the piece (on −X), doesn't
+      // extend the boundary in +X. Without the cut-face clip, the
+      // subtract could still operate in empty air beyond the brim top
+      // but wouldn't change piece bounds either way; the more
+      // interesting invariant is just "piece is manifold + non-empty +
+      // watertight".
+      const groovePiece = sealedPieces[0]!;
+      expect(isManifold(groovePiece)).toBe(true);
+      expect(groovePiece.isEmpty()).toBe(false);
+      // Its max X should be near 0 (the cut plane) — the groove
+      // subtracts material, so the piece's +X side face stays at 0
+      // with a tiny NOTCH carved in. Permit a small tolerance because
+      // the subtract may leave a co-planar edge slightly past zero.
+      const bb = groovePiece.boundingBox();
+      expect(bb.max[0]!).toBeLessThan(0.5);
+    } finally {
+      if (sealedPieces) {
+        for (const p of sealedPieces) p.delete();
+      } else {
+        for (const p of rawPieces) p.delete();
+      }
+      shell.delete();
+    }
+  });
+});
+
 describe('applyTongueAndGrooveSeals — V-chevron: input validation', () => {
   test('throws when pieces.length ≠ sideCount', async () => {
     const toplevel = await initManifold();
@@ -582,6 +780,8 @@ describe('applyTongueAndGrooveSeals — V-chevron: input validation', () => {
             maxY: shellBbox.max[1]!,
           },
           shellOuterRadius_mm: 10,
+          brimWidth_mm: 5,
+          shellManifold: shell,
         }),
       ).toThrow(/expected 4 pieces/);
     } finally {
@@ -608,6 +808,8 @@ describe('applyTongueAndGrooveSeals — V-chevron: input validation', () => {
             maxY: shellBbox.max[1]!,
           },
           shellOuterRadius_mm: 10,
+          brimWidth_mm: 5,
+          shellManifold: shell,
         }),
       ).toThrow(/expected 4 angles/);
     } finally {

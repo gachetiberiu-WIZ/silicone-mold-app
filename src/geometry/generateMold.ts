@@ -1217,6 +1217,14 @@ export async function generateSiliconeShell(
           // slice + hole-fill cost at sideCount 3/4 where the dogfood
           // perf budget was the tightest.
           const cutPlaneSlices = new Map<number, CutPlaneSlice | null>();
+          let cutPlaneSlicesDisposed = false;
+          const disposeCutPlaneSlices = (): void => {
+            if (cutPlaneSlicesDisposed) return;
+            cutPlaneSlicesDisposed = true;
+            for (const slice of cutPlaneSlices.values()) {
+              disposeCutPlaneSlice(slice);
+            }
+          };
           try {
             for (const angleDeg of effectiveCutAngles_) {
               cutPlaneSlices.set(
@@ -1230,9 +1238,7 @@ export async function generateSiliconeShell(
               );
             }
           } catch (err) {
-            for (const slice of cutPlaneSlices.values()) {
-              disposeCutPlaneSlice(slice);
-            }
+            disposeCutPlaneSlices();
             throw err;
           }
 
@@ -1290,36 +1296,35 @@ export async function generateSiliconeShell(
                 try { rp.delete(); } catch { /* already dead */ }
               }
             }
+            disposeCutPlaneSlices();
             throw err;
-          } finally {
-            // Release every cached slice — owned by this block,
-            // never seen by addBrim's cleanup path.
-            for (const slice of cutPlaneSlices.values()) {
-              disposeCutPlaneSlice(slice);
-            }
           }
-          // Brim loop done — safe to release the full shell now.
-          printShellFull.delete();
-          printShellFull = undefined;
+          // NOTE: do NOT release `cutPlaneSlices` or `printShellFull`
+          // yet — both are reused by the seal pass (Step 5.5) below.
+          // The seal builder also slices the shell at each cut plane
+          // to derive the edge-profile clipping slab; sharing the
+          // cache avoids re-running the rotate + slice + hole-fill.
           const tBrim = performance.now();
 
-          // Step 5.5 (issue piece-seal round 2, 2026-04-22 dogfood):
+          // Step 5.5 (issue piece-seal round 2, 2026-04-22 dogfood;
+          // profile-follow fix, PR #116 follow-up):
           // apply V-chevron tongue-and-groove seals to every shared cut
           // plane. Each cut face gains a triangular-prism interlock
           // running the FULL shell height: piece on +n_CCW side gets a
           // groove cavity; mating piece on −n side gets a tongue that
           // slides into that cavity with SEAL_CLEARANCE_MM of air gap.
           // The chevron is centred radially on the SHELL OUTER silhouette
-          // so it straddles the shell-wall / brim junction. See
-          // `./shellSlicer.ts` for the full geometric spec.
+          // so it straddles the shell-wall / brim junction, and CLIPPED
+          // to the cut-face 2D region so the tongue follows the brim's
+          // edge profile on tapered masters (no floating-in-air apex
+          // beyond the brim's narrow top). See `./shellSlicer.ts` for
+          // the full geometric spec.
           //
           // Shell outer radius for X_apex placement: the max XZ extent
           // from xzCenter. The shell is roughly axisymmetric around the
           // master centerline, so max XZ extent ≈ outer radius at each
-          // cut angle. Good enough for seal placement; the V's 6 mm
-          // span + clearance tolerates a few mm of wobble in the
-          // radial alignment without the apex poking past the shell
-          // wall's inner surface or the brim's outer edge.
+          // cut angle. The clip-to-cut-face step handles the per-Y
+          // taper on non-axisymmetric masters.
           const shellOuterHalfExtent = Math.max(
             shellBboxWorld.max.x - xzCenter.x,
             xzCenter.x - shellBboxWorld.min.x,
@@ -1333,18 +1338,31 @@ export async function generateSiliconeShell(
           // outer catch from double-releasing.
           const preSealPieces = shellPieces;
           shellPieces = undefined;
-          shellPieces = applyTongueAndGrooveSeals({
-            toplevel,
-            pieces: preSealPieces,
-            sideCount: parameters.sideCount,
-            xzCenter,
-            angles: effectiveCutAngles_,
-            shellY: {
-              minY: shellBboxWorld.min.y,
-              maxY: shellBboxWorld.max.y,
-            },
-            shellOuterRadius_mm: shellOuterHalfExtent,
-          });
+          try {
+            shellPieces = applyTongueAndGrooveSeals({
+              toplevel,
+              pieces: preSealPieces,
+              sideCount: parameters.sideCount,
+              xzCenter,
+              angles: effectiveCutAngles_,
+              shellY: {
+                minY: shellBboxWorld.min.y,
+                maxY: shellBboxWorld.max.y,
+              },
+              shellOuterRadius_mm: shellOuterHalfExtent,
+              brimWidth_mm: parameters.brimWidth_mm,
+              shellManifold: printShellFull,
+              cutPlaneSlices,
+            });
+          } finally {
+            // Brim + seal both done — safe to release the full shell
+            // and the shared cut-plane slice cache now.
+            disposeCutPlaneSlices();
+            if (printShellFull) {
+              printShellFull.delete();
+              printShellFull = undefined;
+            }
+          }
           const tSeal = performance.now();
 
           if (onPhase) await onPhase('slab');
