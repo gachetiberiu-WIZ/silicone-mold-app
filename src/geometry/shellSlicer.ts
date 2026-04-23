@@ -283,18 +283,32 @@ export function radialUnit(angleRad: number): Vec3 {
 // Per-piece boolean assignment:
 //
 //   - piece N (`grooveIdx = c`, on +n_CCW side via its a_0 lower-CCW
-//     bound): SUBTRACT the triangular prism → the apex region carves a
-//     GROOVE into piece N.
+//     bound): SUBTRACT a TRIANGULAR prism (Z_cs ∈ [0, +apexDepth]) →
+//     the apex region carves a GROOVE into piece N's cut face.
 //   - mating piece (`tongueIdx = (c − 1 + sideCount) % sideCount`, on
-//     −n_CCW side): UNION a slightly smaller triangular prism → apex
-//     bulges into +Z_cs as a TONGUE that slides into the groove.
+//     −n_CCW side): UNION a PENTAGONAL prism (Z_cs ∈ [−bondDepth,
+//     +apexDepth]) — a rectangular BOND BASE embedded in piece (c−1)'s
+//     body + the triangular apex bulging into +Z_cs as a TONGUE that
+//     slides into the groove.
 //
-// Clearance: the tongue prism is shrunk by `SEAL_CLEARANCE_MM / 2` on
-// both halfWidth and apexDepth (so the tongue is CLEARANCE mm thinner
-// on each of the two sloped sides + CLEARANCE mm shorter at the apex).
-// The groove prism is INFLATED by the same amount. That yields a
-// CLEARANCE mm air gap on every tongue-groove contact surface when
-// assembled — FDM parts slide together without binding.
+// Why the tongue is a pentagon, not a triangle (PR-117 follow-up,
+// 2026-04-23 dogfood): a pure triangular tongue at Z_cs ∈ [0,
+// +apexDepth] sits ENTIRELY on piece c's side of the cut plane, meeting
+// piece (c−1) only along the 2D face at Z_cs = 0. Manifold's union on
+// such face-sharing bodies left the tongue as a disconnected component
+// of the same Manifold — floating in free air beyond the brim in the
+// exploded view, no solid bond. The pentagon's rectangular back
+// (Z_cs ∈ [−bondDepth, 0]) gives real VOLUME overlap with piece (c−1)
+// so the union produces a single connected solid.
+//
+// Clearance: the tongue's triangular apex is shrunk by
+// `SEAL_CLEARANCE_MM / 2` on both halfWidth and apexDepth (so the
+// tongue is CLEARANCE mm thinner on each of the two sloped sides +
+// CLEARANCE mm shorter at the apex). The groove prism is INFLATED by
+// the same amount. That yields a CLEARANCE mm air gap on every
+// tongue-groove contact surface when assembled — FDM parts slide
+// together without binding. The pentagon's rectangular bond base does
+// NOT need clearance (it stays inside piece (c−1)).
 //
 // sideCount=2: angles = [90°, 270°] define the same vertical cut plane
 // (opposite normals). Apply ONE seal at a_0 = 90°: piece 0 = grooveIdx
@@ -330,17 +344,58 @@ export const SEAL_APEX_DEPTH_MM = 3.0;
 export const SEAL_CLEARANCE_MM = 0.2;
 
 /**
- * Build one triangular-prism Manifold in world frame for the cut plane
- * at `angleDeg` through `xzCenter`. The prism's triangular cross-section
- * lives in the (X_cs, Z_cs) plane of the cut-local frame:
+ * Depth (mm) that the tongue prism's RECTANGULAR BASE extends BACKWARDS
+ * into the mating piece's body (−Z_cs territory) to guarantee a solid
+ * volume-level bond between the tongue and piece (c-1).
  *
- *   A = (X_apex − halfWidth, 0)
- *   B = (X_apex + halfWidth, 0)
- *   C = (X_apex, +apexDepth)       (apex toward +n_CCW)
+ * Why this exists (2026-04-23 dogfood, PR-117 follow-up): the previous
+ * tongue was a pure triangular prism occupying Z_cs ∈ [0, +apexDepth].
+ * That prism sat ENTIRELY on piece c's side of the cut plane (+Z_cs),
+ * meeting piece (c-1) only along the 2D face at Z_cs = 0. Manifold's
+ * boolean union on such face-sharing bodies can leave them as
+ * DISCONNECTED components of the same Manifold — the tongue travels
+ * with piece (c-1) in exploded-view tweens but renders floating in free
+ * space next to the brim, with no solid bond. Dogfood 2026-04-23
+ * screenshot showed exactly this artifact.
  *
- * extruded along Y from `shellMinY` to `shellMaxY`.
+ * Fix: make the tongue a PENTAGON with a rectangular base embedded in
+ * piece (c-1)'s body (Z_cs ∈ [−TONGUE_BOND_DEPTH_MM, 0]) plus the
+ * original triangular apex protruding into piece c's groove (Z_cs ∈
+ * [0, +apexDepth]). The rectangular base provides real volume overlap
+ * with piece (c-1), so the union produces a single connected solid.
  *
- * Construction: build a 2D triangle in the Manifold cross-section plane
+ * Value: 2 mm. Small enough that even on a narrow brim (default 10 mm)
+ * the bond fits comfortably inside the brim's radial thickness, large
+ * enough to avoid kernel-epsilon issues on the rectangle-base boolean.
+ */
+export const SEAL_TONGUE_BOND_DEPTH_MM = 2.0;
+
+/**
+ * Build one prism Manifold in world frame for the cut plane at
+ * `angleDeg` through `xzCenter`. Cross-section lives in the (X_cs,
+ * Z_cs) plane of the cut-local frame, extruded along Y from `shellMinY`
+ * to `shellMaxY`.
+ *
+ * TRIANGLE (bondDepth === 0) — used by the GROOVE subtract:
+ *
+ *   A = (X_apex − halfWidth, 0)    base-left on cut plane
+ *   B = (X_apex + halfWidth, 0)    base-right on cut plane
+ *   C = (X_apex, +apexDepth)       apex toward +n_CCW
+ *
+ * PENTAGON (bondDepth > 0) — used by the TONGUE union:
+ *
+ *   P0 = (X_apex − halfWidth, −bondDepth)    back-bottom-left  (in piece c−1)
+ *   P1 = (X_apex + halfWidth, −bondDepth)    back-bottom-right (in piece c−1)
+ *   P2 = (X_apex + halfWidth, 0)             cut-plane right
+ *   P3 = (X_apex, +apexDepth)                apex toward +n_CCW (in piece c)
+ *   P4 = (X_apex − halfWidth, 0)             cut-plane left
+ *
+ * The rectangular base at Z_cs ∈ [−bondDepth, 0] sits INSIDE piece
+ * (c−1)'s body, creating genuine volume overlap for the union. The
+ * triangular apex at Z_cs ∈ [0, +apexDepth] protrudes into piece c's
+ * groove cavity.
+ *
+ * Construction: build a 2D polygon in the Manifold cross-section plane
  * (2D-X = X_cs, 2D-Y = −Z_cs — note the sign flip — so that the
  * subsequent −90° rotation about +X maps 2D-Y → world +Z_cs and the
  * extrusion axis 2D-Z → world +Y). Extrude by `shellYSpan` so the
@@ -360,6 +415,7 @@ function buildVChevronAtCut(
   apexDepth: number,
   shellMinY: number,
   shellMaxY: number,
+  bondDepth: number = 0,
 ): Manifold {
   const shellYSpan = shellMaxY - shellMinY;
   if (!(shellYSpan > 0) || !(halfWidth > 0) || !(apexDepth > 0)) {
@@ -368,8 +424,13 @@ function buildVChevronAtCut(
         `halfWidth=${halfWidth}, apexDepth=${apexDepth})`,
     );
   }
+  if (!(bondDepth >= 0)) {
+    throw new Error(
+      `buildVChevronAtCut: bondDepth must be ≥ 0 (got ${bondDepth})`,
+    );
+  }
 
-  // 2D triangle. The 2D-X axis corresponds to world X_cs (radial); the
+  // 2D polygon. The 2D-X axis corresponds to world X_cs (radial); the
   // 2D-Y axis is −Z_cs so that after extruding along +Z and rotating
   // −90° about +X, the 2D-Y → world +Z_cs (positive n_CCW) and the
   // extrusion axis → world +Y (vertical). Verification:
@@ -381,11 +442,24 @@ function buildVChevronAtCut(
   //
   // Apex C at (X_apex, −apexDepth) in 2D → (X_apex, *, +apexDepth)
   // after extrude + rotation. Apex points in +Z_cs as required.
-  const polygon: [number, number][] = [
-    [xApex - halfWidth, 0],
-    [xApex + halfWidth, 0],
-    [xApex, -apexDepth],
-  ];
+  //
+  // For the pentagon (bondDepth > 0) the two extra vertices at 2D-Y =
+  // +bondDepth correspond to Z_cs = −bondDepth, placing the rectangular
+  // base in piece (c−1)'s territory for a solid union bond.
+  const polygon: [number, number][] =
+    bondDepth > 0
+      ? [
+          [xApex - halfWidth, bondDepth],
+          [xApex + halfWidth, bondDepth],
+          [xApex + halfWidth, 0],
+          [xApex, -apexDepth],
+          [xApex - halfWidth, 0],
+        ]
+      : [
+          [xApex - halfWidth, 0],
+          [xApex + halfWidth, 0],
+          [xApex, -apexDepth],
+        ];
 
   let cs: CrossSection | undefined;
   let prism0: Manifold | undefined;
@@ -403,16 +477,19 @@ function buildVChevronAtCut(
     );
     // Extrude along +Z for the full shell Y span.
     prism0 = cs.extrude(shellYSpan);
-    // After extrude: X ∈ [xApex−halfWidth, xApex+halfWidth],
-    //               Y ∈ [−apexDepth, 0],
-    //               Z ∈ [0, shellYSpan].
+    // After extrude (pentagon case bondDepth > 0):
+    //     X ∈ [xApex−halfWidth, xApex+halfWidth],
+    //     Y ∈ [−apexDepth, +bondDepth],      (2D-Y = −Z_cs)
+    //     Z ∈ [0, shellYSpan].
+    // Triangle case (bondDepth = 0): Y ∈ [−apexDepth, 0] as before.
+    //
     // Rotate −90° about +X (in the global-x-y-z order that `Manifold
     // .rotate([rx,ry,rz])` uses), so (a,b,c) → (a, c, −b):
     //     X → X, Y → −Z, Z → +Y.
     // The prism becomes:
     //     X ∈ [xApex−halfWidth, xApex+halfWidth]  (radial)
     //     Y ∈ [0, shellYSpan]                      (vertical, local base)
-    //     Z ∈ [0, +apexDepth]                      (n_CCW side)
+    //     Z ∈ [−bondDepth, +apexDepth]             (n_CCW side; triangle: [0, +apexDepth])
     prismOrientedPreTranslate = prism0.rotate([-90, 0, 0]);
     // Lift to world Y so the prism's base sits at shellMinY.
     prismOriented = prismOrientedPreTranslate.translate([0, shellMinY, 0]);
@@ -765,13 +842,14 @@ export function applyTongueAndGrooveSeals(
   };
 
   // Slab half-depth: the cut-face 2D region is extruded by ±slabHalfDepth
-  // along the cut-plane normal before intersecting the V-prism. We pick
-  // the larger of grooveApexDepth (the deepest the V extends into +Z_cs)
-  // plus a small slack so co-planar clips at Z_cs = +apexDepth don't get
-  // nicked by kernel epsilon. The V-prism lives in Z_cs ∈ [0, apexDepth];
-  // a symmetric slab [−slabHalfDepth, +slabHalfDepth] with
-  // slabHalfDepth = grooveApexDepth + 1 mm fully contains the prism.
-  const slabHalfDepth = grooveApexDepth + 1;
+  // along the cut-plane normal before intersecting the V-prism. The
+  // groove (triangle) lives in Z_cs ∈ [0, +grooveApexDepth]; the tongue
+  // (pentagon) lives in Z_cs ∈ [−SEAL_TONGUE_BOND_DEPTH_MM,
+  // +tongueApexDepth]. Pick half-depth large enough to contain both
+  // (|min| and max), plus 1 mm of slack so co-planar clips at the prism
+  // extents don't get nicked by kernel epsilon.
+  const slabHalfDepth =
+    Math.max(grooveApexDepth, SEAL_TONGUE_BOND_DEPTH_MM) + 1;
 
   let done = false;
   try {
@@ -844,10 +922,14 @@ export function applyTongueAndGrooveSeals(
           groovePrism.delete();
         }
 
-        // Tongue: union the shrunk prism (clipped to the cut face)
-        // onto piece on −n_CCW side. The prism's apex sticks into
-        // +n_CCW territory (which, for the mating piece, is foreign
-        // territory — exactly where we want the tongue to extend).
+        // Tongue: union the shrunk PENTAGON (clipped to the cut face)
+        // onto piece on −n_CCW side. The pentagon's triangular apex
+        // sticks into +n_CCW territory (foreign to the mating piece —
+        // exactly where we want the tongue to extend). The rectangular
+        // bond base at Z_cs ∈ [−SEAL_TONGUE_BOND_DEPTH_MM, 0] sits
+        // INSIDE the mating piece so the union has real volume overlap
+        // and produces a single connected solid (see PR-117 follow-up
+        // comment above for the floating-tongue artifact this fixes).
         const tongueRaw = buildVChevronAtCut(
           toplevel,
           angleDeg,
@@ -857,6 +939,7 @@ export function applyTongueAndGrooveSeals(
           tongueApexDepth,
           shellY.minY,
           shellY.maxY,
+          SEAL_TONGUE_BOND_DEPTH_MM,
         );
         let tonguePrism: Manifold;
         try {
