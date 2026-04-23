@@ -614,3 +614,67 @@ Phase 3c wave 1 + 2 delivered: the user can Open STL, orient, tweak parameters, 
 3. **[feat] STL export of generated parts** (`agent:app-shell` + `agent:geometry`) — Phase 3f. Native save-dialog, multi-file export, canonicalised binary STLs.
 
 Awaiting user go-ahead.
+
+---
+
+## 2026-04-20 → 2026-04-23 — v1 feature complete (rigid-shell + silicone-glove)
+
+Phases 3d–3j collapsed into a single arc. Condensed log; commit history in git is authoritative.
+
+### Strategy redirect (2026-04-20)
+
+Dogfood of the two-halves-in-box build didn't match the user's mental model of how they actually hand-make molds. User supplied 7 annotated images + clarification messages. New spec (see [CLAUDE.md](../CLAUDE.md) v1 scope):
+
+- Silicone is ONE surface-conforming piece around the master.
+- Printed shell is ALSO surface-conforming (a second offset around the silicone), NOT a rectangular box.
+- Shell sits on a 2D-footprint base slab with a 45° interlock.
+- Shell is sliced radially into 2/3/4 pieces; each piece carries a brim flange.
+- Sprue, vents, and horizontal silicone split removed.
+
+User selected "Waves A + C only" first, then greenlit D/E/F after Wave C landed. Plan [`you-are-the-lead-transient-pearl.md`](../../../../Users/Wiz/.claude/plans/you-are-the-lead-transient-pearl.md).
+
+### Shipped features (PRs in order)
+
+| Wave | PR(s) | What |
+|---|---|---|
+| A | #69/#70 | strip sprue/vents/keys/silicone-split + rename thickness params |
+| C | #72/#73 | surface-conforming print shell |
+| perf | #75 | SDF cache + far-field skip |
+| 3f-adjacent | #79/#80 | dimensions panel (scale/resize before Generate) |
+| D | #82/#83 | base slab with step-pocket interlock |
+| E+F | #84/#85 | radial slicing + brim flanges |
+| polish | #87/#88 | progress banner + open-top silicone + base-slab visibility |
+| fix | #89/#90 | brims don't intersect silicone cavity / each other |
+| export | #91/#92 | save printable parts as binary STL |
+| polish | #94/#95 | open shell pour channel + brim tightening + face-pick drag threshold |
+| polish | #97/#98 | banner pre-freeze + face-pick + slab regression + brim bond 2x |
+| docs | #101 | mesh-operations SKILL.md perf playbook |
+| brim | #100 | taper brim at shell junction |
+| fix | #99 | resin reflects viewTransform + degenerate-slab warning |
+| perf | #103 | adaptive edgeLength for large masters |
+| perf | #104 | generateMold off-thread via web worker |
+| fix | #105 | face-pick pure-geometric canvas gate |
+| polish | #106 | smooth shading + full-height brim flange |
+| cut-planes | #108, #109 | plumb cut-rotation + center-offset through slicer/brim |
+| cut-planes UI | (4eb3efc) | preview + drag gizmo |
+| brim conformal | #110 | flange follows shell contour at cut plane |
+| brim fix | #111 | raw shell-wall slice for bond region (fix top/bottom overhang) |
+| brim fix | #112 | drop bond-region extrusion (fix interior shelves) |
+| perf | #113 | cache cut-plane slices — mini-figurine 15 s → 7 s |
+| docs | #114 | CLAUDE.md v1-scope rewrite |
+| seal v1 | #115 | vertical top tube + tongue-and-groove seal (mid-height Y-step) |
+| seal v2 | #116 | replace Y-step with full-height V-chevron seal |
+| seal v3 | #117 | clip V-chevron to cut-face profile |
+| seal v4 | #118 | pentagon tongue with bond-base (eliminate floating seal) |
+
+All admin-bypass-merged by lead after qa approval + green CI (full-merge-autonomy policy).
+
+### Open / pending
+
+- **Dogfood pending:** user needs to run `pnpm dev`, drop `mini-figurine.stl`, commit a face, Generate, and confirm the pentagon tongue from #118 is bonded into its parent shell piece (no floating V beyond the brim).
+- **Deferred until after first physical print:** registration keys on brim interface; draft-angle wire-through (parameter slider exists but doesn't affect geometry yet); camera reframe after the new shell shape ships.
+- **Known CI flake:** visual regression on SwiftShader occasionally diffs ~0.02 pixel ratio from SwiftShader non-determinism — accepted; goldens regen via one-shot workflow when geometry genuinely changes.
+
+### Resume pointer
+
+Fresh-session kickoff prompt: **"resume mold program"**. Read [CLAUDE.md](../CLAUDE.md), this section, and memory file [resume_pointer_2026-04-23.md](../../../../Users/Wiz/.claude/projects/f--CLAUDE-CODE---AI-Silicone-mold-App/memory/resume_pointer_2026-04-23.md) — those three give the full picture.
